@@ -1,0 +1,6 @@
+providers:
+  - name: primary
+    protocol: openai
+    model: example-model
+    base_url: https://example.invalid/v1
+    api_key: MODEL_API_KEY
