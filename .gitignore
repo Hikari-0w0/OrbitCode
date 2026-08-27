@@ -32,6 +32,20 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+*.code-workspace
+
+# 本地 Agent、提示词与开发规划
+/AGENTS.md
+/CLAUDE.md
+/.agents/
+/.agent/
+/.codex/
+/.claude/
+/.cursor/
+/.cursorrules
+/prompts/
+/plans/
+/docs/specs/
 
 # 日志
 *.log
