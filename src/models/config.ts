@@ -39,19 +39,24 @@ export class ConfigurationError extends Error {
   }
 }
 
-type LoadProviderConfigOptions = {
+type LoadProviderConfigsOptions = {
   readonly filePath: string;
-  readonly providerName?: string;
-  readonly environment: Environment;
   readonly readTextFile?: (filePath: string) => Promise<string>;
 };
 
-export async function loadProviderConfig({
+type ResolveProviderConfigOptions = {
+  readonly providers: readonly ProviderConfig[];
+  readonly providerName?: string;
+  readonly environment: Environment;
+};
+
+type LoadProviderConfigOptions = LoadProviderConfigsOptions &
+  Omit<ResolveProviderConfigOptions, "providers">;
+
+export async function loadProviderConfigs({
   filePath,
-  providerName,
-  environment,
   readTextFile = (target) => readFile(target, "utf8"),
-}: LoadProviderConfigOptions): Promise<ResolvedProviderConfig> {
+}: LoadProviderConfigsOptions): Promise<readonly ProviderConfig[]> {
   let source: string;
   try {
     source = await readTextFile(filePath);
@@ -78,7 +83,14 @@ export async function loadProviderConfig({
     );
   }
 
-  const providers = validateRoot(rawConfig);
+  return validateRoot(rawConfig);
+}
+
+export function resolveProviderConfig({
+  providers,
+  providerName,
+  environment,
+}: ResolveProviderConfigOptions): ResolvedProviderConfig {
   const selected = selectProvider(providers, providerName);
   const apiKey = environment[selected.apiKeyEnvironmentVariable];
 
@@ -90,6 +102,16 @@ export async function loadProviderConfig({
   }
 
   return { ...selected, apiKey };
+}
+
+export async function loadProviderConfig({
+  filePath,
+  providerName,
+  environment,
+  readTextFile,
+}: LoadProviderConfigOptions): Promise<ResolvedProviderConfig> {
+  const providers = await loadProviderConfigs({ filePath, readTextFile });
+  return resolveProviderConfig({ providers, providerName, environment });
 }
 
 function validateRoot(value: unknown): readonly ProviderConfig[] {

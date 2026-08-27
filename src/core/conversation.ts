@@ -22,10 +22,15 @@ export interface ConversationSession {
 }
 
 export class InMemoryConversationSession implements ConversationSession {
-  private history: ConversationMessage[] = [];
+  private history: ConversationMessage[];
   private state: "idle" | "streaming" = "idle";
 
-  constructor(private readonly provider: ChatProvider) {}
+  constructor(
+    private readonly provider: ChatProvider,
+    initialHistory: readonly ConversationMessage[] = [],
+  ) {
+    this.history = initialHistory.map((message) => ({ ...message }));
+  }
 
   getHistory(): readonly ConversationMessage[] {
     return this.history.map((message) => ({ ...message }));

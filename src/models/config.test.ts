@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   ConfigurationError,
   loadProviderConfig,
+  loadProviderConfigs,
+  resolveProviderConfig,
 } from "@/models/config";
 
 const VALID_PROVIDER = [
@@ -41,6 +43,38 @@ test("加载单个合法配置并从环境解析凭据", async () => {
     apiKeyEnvironmentVariable: "ORBITCODE_API_KEY",
     apiKey: "test-secret",
   });
+});
+
+test("可先列举无密钥配置，再按名称安全解析凭据", async () => {
+  const source = `${VALID_PROVIDER}\n  - name: secondary\n    protocol: openai\n    model: second-model\n    base_url: http://127.0.0.1:3001/v1/\n    api_key: SECONDARY_KEY`;
+  const providers = await loadProviderConfigs({
+    filePath: "/virtual/orbitcode.yaml",
+    readTextFile: async () => source,
+  });
+
+  assert.deepEqual(
+    providers.map(({ name, model, baseUrl }) => ({ name, model, baseUrl })),
+    [
+      {
+        name: "primary",
+        model: "example-model",
+        baseUrl: "https://example.invalid/v1",
+      },
+      {
+        name: "secondary",
+        model: "second-model",
+        baseUrl: "http://127.0.0.1:3001/v1",
+      },
+    ],
+  );
+  assert.equal("apiKey" in providers[0], false);
+
+  const resolved = resolveProviderConfig({
+    providers,
+    providerName: "secondary",
+    environment: { SECONDARY_KEY: "resolved-secret" },
+  });
+  assert.equal(resolved.apiKey, "resolved-secret");
 });
 
 test("多个配置必须按名称选择", async () => {

@@ -45,13 +45,25 @@ npm run cli -- --config orbitcode.yaml --provider primary
 
 本阶段仅支持纯文本对话，不包含 Tool Calling、文件操作、命令执行、代码编辑、会话持久化或 Agent 循环。
 
-## Web 项目基线
+## Web 流式对话
 
 ```bash
 npm run dev
 ```
 
-浏览器访问 [http://localhost:3000](http://localhost:3000)。
+浏览器访问 [http://localhost:3000](http://localhost:3000)。Web 与 CLI 共用项目根目录的 `.env` 和 `orbitcode.yaml`，无需在页面中重复配置密钥或服务地址。
+
+页面支持：
+
+- OpenAI 兼容模型的 SSE 增量回复
+- 当前页面生命周期内的多轮上下文
+- 多 Provider 选择（切换时清空当前历史）
+- 停止生成、失败后继续和清空会话
+- 桌面与移动端响应式布局
+
+刷新页面会清空对话历史。本阶段不包含数据库或会话持久化。
+
+> Web API 当前没有身份认证，只适合在本机或可信网络中使用。不要将开发服务器直接暴露到不受信任的公网，否则他人可能消耗本地配置的模型额度。
 
 ## 可用命令
 
@@ -68,7 +80,7 @@ npm run check     # 依次执行 lint、类型检查和生产构建
 
 ## 环境变量
 
-复制 `.env.example` 为 `.env`，只填写本地 API Key；模型名和服务地址写在未入库的 `orbitcode.yaml`。任何 API Key 都不得提交到 Git、写入 YAML 或作为命令行参数传递。
+复制 `.env.example` 为 `.env`，只填写本地 API Key；模型名和服务地址写在未入库的 `orbitcode.yaml`。CLI 与 Web Route Handler 都只在服务端读取这些文件。任何 API Key 都不得提交到 Git、写入 YAML、作为命令行参数传递或发送到浏览器。
 
 ## 下一阶段
 

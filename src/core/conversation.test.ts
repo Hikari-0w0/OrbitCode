@@ -107,6 +107,31 @@ test("历史快照不能修改会话内部状态", async () => {
   assert.equal(session.getHistory().length, 2);
 });
 
+test("可从已提交历史开始新的无状态 Web 轮次", async () => {
+  const requests: ConversationMessage[][] = [];
+  const session = new InMemoryConversationSession(
+    {
+      async *stream(messages) {
+        requests.push(messages.map((message) => ({ ...message })));
+        yield { type: "text-delta", text: "继续回答" };
+        yield { type: "done" };
+      },
+    },
+    [
+      { role: "user", content: "第一问" },
+      { role: "assistant", content: "第一答" },
+    ],
+  );
+
+  await collect(session.streamTurn("第二问", new AbortController().signal));
+
+  assert.deepEqual(requests[0], [
+    { role: "user", content: "第一问" },
+    { role: "assistant", content: "第一答" },
+    { role: "user", content: "第二问" },
+  ]);
+});
+
 test("Provider 失败或缺少完成标记时回滚整轮", async () => {
   const provider = new ScriptedProvider(
     async function* () {
