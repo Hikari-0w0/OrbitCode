@@ -81,8 +81,20 @@ test("拒绝超长内容和过多历史", () => {
 test("Web SSE 事件按网络分块往返解析", async () => {
   const expected: readonly WebChatEvent[] = [
     { type: "text-delta", text: "Orbit" },
+    { type: "tool-started", callId: "call_1", name: "read_file" },
+    {
+      type: "tool-completed",
+      callId: "call_1",
+      name: "read_file",
+      result: {
+        ok: true,
+        output: { path: "README.md", content: "OrbitCode" },
+        sideEffect: "none",
+        meta: { durationMs: 3, truncated: false, truncatedFields: [] },
+      },
+    },
     { type: "text-delta", text: "Code" },
-    { type: "completed" },
+    { type: "completed", content: "Code" },
   ];
   const bytes = Buffer.concat(expected.map((event) => encodeWebChatEvent(event)));
   const chunks = [bytes.subarray(0, 9), bytes.subarray(9, 23), bytes.subarray(23)];
@@ -128,6 +140,30 @@ test("拒绝非法 Web SSE JSON 与事件结构", async () => {
     collect(
       parseWebChatEvents(
         asAsync([Buffer.from('data: {"type":"completed","extra":true}\n\n')]),
+      ),
+    ),
+    /无效的流式事件/,
+  );
+  await assert.rejects(
+    collect(
+      parseWebChatEvents(
+        asAsync([
+          Buffer.from(
+            'data: {"type":"tool-started","callId":"bad id","name":"read_file"}\n\n',
+          ),
+        ]),
+      ),
+    ),
+    /无效的流式事件/,
+  );
+  await assert.rejects(
+    collect(
+      parseWebChatEvents(
+        asAsync([
+          Buffer.from(
+            'data: {"type":"failed","message":"失败"}\n\n',
+          ),
+        ]),
       ),
     ),
     /无效的流式事件/,

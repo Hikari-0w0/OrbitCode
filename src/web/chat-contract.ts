@@ -1,5 +1,15 @@
-import type { ConversationMessage } from "@/models/provider";
+import type { PlainConversationMessage } from "@/models/provider";
 import { parseServerSentEvents, SseError } from "@/models/sse";
+import type {
+  JsonValue,
+  SchemaIssue,
+  SideEffectState,
+  ToolErrorKind,
+  ToolExecutionError,
+  ToolExecutionResult,
+  ToolName,
+  ToolResultMeta,
+} from "@/tools/types";
 
 export const MAX_WEB_CHAT_BODY_BYTES = 256 * 1024;
 export const MAX_WEB_CHAT_MESSAGES = 50;
@@ -7,13 +17,28 @@ export const MAX_WEB_CHAT_MESSAGE_LENGTH = 20_000;
 
 export type WebChatRequest = {
   readonly provider: string;
-  readonly messages: readonly ConversationMessage[];
+  readonly messages: readonly PlainConversationMessage[];
 };
 
 export type WebChatEvent =
   | { readonly type: "text-delta"; readonly text: string }
-  | { readonly type: "completed" }
-  | { readonly type: "failed"; readonly message: string };
+  | {
+      readonly type: "tool-started";
+      readonly callId: string;
+      readonly name: ToolName;
+    }
+  | {
+      readonly type: "tool-completed";
+      readonly callId: string;
+      readonly name: ToolName;
+      readonly result: ToolExecutionResult;
+    }
+  | { readonly type: "completed"; readonly content: string }
+  | {
+      readonly type: "failed";
+      readonly message: string;
+      readonly sideEffect: SideEffectState;
+    };
 
 export type ProviderSummary = {
   readonly name: string;
@@ -155,7 +180,7 @@ export async function* readWebStream(
   }
 }
 
-function parseMessage(value: unknown, index: number): ConversationMessage {
+function parseMessage(value: unknown, index: number): PlainConversationMessage {
   if (!isRecord(value) || !hasExactFields(value, ["role", "content"])) {
     throw new WebChatContractError(`messages[${index}] 格式无效。`);
   }
@@ -180,8 +205,12 @@ function parseWebChatEvent(value: unknown): WebChatEvent {
   if (!isRecord(value) || typeof value.type !== "string") {
     throw new WebChatContractError("服务端返回了无效的流式事件。");
   }
-  if (value.type === "completed" && hasExactFields(value, ["type"])) {
-    return { type: "completed" };
+  if (
+    value.type === "completed" &&
+    hasExactFields(value, ["type", "content"]) &&
+    typeof value.content === "string"
+  ) {
+    return { type: "completed", content: value.content };
   }
   if (
     value.type === "text-delta" &&
@@ -192,13 +221,177 @@ function parseWebChatEvent(value: unknown): WebChatEvent {
   }
   if (
     value.type === "failed" &&
-    hasExactFields(value, ["type", "message"]) &&
+    hasExactFields(value, ["type", "message", "sideEffect"]) &&
     typeof value.message === "string" &&
-    value.message.length > 0
+    value.message.length > 0 &&
+    isSideEffectState(value.sideEffect)
   ) {
-    return { type: "failed", message: value.message };
+    return {
+      type: "failed",
+      message: value.message,
+      sideEffect: value.sideEffect,
+    };
+  }
+  if (
+    value.type === "tool-started" &&
+    hasExactFields(value, ["type", "callId", "name"]) &&
+    isSafeCallId(value.callId) &&
+    isToolName(value.name)
+  ) {
+    return { type: "tool-started", callId: value.callId, name: value.name };
+  }
+  if (
+    value.type === "tool-completed" &&
+    hasExactFields(value, ["type", "callId", "name", "result"]) &&
+    isSafeCallId(value.callId) &&
+    isToolName(value.name)
+  ) {
+    return {
+      type: "tool-completed",
+      callId: value.callId,
+      name: value.name,
+      result: parseToolResult(value.result),
+    };
   }
   throw new WebChatContractError("服务端返回了无效的流式事件。");
+}
+
+function parseToolResult(value: unknown): ToolExecutionResult {
+  if (!isRecord(value) || typeof value.ok !== "boolean") {
+    throw new WebChatContractError("服务端返回了无效的工具结果。");
+  }
+  const sideEffect = value.sideEffect;
+  if (!isSideEffectState(sideEffect)) {
+    throw new WebChatContractError("服务端返回了无效的工具结果。");
+  }
+  const meta = parseToolMeta(value.meta);
+  if (value.ok) {
+    if (!hasExactFields(value, ["ok", "output", "sideEffect", "meta"]) || !isJsonValue(value.output)) {
+      throw new WebChatContractError("服务端返回了无效的工具结果。");
+    }
+    return { ok: true, output: value.output, sideEffect, meta };
+  }
+  const allowed = value.output === undefined
+    ? ["ok", "error", "sideEffect", "meta"]
+    : ["ok", "error", "output", "sideEffect", "meta"];
+  if (!hasExactFields(value, allowed)) {
+    throw new WebChatContractError("服务端返回了无效的工具结果。");
+  }
+  const error = parseToolError(value.error);
+  if (value.output !== undefined && !isJsonValue(value.output)) {
+    throw new WebChatContractError("服务端返回了无效的工具结果。");
+  }
+  return value.output === undefined
+    ? { ok: false, error, sideEffect, meta }
+    : { ok: false, error, output: value.output, sideEffect, meta };
+}
+
+function parseToolMeta(value: unknown): ToolResultMeta {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, ["durationMs", "truncated", "truncatedFields"]) ||
+    typeof value.durationMs !== "number" ||
+    !Number.isFinite(value.durationMs) ||
+    value.durationMs < 0 ||
+    typeof value.truncated !== "boolean" ||
+    !Array.isArray(value.truncatedFields) ||
+    !value.truncatedFields.every((entry) => typeof entry === "string")
+  ) {
+    throw new WebChatContractError("服务端返回了无效的工具结果元数据。");
+  }
+  return {
+    durationMs: value.durationMs,
+    truncated: value.truncated,
+    truncatedFields: value.truncatedFields,
+  };
+}
+
+function parseToolError(value: unknown): ToolExecutionError {
+  if (!isRecord(value)) {
+    throw new WebChatContractError("服务端返回了无效的工具错误。");
+  }
+  const allowed = value.issues === undefined
+    ? ["kind", "message", "retryable"]
+    : ["kind", "message", "retryable", "issues"];
+  if (
+    !hasExactFields(value, allowed) ||
+    !isToolErrorKind(value.kind) ||
+    typeof value.message !== "string" ||
+    value.message.length === 0 ||
+    typeof value.retryable !== "boolean"
+  ) {
+    throw new WebChatContractError("服务端返回了无效的工具错误。");
+  }
+  let issues: readonly SchemaIssue[] | undefined;
+  if (value.issues !== undefined) {
+    if (!Array.isArray(value.issues) || value.issues.length > 20) {
+      throw new WebChatContractError("服务端返回了无效的工具错误。");
+    }
+    issues = value.issues.map((entry) => {
+      if (
+        !isRecord(entry) ||
+        !hasExactFields(entry, ["path", "message"]) ||
+        typeof entry.path !== "string" ||
+        typeof entry.message !== "string"
+      ) {
+        throw new WebChatContractError("服务端返回了无效的工具错误。");
+      }
+      return { path: entry.path, message: entry.message };
+    });
+  }
+  return { kind: value.kind, message: value.message, retryable: value.retryable, issues };
+}
+
+function isJsonValue(value: unknown, depth = 0): value is JsonValue {
+  if (depth > 20) return false;
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every((entry) => isJsonValue(entry, depth + 1));
+  return (
+    isRecord(value) &&
+    Object.keys(value).length <= 2_000 &&
+    Object.values(value).every((entry) => isJsonValue(entry, depth + 1))
+  );
+}
+
+function isSafeCallId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(value);
+}
+
+function isSideEffectState(value: unknown): value is SideEffectState {
+  return value === "none" || value === "possible" || value === "applied";
+}
+
+const TOOL_NAMES = new Set<ToolName>([
+  "read_file",
+  "write_file",
+  "edit_file",
+  "run_command",
+  "find_files",
+  "search_code",
+]);
+
+function isToolName(value: unknown): value is ToolName {
+  return typeof value === "string" && TOOL_NAMES.has(value as ToolName);
+}
+
+const TOOL_ERROR_KINDS = new Set<ToolErrorKind>([
+  "invalid-arguments",
+  "not-found",
+  "permission-denied",
+  "protected-path",
+  "conflict",
+  "unsupported-content",
+  "limit-exceeded",
+  "sandbox-unavailable",
+  "command-failed",
+  "timeout",
+  "cancelled",
+  "execution-failed",
+]);
+
+function isToolErrorKind(value: unknown): value is ToolErrorKind {
+  return typeof value === "string" && TOOL_ERROR_KINDS.has(value as ToolErrorKind);
 }
 
 function hasExactFields(

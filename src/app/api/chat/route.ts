@@ -1,27 +1,24 @@
-import {
-  InMemoryConversationSession,
-  type TurnEvent,
-} from "@/core/conversation";
-import {
-  ConfigurationError,
-  type ResolvedProviderConfig,
-} from "@/models/config";
+import { SingleToolAgent } from "@/core/single-tool-agent";
+import { ConfigurationError } from "@/models/config";
 import { createChatProvider } from "@/models/provider-factory";
-import type { ConversationMessage } from "@/models/provider";
+import { createDefaultToolRegistry } from "@/tools/default-registry";
+import { MacOsSeatbeltCommandSandbox } from "@/tools/macos-seatbelt-sandbox";
+import { createWorkspaceBoundary } from "@/tools/workspace";
 import {
-  encodeWebChatEvent,
   MAX_WEB_CHAT_BODY_BYTES,
   parseWebChatRequest,
   WebChatContractError,
   type WebApiError,
-  type WebChatEvent,
 } from "@/web/chat-contract";
+import { streamAgentResponse } from "@/web/chat-handler";
 import {
   loadWebProviderContext,
   resolveWebProvider,
 } from "@/web/server-config";
 
 export const dynamic = "force-dynamic";
+
+const commandSandbox = new MacOsSeatbeltCommandSandbox();
 
 export async function POST(request: Request): Promise<Response> {
   try {
@@ -34,83 +31,16 @@ export async function POST(request: Request): Promise<Response> {
     if (!currentMessage || currentMessage.role !== "user") {
       throw new WebChatContractError("对话请求必须以用户消息结束。");
     }
-
-    const history = chatRequest.messages.slice(0, -1);
-    return streamChatResponse(request, config, history, currentMessage.content);
+    const workspace = await createWorkspaceBoundary(process.cwd());
+    const agent = new SingleToolAgent(
+      createChatProvider(config),
+      createDefaultToolRegistry(commandSandbox),
+      workspace,
+      chatRequest.messages.slice(0, -1),
+    );
+    return streamAgentResponse({ request, agent, input: currentMessage.content });
   } catch (error) {
     return startupErrorResponse(error);
-  }
-}
-
-function streamChatResponse(
-  request: Request,
-  config: ResolvedProviderConfig,
-  history: readonly ConversationMessage[],
-  input: string,
-): Response {
-  const abortController = new AbortController();
-  let consumerClosed = false;
-  const abort = (): void => {
-    consumerClosed = true;
-    abortController.abort();
-  };
-  request.signal.addEventListener("abort", abort, { once: true });
-
-  const session = new InMemoryConversationSession(
-    createChatProvider(config),
-    history,
-  );
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      try {
-        for await (const event of session.streamTurn(
-          input,
-          abortController.signal,
-        )) {
-          if (consumerClosed) break;
-          const webEvent = toWebEvent(event);
-          if (webEvent) controller.enqueue(encodeWebChatEvent(webEvent));
-        }
-      } catch {
-        if (!consumerClosed) {
-          controller.enqueue(
-            encodeWebChatEvent({
-              type: "failed",
-              message: "模型请求发生未知错误，请重试。",
-            }),
-          );
-        }
-      } finally {
-        request.signal.removeEventListener("abort", abort);
-        if (!consumerClosed) controller.close();
-      }
-    },
-    cancel() {
-      abort();
-      request.signal.removeEventListener("abort", abort);
-    },
-  });
-
-  return new Response(stream, {
-    headers: {
-      "cache-control": "no-cache, no-transform",
-      connection: "keep-alive",
-      "content-type": "text/event-stream; charset=utf-8",
-      "x-accel-buffering": "no",
-    },
-  });
-}
-
-function toWebEvent(event: TurnEvent): WebChatEvent | undefined {
-  switch (event.type) {
-    case "text-delta":
-      return { type: "text-delta", text: event.text };
-    case "completed":
-      return { type: "completed" };
-    case "failed":
-      return { type: "failed", message: event.error.message };
-    case "cancelled":
-      return undefined;
   }
 }
 
@@ -125,9 +55,7 @@ function assertRequestSize(request: Request): void {
 }
 
 async function readJsonBody(request: Request): Promise<unknown> {
-  if (!request.body) {
-    throw new WebChatContractError("对话请求体不能为空。");
-  }
+  if (!request.body) throw new WebChatContractError("对话请求体不能为空。");
   const reader = request.body.getReader();
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let source = "";
@@ -150,7 +78,6 @@ async function readJsonBody(request: Request): Promise<unknown> {
   } finally {
     reader.releaseLock();
   }
-
   try {
     return JSON.parse(source) as unknown;
   } catch {

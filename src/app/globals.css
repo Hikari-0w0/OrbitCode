@@ -137,6 +137,21 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .messageDetail--failed { background: rgb(241 140 131 / 8%); color: var(--danger); }
 .messageDetail--cancelled { background: rgb(230 163 111 / 8%); color: var(--orange); }
 .streamingCursor { display: inline-block; width: 7px; height: 15px; margin: 9px 0 0 2px; vertical-align: -2px; background: var(--green); animation: blink 1s step-end infinite; }
+.toolExecutionList { display: grid; gap: 8px; margin-top: 12px; }
+.toolCard { overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: rgb(255 255 255 / 1.5%); }
+.toolCardHeader { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 36px; padding: 0 10px; }
+.toolCardHeader code { overflow: hidden; color: var(--text-soft); font: 600 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.toolCardHeader > span:last-child { color: var(--text-dim); font: 500 9px/1 ui-monospace, monospace; }
+.toolStateDot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-dim); }
+.toolCard--running .toolStateDot { background: var(--green); box-shadow: 0 0 8px rgb(168 240 184 / 55%); animation: pulse 1.2s ease-in-out infinite; }
+.toolCard--succeeded { border-color: rgb(168 240 184 / 18%); }
+.toolCard--succeeded .toolStateDot { background: var(--green); }
+.toolCard--failed, .toolCard--timed-out { border-color: rgb(241 140 131 / 22%); }
+.toolCard--failed .toolStateDot, .toolCard--timed-out .toolStateDot { background: var(--danger); }
+.toolCard--cancelled .toolStateDot { background: var(--orange); }
+.toolCardDetails { border-top: 1px solid var(--line-soft); }
+.toolCardDetails summary { padding: 8px 10px; color: var(--text-dim); cursor: pointer; font-size: 9px; }
+.toolCardDetails pre { max-height: 210px; margin: 0; overflow: auto; padding: 0 10px 10px; color: #aeb8b0; font: 500 9px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .emptyConversation { display: flex; width: min(740px, 100%); min-height: 100%; margin: 0 auto; flex-direction: column; justify-content: center; padding: 48px clamp(22px, 5vw, 64px); }
 .emptyMark { position: relative; width: 62px; height: 62px; margin-bottom: 28px; }

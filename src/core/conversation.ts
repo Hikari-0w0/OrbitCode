@@ -55,7 +55,10 @@ export class InMemoryConversationSession implements ConversationSession {
     let completed = false;
 
     try {
-      for await (const event of this.provider.stream(requestMessages, { signal })) {
+      for await (const event of this.provider.stream(requestMessages, {
+        signal,
+        toolChoice: "none",
+      })) {
         if (signal.aborted) {
           throw new ProviderError("cancelled", "模型请求已取消。");
         }
@@ -68,8 +71,15 @@ export class InMemoryConversationSession implements ConversationSession {
         }
 
         if (event.type === "done") {
+          if (event.finishReason !== "stop") {
+            throw new ProviderError("protocol", "纯文本会话收到了工具完成响应。");
+          }
           completed = true;
           continue;
+        }
+
+        if (event.type === "tool-call") {
+          throw new ProviderError("protocol", "纯文本会话收到了工具调用。");
         }
 
         assistantContent += event.text;

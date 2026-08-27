@@ -80,7 +80,9 @@ export function ChatComposer({
           )}
         </div>
       </div>
-      <p className="privacyNote">本地会话 · API Key 仅保留在服务端</p>
+      <p className="privacyNote">
+        本地工具仅在授权工作目录运行 · API Key 仅保留在服务端
+      </p>
     </div>
   );
 }
