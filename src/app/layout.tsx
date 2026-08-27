@@ -3,8 +3,8 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "OrbitCode",
-  description: "一个使用 TypeScript 自主实现的编程智能体",
+  title: "OrbitCode · Local AI Workspace",
+  description: "本地优先的流式 AI 对话工作区",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
