@@ -24,7 +24,10 @@ class ScriptedProvider implements ChatProvider {
 
   stream(
     messages: readonly ConversationMessage[],
-    options: { readonly signal: AbortSignal },
+    options: {
+      readonly signal: AbortSignal;
+      readonly toolChoice: "auto" | "none";
+    },
   ): AsyncIterable<ModelStreamEvent> {
     this.requests.push(messages.map((message) => ({ ...message })));
     const script = this.scripts.shift();
@@ -55,9 +58,13 @@ test("完成两轮后按顺序提交完整历史", async () => {
       events(
         { type: "text-delta", text: "你" },
         { type: "text-delta", text: "好" },
-        { type: "done" },
+        { type: "done", finishReason: "stop" },
       ),
-    () => events({ type: "text-delta", text: "继续" }, { type: "done" }),
+    () =>
+      events(
+        { type: "text-delta", text: "继续" },
+        { type: "done", finishReason: "stop" },
+      ),
   );
   const session = new InMemoryConversationSession(provider);
 
@@ -95,7 +102,11 @@ test("完成两轮后按顺序提交完整历史", async () => {
 
 test("历史快照不能修改会话内部状态", async () => {
   const provider = new ScriptedProvider(
-    () => events({ type: "text-delta", text: "答" }, { type: "done" }),
+    () =>
+      events(
+        { type: "text-delta", text: "答" },
+        { type: "done", finishReason: "stop" },
+      ),
   );
   const session = new InMemoryConversationSession(provider);
   await collect(session.streamTurn("问", new AbortController().signal));
@@ -114,7 +125,7 @@ test("可从已提交历史开始新的无状态 Web 轮次", async () => {
       async *stream(messages) {
         requests.push(messages.map((message) => ({ ...message })));
         yield { type: "text-delta", text: "继续回答" };
-        yield { type: "done" };
+        yield { type: "done", finishReason: "stop" };
       },
     },
     [
@@ -163,10 +174,14 @@ test("Provider 失败或缺少完成标记时回滚整轮", async () => {
 
 test("重复完成或完成后数据被视为协议失败", async () => {
   const provider = new ScriptedProvider(
-    () => events({ type: "done" }, { type: "done" }),
     () =>
       events(
-        { type: "done" },
+        { type: "done", finishReason: "stop" },
+        { type: "done", finishReason: "stop" },
+      ),
+    () =>
+      events(
+        { type: "done", finishReason: "stop" },
         { type: "text-delta", text: "额外数据" },
       ),
   );
@@ -193,7 +208,11 @@ test("取消轮次后可以继续完成下一轮", async () => {
       });
       throw new ProviderError("cancelled", "已取消");
     },
-    () => events({ type: "text-delta", text: "成功" }, { type: "done" }),
+    () =>
+      events(
+        { type: "text-delta", text: "成功" },
+        { type: "done", finishReason: "stop" },
+      ),
   );
   const session = new InMemoryConversationSession(provider);
   const controller = new AbortController();
@@ -222,7 +241,7 @@ test("拒绝空白输入和并发轮次", async () => {
   const provider = new ScriptedProvider(async function* () {
     yield { type: "text-delta", text: "等待" };
     await gate;
-    yield { type: "done" };
+    yield { type: "done", finishReason: "stop" };
   });
   const session = new InMemoryConversationSession(provider);
 

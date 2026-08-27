@@ -1,0 +1,136 @@
+import assert from "node:assert/strict";
+import {
+  chmod,
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import { createWorkspaceBoundary, WorkspaceError } from "@/tools/workspace";
+
+test("工作区读取 UTF-8 并拒绝越界、敏感路径、目录和符号链接", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-workspace-"));
+  const outside = await mkdtemp(path.join(tmpdir(), "orbitcode-outside-"));
+  try {
+    await mkdir(path.join(root, "src"));
+    await writeFile(path.join(root, "src", "main.ts"), "你好\n", "utf8");
+    await writeFile(path.join(root, "large.txt"), "x".repeat(101), "utf8");
+    await writeFile(path.join(root, "binary.dat"), Buffer.from([0xff, 0xfe]));
+    await writeFile(path.join(root, ".env"), "SECRET=sentinel\n", "utf8");
+    await writeFile(path.join(outside, "outside.txt"), "outside", "utf8");
+    await symlink(path.join(outside, "outside.txt"), path.join(root, "link.txt"));
+    const workspace = await createWorkspaceBoundary(root);
+
+    const snapshot = await workspace.readTextFile("src/main.ts", { maxBytes: 100 });
+    assert.equal(snapshot.content, "你好\n");
+    assert.equal(snapshot.path.relativePath, "src/main.ts");
+    for (const target of ["../outside.txt", path.join(outside, "outside.txt"), ".env", "src", "link.txt"]) {
+      await assert.rejects(workspace.readTextFile(target, { maxBytes: 100 }), WorkspaceError);
+    }
+    await assert.rejects(
+      workspace.readTextFile("large.txt", { maxBytes: 100 }),
+      (error: unknown) => error instanceof WorkspaceError && error.kind === "limit-exceeded",
+    );
+    await assert.rejects(
+      workspace.readTextFile("binary.dat", { maxBytes: 100 }),
+      (error: unknown) => error instanceof WorkspaceError && error.kind === "unsupported-content",
+    );
+    for (const target of ["bad\0path", "src\\main.ts", "src/../src/main.ts"]) {
+      await assert.rejects(workspace.resolveExistingFile(target), WorkspaceError);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("工作区原子创建、覆盖并拒绝快照冲突", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-write-"));
+  try {
+    const workspace = await createWorkspaceBoundary(root);
+    const created = await workspace.resolveWriteTarget("new.txt");
+    await workspace.atomicWrite(created, "first");
+    assert.equal(await readFile(path.join(root, "new.txt"), "utf8"), "first");
+
+    const snapshot = await workspace.readTextFile("new.txt", { maxBytes: 100 });
+    await workspace.replaceSnapshot(snapshot, "second");
+    assert.equal(await readFile(path.join(root, "new.txt"), "utf8"), "second");
+    await assert.rejects(workspace.replaceSnapshot(snapshot, "stale"), /其他进程修改/);
+    assert.equal(await readFile(path.join(root, "new.txt"), "utf8"), "second");
+    assert.deepEqual((await readdir(root)).filter((name) => name.endsWith(".tmp")), []);
+    await assert.rejects(workspace.resolveWriteTarget("missing/file.txt"), /不存在/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("原子写入 I/O 失败时不留下目标或临时文件", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-write-failure-"));
+  const locked = path.join(root, "locked");
+  try {
+    await mkdir(locked);
+    const workspace = await createWorkspaceBoundary(root);
+    const target = await workspace.resolveWriteTarget("locked/result.txt");
+    await chmod(locked, 0o555);
+    await assert.rejects(workspace.atomicWrite(target, "content"), WorkspaceError);
+    await chmod(locked, 0o755);
+    assert.deepEqual(await readdir(locked), []);
+  } finally {
+    await chmod(locked, 0o755).catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("原子写入在临时文件落盘后提交失败仍清理临时文件", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-write-mid-failure-"));
+  try {
+    let injectedFailure = false;
+    const workspace = await createWorkspaceBoundary(root, {
+      async beforeAtomicRename() {
+        injectedFailure = true;
+        await mkdir(path.join(root, "result.txt"));
+      },
+    });
+    const target = await workspace.resolveWriteTarget("result.txt");
+
+    await assert.rejects(
+      workspace.atomicWrite(target, "content"),
+      WorkspaceError,
+    );
+    assert.equal(injectedFailure, true);
+    assert.deepEqual(
+      (await readdir(root)).filter((name) => name.endsWith(".tmp")),
+      [],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("工作区遍历排序稳定并跳过忽略、敏感和符号链接", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-walk-"));
+  try {
+    await mkdir(path.join(root, "src"));
+    await mkdir(path.join(root, "node_modules"));
+    await writeFile(path.join(root, "z.txt"), "z");
+    await writeFile(path.join(root, "src", "a.ts"), "a");
+    await writeFile(path.join(root, ".env"), "secret");
+    await writeFile(path.join(root, "node_modules", "ignored.js"), "ignored");
+    await symlink(path.join(root, "src"), path.join(root, "linked-src"));
+    const workspace = await createWorkspaceBoundary(root);
+    const entries = [];
+    for await (const entry of workspace.walk({ signal: new AbortController().signal })) {
+      entries.push(entry.relativePath);
+    }
+    assert.deepEqual(entries, ["src/a.ts", "z.txt"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -125,4 +125,37 @@ export function textDelta(text: string): string {
   return `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`;
 }
 
-export const DONE_EVENT = "data: [DONE]\n\n";
+export function toolCallDelta(value: {
+  readonly id?: string;
+  readonly name?: string;
+  readonly argumentsJson?: string;
+}): string {
+  return `data: ${JSON.stringify({
+    choices: [
+      {
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              ...(value.id === undefined ? {} : { id: value.id }),
+              type: "function",
+              function: {
+                ...(value.name === undefined ? {} : { name: value.name }),
+                ...(value.argumentsJson === undefined
+                  ? {}
+                  : { arguments: value.argumentsJson }),
+              },
+            },
+          ],
+        },
+      },
+    ],
+  })}\n\n`;
+}
+
+export const TEXT_FINISH_EVENT =
+  'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n';
+export const TOOL_FINISH_EVENT =
+  'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n';
+export const TRANSPORT_DONE_EVENT = "data: [DONE]\n\n";
+export const DONE_EVENT = TEXT_FINISH_EVENT + TRANSPORT_DONE_EVENT;

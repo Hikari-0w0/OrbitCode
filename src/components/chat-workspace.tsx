@@ -3,7 +3,11 @@
 import { useEffect, useRef, useState } from "react";
 
 import { ChatComposer } from "@/components/chat-composer";
-import { MessageList, type VisibleMessage } from "@/components/message-list";
+import {
+  MessageList,
+  type VisibleMessage,
+  type VisibleToolExecution,
+} from "@/components/message-list";
 import type { ConversationMessage } from "@/models/provider";
 import {
   parseProviderCatalogResponse,
@@ -11,7 +15,10 @@ import {
   parseWebChatEvents,
   readWebStream,
   type ProviderSummary,
+  type WebChatEvent,
 } from "@/web/chat-contract";
+
+type ToolCompletedWebEvent = Extract<WebChatEvent, { type: "tool-completed" }>;
 
 type WorkspaceStatus =
   | "loading"
@@ -119,6 +126,7 @@ export function ChatWorkspace() {
         role: "assistant",
         content: "",
         state: "streaming",
+        toolExecutions: [],
       },
     ]);
     setDraft("");
@@ -129,6 +137,7 @@ export function ChatWorkspace() {
     activeRequestRef.current = controller;
     let assistantContent = "";
     let completed = false;
+    let completedContent: string | undefined;
     let streamFailed = false;
 
     try {
@@ -159,19 +168,45 @@ export function ChatWorkspace() {
           }));
         } else if (event.type === "completed") {
           completed = true;
-        } else {
+          completedContent = event.content;
+        } else if (event.type === "tool-started") {
+          updateMessage(assistantId, (message) => ({
+            ...message,
+            toolExecutions: [
+              ...(message.toolExecutions ?? []).filter(
+                (execution) => execution.callId !== event.callId,
+              ),
+              {
+                callId: event.callId,
+                name: event.name,
+                state: "running",
+              },
+            ],
+          }));
+        } else if (event.type === "tool-completed") {
+          updateMessage(assistantId, (message) => ({
+            ...message,
+            toolExecutions: updateToolExecution(message.toolExecutions ?? [], event),
+          }));
+        } else if (event.type === "failed") {
           streamFailed = true;
+          const detail = event.sideEffect === "none"
+            ? event.message
+            : `${event.message} 工具可能已产生本地副作用，请检查工作目录。`;
           updateMessage(assistantId, (message) => ({
             ...message,
             state: "failed",
-            detail: event.message,
+            detail,
           }));
-          setNotice(event.message);
+          setNotice(detail);
         }
       }
 
       if (streamFailed) return;
-      if (!completed) throw new Error("流式响应意外结束，请重试。");
+      if (!completed || completedContent === undefined) {
+        throw new Error("流式响应意外结束，请重试。");
+      }
+      const finalAssistantContent = completedContent;
       updateMessage(assistantId, (message) => ({
         ...message,
         state: "complete",
@@ -179,7 +214,7 @@ export function ChatWorkspace() {
       setHistory((current) => [
         ...current,
         userMessage,
-        { role: "assistant", content: assistantContent },
+        { role: "assistant", content: finalAssistantContent },
       ]);
     } catch (error) {
       if (controller.signal.aborted) {
@@ -187,6 +222,11 @@ export function ChatWorkspace() {
           ...message,
           state: "cancelled",
           detail: "回复已停止，本轮不会加入后续上下文。",
+          toolExecutions: message.toolExecutions?.map((execution) =>
+            execution.state === "running"
+              ? { ...execution, state: "cancelled" }
+              : execution,
+          ),
         }));
       } else {
         const message = safeErrorMessage(error, "模型请求失败，请重试。");
@@ -224,11 +264,11 @@ export function ChatWorkspace() {
 
         <div className="phaseCard">
           <div className="phaseHeader">
-            <span>PHASE 01</span>
+            <span>PHASE 02</span>
             <span className="liveBadge"><i /> LIVE</span>
           </div>
-          <strong>纯对话模式</strong>
-          <p>流式模型响应与当前页多轮上下文</p>
+          <strong>单次工具 Agent</strong>
+          <p>每轮最多执行一个本地工具，完成后生成最终回复</p>
         </div>
 
         <div className="providerSection">
@@ -269,7 +309,7 @@ export function ChatWorkspace() {
 
         <div className="sessionInfo">
           <div><span>存储</span><strong>仅当前页面</strong></div>
-          <div><span>协议</span><strong>OpenAI · SSE</strong></div>
+          <div><span>工具范围</span><strong>当前工作目录</strong></div>
         </div>
 
         <div className="sidebarFooter">
@@ -352,6 +392,32 @@ function statusLabel(status: WorkspaceStatus): string {
 
 function safeErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message.length > 0 ? error.message : fallback;
+}
+
+function updateToolExecution(
+  current: readonly VisibleToolExecution[],
+  event: ToolCompletedWebEvent,
+): readonly VisibleToolExecution[] {
+  const completed: VisibleToolExecution = {
+    callId: event.callId,
+    name: event.name,
+    state: toolExecutionState(event.result),
+    result: event.result,
+  };
+  const index = current.findIndex((execution) => execution.callId === event.callId);
+  if (index < 0) return [...current, completed];
+  return current.map((execution, currentIndex) =>
+    currentIndex === index ? completed : execution,
+  );
+}
+
+function toolExecutionState(
+  result: ToolCompletedWebEvent["result"],
+): VisibleToolExecution["state"] {
+  if (result.ok) return "succeeded";
+  if (result.error.kind === "timeout") return "timed-out";
+  if (result.error.kind === "cancelled") return "cancelled";
+  return "failed";
 }
 
 function OrbitMark() {
