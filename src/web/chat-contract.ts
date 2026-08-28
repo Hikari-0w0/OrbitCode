@@ -1,4 +1,13 @@
-import type { PlainConversationMessage } from "@/models/provider";
+import type {
+  AgentEvent,
+  AgentMode,
+  AgentStopReason,
+  TokenUsage,
+} from "@/core/agent-events";
+import type {
+  ModelToolCall,
+  PlainConversationMessage,
+} from "@/models/provider";
 import { parseServerSentEvents, SseError } from "@/models/sse";
 import type {
   JsonValue,
@@ -7,7 +16,6 @@ import type {
   ToolErrorKind,
   ToolExecutionError,
   ToolExecutionResult,
-  ToolName,
   ToolResultMeta,
 } from "@/tools/types";
 
@@ -17,28 +25,11 @@ export const MAX_WEB_CHAT_MESSAGE_LENGTH = 20_000;
 
 export type WebChatRequest = {
   readonly provider: string;
+  readonly mode: AgentMode;
   readonly messages: readonly PlainConversationMessage[];
 };
 
-export type WebChatEvent =
-  | { readonly type: "text-delta"; readonly text: string }
-  | {
-      readonly type: "tool-started";
-      readonly callId: string;
-      readonly name: ToolName;
-    }
-  | {
-      readonly type: "tool-completed";
-      readonly callId: string;
-      readonly name: ToolName;
-      readonly result: ToolExecutionResult;
-    }
-  | { readonly type: "completed"; readonly content: string }
-  | {
-      readonly type: "failed";
-      readonly message: string;
-      readonly sideEffect: SideEffectState;
-    };
+export type WebChatEvent = AgentEvent;
 
 export type ProviderSummary = {
   readonly name: string;
@@ -62,7 +53,7 @@ export class WebChatContractError extends Error {
 }
 
 export function parseWebChatRequest(value: unknown): WebChatRequest {
-  if (!isRecord(value) || !hasExactFields(value, ["provider", "messages"])) {
+  if (!isRecord(value) || !hasExactFields(value, ["provider", "mode", "messages"])) {
     throw new WebChatContractError("对话请求格式无效。");
   }
   if (typeof value.provider !== "string" || value.provider.trim().length === 0) {
@@ -70,6 +61,9 @@ export function parseWebChatRequest(value: unknown): WebChatRequest {
   }
   if (value.provider.length > 128) {
     throw new WebChatContractError("模型配置名称过长。");
+  }
+  if (!isAgentMode(value.mode)) {
+    throw new WebChatContractError("Agent 模式无效。");
   }
   if (
     !Array.isArray(value.messages) ||
@@ -94,7 +88,7 @@ export function parseWebChatRequest(value: unknown): WebChatRequest {
     throw new WebChatContractError("对话请求必须以用户消息结束。");
   }
 
-  return { provider: value.provider.trim(), messages };
+  return { provider: value.provider.trim(), mode: value.mode, messages };
 }
 
 export function encodeWebChatEvent(event: WebChatEvent): Uint8Array {
@@ -155,9 +149,7 @@ export async function* parseWebChatEvents(
       yield parseWebChatEvent(value);
     }
   } catch (error) {
-    if (error instanceof WebChatContractError) {
-      throw error;
-    }
+    if (error instanceof WebChatContractError) throw error;
     if (error instanceof SseError) {
       throw new WebChatContractError(error.message);
     }
@@ -203,57 +195,249 @@ function parseMessage(value: unknown, index: number): PlainConversationMessage {
 
 function parseWebChatEvent(value: unknown): WebChatEvent {
   if (!isRecord(value) || typeof value.type !== "string") {
-    throw new WebChatContractError("服务端返回了无效的流式事件。");
+    throw invalidEvent();
   }
+  if (value.type === "progress") return parseProgressEvent(value);
+  if (value.type === "text-delta") return parseTextEvent(value);
+  if (value.type === "tool-call") return parseToolCallEvent(value);
+  if (value.type === "tool-started") return parseToolStartedEvent(value);
+  if (value.type === "tool-result") return parseToolResultEvent(value);
+  if (value.type === "token-usage") return parseTokenUsageEvent(value);
+  if (value.type === "stopped") return parseStoppedEvent(value);
+  throw invalidEvent();
+}
+
+function parseProgressEvent(value: Record<string, unknown>): WebChatEvent {
   if (
-    value.type === "completed" &&
-    hasExactFields(value, ["type", "content"]) &&
-    typeof value.content === "string"
+    !isPositiveInteger(value.iteration, 32) ||
+    !isPositiveInteger(value.maxIterations, 32) ||
+    value.iteration > value.maxIterations
   ) {
-    return { type: "completed", content: value.content };
+    throw invalidEvent();
   }
   if (
-    value.type === "text-delta" &&
-    hasExactFields(value, ["type", "text"]) &&
-    typeof value.text === "string"
-  ) {
-    return { type: "text-delta", text: value.text };
-  }
-  if (
-    value.type === "failed" &&
-    hasExactFields(value, ["type", "message", "sideEffect"]) &&
-    typeof value.message === "string" &&
-    value.message.length > 0 &&
-    isSideEffectState(value.sideEffect)
+    value.phase === "model" &&
+    hasExactFields(value, ["type", "iteration", "maxIterations", "phase"])
   ) {
     return {
-      type: "failed",
-      message: value.message,
+      type: "progress",
+      iteration: value.iteration,
+      maxIterations: value.maxIterations,
+      phase: "model",
+    };
+  }
+  if (
+    value.phase === "tools" &&
+    hasExactFields(value, [
+      "type",
+      "iteration",
+      "maxIterations",
+      "phase",
+      "completedTools",
+      "totalTools",
+    ]) &&
+    isNonNegativeInteger(value.completedTools, 16) &&
+    isPositiveInteger(value.totalTools, 16) &&
+    value.completedTools <= value.totalTools
+  ) {
+    return {
+      type: "progress",
+      iteration: value.iteration,
+      maxIterations: value.maxIterations,
+      phase: "tools",
+      completedTools: value.completedTools,
+      totalTools: value.totalTools,
+    };
+  }
+  throw invalidEvent();
+}
+
+function parseTextEvent(value: Record<string, unknown>): WebChatEvent {
+  if (
+    !hasExactFields(value, ["type", "iteration", "text"]) ||
+    !isPositiveInteger(value.iteration, 32) ||
+    typeof value.text !== "string" ||
+    value.text.length === 0
+  ) {
+    throw invalidEvent();
+  }
+  return { type: "text-delta", iteration: value.iteration, text: value.text };
+}
+
+function parseToolCallEvent(value: Record<string, unknown>): WebChatEvent {
+  if (
+    !hasExactFields(value, ["type", "iteration", "call", "sequence"]) ||
+    !isPositiveInteger(value.iteration, 32) ||
+    !isNonNegativeInteger(value.sequence, 15)
+  ) {
+    throw invalidEvent();
+  }
+  return {
+    type: "tool-call",
+    iteration: value.iteration,
+    call: parseModelToolCall(value.call),
+    sequence: value.sequence,
+  };
+}
+
+function parseToolStartedEvent(value: Record<string, unknown>): WebChatEvent {
+  if (
+    !hasExactFields(value, ["type", "iteration", "callId", "name", "sequence"]) ||
+    !isPositiveInteger(value.iteration, 32) ||
+    !isSafeCallId(value.callId) ||
+    !isSafeToolName(value.name) ||
+    !isNonNegativeInteger(value.sequence, 15)
+  ) {
+    throw invalidEvent();
+  }
+  return {
+    type: "tool-started",
+    iteration: value.iteration,
+    callId: value.callId,
+    name: value.name,
+    sequence: value.sequence,
+  };
+}
+
+function parseToolResultEvent(value: Record<string, unknown>): WebChatEvent {
+  if (
+    !hasExactFields(value, [
+      "type",
+      "iteration",
+      "callId",
+      "name",
+      "sequence",
+      "result",
+    ]) ||
+    !isPositiveInteger(value.iteration, 32) ||
+    !isSafeCallId(value.callId) ||
+    !isSafeToolName(value.name) ||
+    !isNonNegativeInteger(value.sequence, 15)
+  ) {
+    throw invalidEvent();
+  }
+  return {
+    type: "tool-result",
+    iteration: value.iteration,
+    callId: value.callId,
+    name: value.name,
+    sequence: value.sequence,
+    result: parseToolResult(value.result),
+  };
+}
+
+function parseTokenUsageEvent(value: Record<string, unknown>): WebChatEvent {
+  if (
+    !hasExactFields(value, ["type", "iteration", "usage", "cumulative"]) ||
+    !isPositiveInteger(value.iteration, 32)
+  ) {
+    throw invalidEvent();
+  }
+  return {
+    type: "token-usage",
+    iteration: value.iteration,
+    usage: parseTokenUsage(value.usage),
+    cumulative: parseTokenUsage(value.cumulative),
+  };
+}
+
+function parseStoppedEvent(value: Record<string, unknown>): WebChatEvent {
+  if (
+    !isAgentStopReason(value.reason) ||
+    !isNonNegativeInteger(value.iterations, 32) ||
+    !isSideEffectState(value.sideEffect)
+  ) {
+    throw invalidEvent();
+  }
+  if (value.reason === "final-response") {
+    if (
+      !hasExactFields(value, [
+        "type",
+        "reason",
+        "iterations",
+        "sideEffect",
+        "finalMessage",
+      ]) ||
+      !isAssistantMessage(value.finalMessage)
+    ) {
+      throw invalidEvent();
+    }
+    return {
+      type: "stopped",
+      reason: "final-response",
+      iterations: value.iterations,
       sideEffect: value.sideEffect,
+      finalMessage: value.finalMessage,
     };
   }
   if (
-    value.type === "tool-started" &&
-    hasExactFields(value, ["type", "callId", "name"]) &&
-    isSafeCallId(value.callId) &&
-    isToolName(value.name)
+    !hasExactFields(value, [
+      "type",
+      "reason",
+      "iterations",
+      "sideEffect",
+      "detail",
+    ]) ||
+    typeof value.detail !== "string" ||
+    value.detail.length === 0 ||
+    value.detail.length > 1_000
   ) {
-    return { type: "tool-started", callId: value.callId, name: value.name };
+    throw invalidEvent();
+  }
+  return {
+    type: "stopped",
+    reason: value.reason,
+    iterations: value.iterations,
+    sideEffect: value.sideEffect,
+    detail: value.detail,
+  };
+}
+
+function parseModelToolCall(value: unknown): ModelToolCall {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, ["id", "name", "argumentsJson"]) ||
+    !isSafeCallId(value.id) ||
+    !isSafeToolName(value.name) ||
+    typeof value.argumentsJson !== "string" ||
+    value.argumentsJson.length > 64 * 1024
+  ) {
+    throw invalidEvent();
+  }
+  return { id: value.id, name: value.name, argumentsJson: value.argumentsJson };
+}
+
+function parseTokenUsage(value: unknown): TokenUsage {
+  if (!isRecord(value) || typeof value.availability !== "string") {
+    throw invalidEvent();
   }
   if (
-    value.type === "tool-completed" &&
-    hasExactFields(value, ["type", "callId", "name", "result"]) &&
-    isSafeCallId(value.callId) &&
-    isToolName(value.name)
+    value.availability === "unavailable" &&
+    hasExactFields(value, ["availability"])
+  ) {
+    return { availability: "unavailable" };
+  }
+  if (
+    value.availability === "reported" &&
+    hasExactFields(value, [
+      "availability",
+      "promptTokens",
+      "completionTokens",
+      "totalTokens",
+    ]) &&
+    isNonNegativeInteger(value.promptTokens) &&
+    isNonNegativeInteger(value.completionTokens) &&
+    isNonNegativeInteger(value.totalTokens) &&
+    value.promptTokens + value.completionTokens === value.totalTokens
   ) {
     return {
-      type: "tool-completed",
-      callId: value.callId,
-      name: value.name,
-      result: parseToolResult(value.result),
+      availability: "reported",
+      promptTokens: value.promptTokens,
+      completionTokens: value.completionTokens,
+      totalTokens: value.totalTokens,
     };
   }
-  throw new WebChatContractError("服务端返回了无效的流式事件。");
+  throw invalidEvent();
 }
 
 function parseToolResult(value: unknown): ToolExecutionResult {
@@ -266,7 +450,10 @@ function parseToolResult(value: unknown): ToolExecutionResult {
   }
   const meta = parseToolMeta(value.meta);
   if (value.ok) {
-    if (!hasExactFields(value, ["ok", "output", "sideEffect", "meta"]) || !isJsonValue(value.output)) {
+    if (
+      !hasExactFields(value, ["ok", "output", "sideEffect", "meta"]) ||
+      !isJsonValue(value.output)
+    ) {
       throw new WebChatContractError("服务端返回了无效的工具结果。");
     }
     return { ok: true, output: value.output, sideEffect, meta };
@@ -339,14 +526,27 @@ function parseToolError(value: unknown): ToolExecutionError {
       return { path: entry.path, message: entry.message };
     });
   }
-  return { kind: value.kind, message: value.message, retryable: value.retryable, issues };
+  return {
+    kind: value.kind,
+    message: value.message,
+    retryable: value.retryable,
+    issues,
+  };
 }
 
 function isJsonValue(value: unknown, depth = 0): value is JsonValue {
   if (depth > 20) return false;
-  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean"
+  ) {
+    return true;
+  }
   if (typeof value === "number") return Number.isFinite(value);
-  if (Array.isArray(value)) return value.every((entry) => isJsonValue(entry, depth + 1));
+  if (Array.isArray(value)) {
+    return value.every((entry) => isJsonValue(entry, depth + 1));
+  }
   return (
     isRecord(value) &&
     Object.keys(value).length <= 2_000 &&
@@ -354,29 +554,50 @@ function isJsonValue(value: unknown, depth = 0): value is JsonValue {
   );
 }
 
+function isAssistantMessage(
+  value: unknown,
+): value is { readonly role: "assistant"; readonly content: string } {
+  return (
+    isRecord(value) &&
+    hasExactFields(value, ["role", "content"]) &&
+    value.role === "assistant" &&
+    typeof value.content === "string" &&
+    value.content.trim().length > 0
+  );
+}
+
 function isSafeCallId(value: unknown): value is string {
   return typeof value === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(value);
+}
+
+function isSafeToolName(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value);
+}
+
+function isAgentMode(value: unknown): value is AgentMode {
+  return value === "plan" || value === "do";
+}
+
+const STOP_REASONS = new Set<AgentStopReason>([
+  "final-response",
+  "max-iterations",
+  "cancelled",
+  "repeated-unknown-tool",
+  "model-error",
+  "agent-error",
+]);
+
+function isAgentStopReason(value: unknown): value is AgentStopReason {
+  return typeof value === "string" && STOP_REASONS.has(value as AgentStopReason);
 }
 
 function isSideEffectState(value: unknown): value is SideEffectState {
   return value === "none" || value === "possible" || value === "applied";
 }
 
-const TOOL_NAMES = new Set<ToolName>([
-  "read_file",
-  "write_file",
-  "edit_file",
-  "run_command",
-  "find_files",
-  "search_code",
-]);
-
-function isToolName(value: unknown): value is ToolName {
-  return typeof value === "string" && TOOL_NAMES.has(value as ToolName);
-}
-
 const TOOL_ERROR_KINDS = new Set<ToolErrorKind>([
   "invalid-arguments",
+  "unknown-tool",
   "not-found",
   "permission-denied",
   "protected-path",
@@ -394,12 +615,27 @@ function isToolErrorKind(value: unknown): value is ToolErrorKind {
   return typeof value === "string" && TOOL_ERROR_KINDS.has(value as ToolErrorKind);
 }
 
+function isPositiveInteger(value: unknown, maximum = Number.MAX_SAFE_INTEGER): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 1 && (value as number) <= maximum;
+}
+
+function isNonNegativeInteger(
+  value: unknown,
+  maximum = Number.MAX_SAFE_INTEGER,
+): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= maximum;
+}
+
 function hasExactFields(
   value: Record<string, unknown>,
   fields: readonly string[],
 ): boolean {
   const keys = Object.keys(value);
   return keys.length === fields.length && fields.every((field) => field in value);
+}
+
+function invalidEvent(): WebChatContractError {
+  return new WebChatContractError("服务端返回了无效的流式事件。");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

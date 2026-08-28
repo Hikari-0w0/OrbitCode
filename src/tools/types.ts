@@ -29,6 +29,7 @@ export interface ToolInputSchema<T> {
 
 export type ToolErrorKind =
   | "invalid-arguments"
+  | "unknown-tool"
   | "not-found"
   | "permission-denied"
   | "protected-path"
@@ -42,6 +43,7 @@ export type ToolErrorKind =
   | "execution-failed";
 
 export type SideEffectState = "none" | "possible" | "applied";
+export type ToolMutability = "read-only" | "workspace-write" | "command";
 
 export type ToolResultMeta = {
   readonly durationMs: number;
@@ -129,7 +131,7 @@ export interface Tool<TInput, TOutput extends JsonValue = JsonValue> {
   readonly name: ToolName;
   readonly description: string;
   readonly inputSchema: ToolInputSchema<TInput>;
-  readonly mutability: "read-only" | "workspace-write" | "command";
+  readonly mutability: ToolMutability;
   execute(
     input: TInput,
     context: ToolExecutionContext,

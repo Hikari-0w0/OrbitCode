@@ -1,10 +1,15 @@
 import path from "node:path";
 
 import {
+  assertMaxAgentIterations,
+  DEFAULT_MAX_AGENT_ITERATIONS,
+} from "@/core/agent-loop";
+import {
   loadLocalEnvironment,
   type Environment,
 } from "@/lib/environment";
 import {
+  ConfigurationError,
   loadProviderConfigs,
   resolveProviderConfig,
   type ProviderConfig,
@@ -12,9 +17,10 @@ import {
 } from "@/models/config";
 import type { ProviderSummary } from "@/web/chat-contract";
 
-type WebProviderContext = {
+export type WebProviderContext = {
   readonly providers: readonly ProviderConfig[];
   readonly environment: Environment;
+  readonly maxIterations: number;
 };
 
 export async function loadWebProviderContext(
@@ -28,7 +34,32 @@ export async function loadWebProviderContext(
   const providers = await loadProviderConfigs({
     filePath: path.join(cwd, "orbitcode.yaml"),
   });
-  return { providers, environment };
+  return {
+    providers,
+    environment,
+    maxIterations: resolveMaxAgentIterations(environment),
+  };
+}
+
+export function resolveMaxAgentIterations(environment: Environment): number {
+  const source = environment.ORBITCODE_MAX_AGENT_ITERATIONS;
+  if (source === undefined) return DEFAULT_MAX_AGENT_ITERATIONS;
+  if (!/^[1-9]\d*$/.test(source)) {
+    throw new ConfigurationError(
+      "config-value",
+      "ORBITCODE_MAX_AGENT_ITERATIONS 必须是有效的正整数。",
+    );
+  }
+  const value = Number(source);
+  try {
+    assertMaxAgentIterations(value);
+  } catch {
+    throw new ConfigurationError(
+      "config-value",
+      "ORBITCODE_MAX_AGENT_ITERATIONS 必须在 1 到 32 之间。",
+    );
+  }
+  return value;
 }
 
 export function summarizeProviders({

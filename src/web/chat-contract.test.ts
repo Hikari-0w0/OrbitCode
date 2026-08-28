@@ -15,6 +15,7 @@ import {
 test("接受严格的多轮请求并保留消息顺序", () => {
   const result = parseWebChatRequest({
     provider: " primary ",
+    mode: "plan",
     messages: [
       { role: "user", content: "第一问" },
       { role: "assistant", content: "第一答" },
@@ -23,6 +24,7 @@ test("接受严格的多轮请求并保留消息顺序", () => {
   });
 
   assert.equal(result.provider, "primary");
+  assert.equal(result.mode, "plan");
   assert.deepEqual(result.messages, [
     { role: "user", content: "第一问" },
     { role: "assistant", content: "第一答" },
@@ -33,20 +35,23 @@ test("接受严格的多轮请求并保留消息顺序", () => {
 test("拒绝未知字段、非法角色顺序和空内容", () => {
   const invalidValues: readonly unknown[] = [
     null,
-    { provider: "primary", messages: [], extra: true },
-    { provider: "", messages: [{ role: "user", content: "问题" }] },
-    { provider: "primary", messages: [{ role: "system", content: "越界" }] },
-    { provider: "primary", messages: [{ role: "assistant", content: "回答" }] },
+    { provider: "primary", mode: "do", messages: [], extra: true },
+    { provider: "", mode: "do", messages: [{ role: "user", content: "问题" }] },
+    { provider: "primary", mode: "invalid", messages: [{ role: "user", content: "问题" }] },
+    { provider: "primary", mode: "do", messages: [{ role: "system", content: "越界" }] },
+    { provider: "primary", mode: "do", messages: [{ role: "assistant", content: "回答" }] },
     {
       provider: "primary",
+      mode: "do",
       messages: [
         { role: "user", content: "问题" },
         { role: "user", content: "重复" },
       ],
     },
-    { provider: "primary", messages: [{ role: "user", content: "   " }] },
+    { provider: "primary", mode: "do", messages: [{ role: "user", content: "   " }] },
     {
       provider: "primary",
+      mode: "do",
       messages: [{ role: "user", content: "问题", extra: true }],
     },
   ];
@@ -61,6 +66,7 @@ test("拒绝超长内容和过多历史", () => {
     () =>
       parseWebChatRequest({
         provider: "primary",
+        mode: "do",
         messages: [
           { role: "user", content: "x".repeat(MAX_WEB_CHAT_MESSAGE_LENGTH + 1) },
         ],
@@ -73,19 +79,38 @@ test("拒绝超长内容和过多历史", () => {
     content: String(index),
   }));
   assert.throws(
-    () => parseWebChatRequest({ provider: "primary", messages }),
+    () => parseWebChatRequest({ provider: "primary", mode: "do", messages }),
     /数量/,
   );
 });
 
 test("Web SSE 事件按网络分块往返解析", async () => {
   const expected: readonly WebChatEvent[] = [
-    { type: "text-delta", text: "Orbit" },
-    { type: "tool-started", callId: "call_1", name: "read_file" },
+    { type: "progress", iteration: 1, maxIterations: 8, phase: "model" },
+    { type: "text-delta", iteration: 1, text: "Orbit" },
     {
-      type: "tool-completed",
+      type: "tool-call",
+      iteration: 1,
+      call: {
+        id: "call_1",
+        name: "read_file",
+        argumentsJson: '{"path":"README.md"}',
+      },
+      sequence: 0,
+    },
+    {
+      type: "tool-started",
+      iteration: 1,
       callId: "call_1",
       name: "read_file",
+      sequence: 0,
+    },
+    {
+      type: "tool-result",
+      iteration: 1,
+      callId: "call_1",
+      name: "read_file",
+      sequence: 0,
       result: {
         ok: true,
         output: { path: "README.md", content: "OrbitCode" },
@@ -93,8 +118,30 @@ test("Web SSE 事件按网络分块往返解析", async () => {
         meta: { durationMs: 3, truncated: false, truncatedFields: [] },
       },
     },
-    { type: "text-delta", text: "Code" },
-    { type: "completed", content: "Code" },
+    {
+      type: "token-usage",
+      iteration: 1,
+      usage: {
+        availability: "reported",
+        promptTokens: 2,
+        completionTokens: 1,
+        totalTokens: 3,
+      },
+      cumulative: {
+        availability: "reported",
+        promptTokens: 2,
+        completionTokens: 1,
+        totalTokens: 3,
+      },
+    },
+    { type: "text-delta", iteration: 2, text: "Code" },
+    {
+      type: "stopped",
+      reason: "final-response",
+      iterations: 2,
+      sideEffect: "none",
+      finalMessage: { role: "assistant", content: "Code" },
+    },
   ];
   const bytes = Buffer.concat(expected.map((event) => encodeWebChatEvent(event)));
   const chunks = [bytes.subarray(0, 9), bytes.subarray(9, 23), bytes.subarray(23)];
@@ -139,7 +186,7 @@ test("拒绝非法 Web SSE JSON 与事件结构", async () => {
   await assert.rejects(
     collect(
       parseWebChatEvents(
-        asAsync([Buffer.from('data: {"type":"completed","extra":true}\n\n')]),
+        asAsync([Buffer.from('data: {"type":"stopped","extra":true}\n\n')]),
       ),
     ),
     /无效的流式事件/,
@@ -149,7 +196,7 @@ test("拒绝非法 Web SSE JSON 与事件结构", async () => {
       parseWebChatEvents(
         asAsync([
           Buffer.from(
-            'data: {"type":"tool-started","callId":"bad id","name":"read_file"}\n\n',
+            'data: {"type":"tool-started","iteration":1,"callId":"bad id","name":"read_file","sequence":0}\n\n',
           ),
         ]),
       ),
@@ -161,7 +208,7 @@ test("拒绝非法 Web SSE JSON 与事件结构", async () => {
       parseWebChatEvents(
         asAsync([
           Buffer.from(
-            'data: {"type":"failed","message":"失败"}\n\n',
+            'data: {"type":"stopped","reason":"final-response","iterations":1,"sideEffect":"none","detail":"失败"}\n\n',
           ),
         ]),
       ),

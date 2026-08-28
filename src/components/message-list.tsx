@@ -4,13 +4,26 @@ import { useEffect, useRef, useState } from "react";
 
 import type { WebChatEvent } from "@/web/chat-contract";
 
-type ToolCompletedEvent = Extract<WebChatEvent, { type: "tool-completed" }>;
+type ProgressEvent = Extract<WebChatEvent, { type: "progress" }>;
+type TokenUsageEvent = Extract<WebChatEvent, { type: "token-usage" }>;
+type StoppedEvent = Extract<WebChatEvent, { type: "stopped" }>;
+type ToolResultEvent = Extract<WebChatEvent, { type: "tool-result" }>;
 
 export type VisibleToolExecution = {
+  readonly iteration: number;
+  readonly sequence: number;
   readonly callId: string;
-  readonly name: ToolCompletedEvent["name"];
-  readonly state: "running" | "succeeded" | "failed" | "timed-out" | "cancelled";
-  readonly result?: ToolCompletedEvent["result"];
+  readonly name: string;
+  readonly argumentsJson: string;
+  readonly state:
+    | "queued"
+    | "running"
+    | "succeeded"
+    | "failed"
+    | "timed-out"
+    | "cancelled"
+    | "skipped";
+  readonly result?: ToolResultEvent["result"];
 };
 
 export type VisibleMessage = {
@@ -20,6 +33,10 @@ export type VisibleMessage = {
   readonly state: "complete" | "streaming" | "cancelled" | "failed";
   readonly detail?: string;
   readonly toolExecutions?: readonly VisibleToolExecution[];
+  readonly progress?: ProgressEvent;
+  readonly usage?: TokenUsageEvent["usage"];
+  readonly cumulativeUsage?: TokenUsageEvent["cumulative"];
+  readonly stopReason?: StoppedEvent["reason"];
 };
 
 type MessageListProps = {
@@ -85,18 +102,26 @@ export function MessageList({ messages, onSuggestion }: MessageListProps) {
                     <span>{message.role === "assistant" ? "OrbitCode" : "你"}</span>
                     <MessageState state={message.state} />
                   </div>
+                  {message.progress && <AgentProgress progress={message.progress} />}
                   {message.toolExecutions && message.toolExecutions.length > 0 && (
                     <div className="toolExecutionList" aria-label="工具执行记录">
                       {message.toolExecutions.map((execution) => (
-                        <ToolExecutionCard key={execution.callId} execution={execution} />
+                        <ToolExecutionCard
+                          key={`${execution.iteration}:${execution.callId}`}
+                          execution={execution}
+                        />
                       ))}
                     </div>
                   )}
-                  {message.content.length > 0 && (
-                    <p className="messageText">{message.content}</p>
-                  )}
+                  {message.content.length > 0 && <p className="messageText">{message.content}</p>}
                   {message.state === "streaming" && (
                     <span className="streamingCursor" aria-label="正在生成" />
+                  )}
+                  {message.cumulativeUsage && <UsageLine usage={message.cumulativeUsage} />}
+                  {message.stopReason && (
+                    <p className={`stopReason stopReason--${message.state}`}>
+                      停止原因：{stopReasonLabel(message.stopReason)}
+                    </p>
                   )}
                   {message.detail && (
                     <p className={`messageDetail messageDetail--${message.state}`}>
@@ -120,20 +145,49 @@ export function MessageList({ messages, onSuggestion }: MessageListProps) {
   );
 }
 
+function AgentProgress({ progress }: { readonly progress: ProgressEvent }) {
+  const toolProgress = progress.phase === "tools"
+    ? ` · 工具 ${progress.completedTools ?? 0}/${progress.totalTools ?? 0}`
+    : " · 正在请求模型";
+  const percentage = progress.phase === "tools" && progress.totalTools
+    ? ((progress.iteration - 1) + (progress.completedTools ?? 0) / progress.totalTools)
+      / progress.maxIterations * 100
+    : (progress.iteration - 1) / progress.maxIterations * 100;
+
+  return (
+    <div className="agentProgress" aria-label="Agent 当前进度">
+      <div className="progressHeader">
+        <span>迭代 {progress.iteration}/{progress.maxIterations}</span>
+        <span>{toolProgress}</span>
+      </div>
+      <div className="progressTrack" aria-hidden="true">
+        <span style={{ width: `${Math.max(4, percentage)}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function UsageLine({ usage }: { readonly usage: TokenUsageEvent["cumulative"] }) {
+  if (usage.availability === "unavailable") {
+    return <p className="usageLine">Token 用量：模型未报告</p>;
+  }
+  return (
+    <p className="usageLine">
+      Token：{usage.totalTokens.toLocaleString()}（输入 {usage.promptTokens.toLocaleString()} · 输出 {usage.completionTokens.toLocaleString()}）
+    </p>
+  );
+}
+
 function EmptyConversation({ onSuggestion }: { readonly onSuggestion: (value: string) => void }) {
   return (
     <div className="emptyConversation">
-      <div className="emptyMark" aria-hidden="true">
-        <span />
-        <span />
-        <span />
-      </div>
-      <p className="emptyEyebrow">NEW LOCAL SESSION</p>
-      <h1>从一个问题开始。</h1>
+      <div className="emptyMark" aria-hidden="true"><span /><span /><span /></div>
+      <p className="emptyEyebrow">NEW AUTONOMOUS SESSION</p>
+      <h1>从一个任务开始。</h1>
       <p className="emptyDescription">
-        OrbitCode 可以在授权工作目录内读取、修改和查找代码，也可以在严格沙箱中执行命令。
+        OrbitCode 会自主调用模型与本地工具直到完成任务。输入 /plan 切换只读分析，输入 /do 恢复执行。
       </p>
-      <div className="suggestionGrid" aria-label="示例问题">
+      <div className="suggestionGrid" role="group" aria-label="示例问题">
         {suggestions.map((suggestion) => (
           <button key={suggestion} type="button" onClick={() => onSuggestion(suggestion)}>
             <span>{suggestion}</span>
@@ -147,54 +201,53 @@ function EmptyConversation({ onSuggestion }: { readonly onSuggestion: (value: st
 
 function ToolExecutionCard({ execution }: { readonly execution: VisibleToolExecution }) {
   const result = execution.result;
-  const detail = result?.ok
-    ? JSON.stringify(result.output, null, 2)
-    : result?.error.message;
+  const detail = result?.ok ? JSON.stringify(result.output, null, 2) : result?.error.message;
 
   return (
     <section className={`toolCard toolCard--${execution.state}`}>
       <div className="toolCardHeader">
         <span className="toolStateDot" aria-hidden="true" />
         <code>{execution.name}</code>
-        <span>{toolStateLabel(execution.state)}</span>
+        <span>第 {execution.iteration} 轮 · {toolStateLabel(execution.state)}</span>
       </div>
-      {detail && (
-        <details className="toolCardDetails" open={execution.state !== "succeeded"}>
-          <summary>{result?.ok ? "查看执行结果" : "查看错误详情"}</summary>
-          <pre>{detail}</pre>
-        </details>
-      )}
+      <details className="toolCardDetails" open={execution.state === "failed" || execution.state === "timed-out"}>
+        <summary>{result ? (result.ok ? "查看执行结果" : "查看错误详情") : "查看调用参数"}</summary>
+        <pre>{detail ?? execution.argumentsJson}</pre>
+      </details>
     </section>
   );
 }
 
 function toolStateLabel(state: VisibleToolExecution["state"]): string {
+  if (state === "queued") return "等待执行";
   if (state === "running") return "执行中";
   if (state === "succeeded") return "已完成";
   if (state === "timed-out") return "已超时";
   if (state === "cancelled") return "已取消";
+  if (state === "skipped") return "已跳过";
   return "失败";
 }
 
+function stopReasonLabel(reason: StoppedEvent["reason"]): string {
+  if (reason === "final-response") return "模型生成最终回复";
+  if (reason === "max-iterations") return "达到最大迭代次数";
+  if (reason === "cancelled") return "用户取消";
+  if (reason === "repeated-unknown-tool") return "连续调用未知工具";
+  if (reason === "model-error") return "模型响应流错误";
+  return "Agent 内部错误";
+}
+
 function MessageState({ state }: { readonly state: VisibleMessage["state"] }) {
-  if (state === "streaming") return <span className="messageState">生成中</span>;
+  if (state === "streaming") return <span className="messageState">运行中</span>;
   if (state === "cancelled") return <span className="messageState">已停止</span>;
   if (state === "failed") return <span className="messageState">未完成</span>;
   return null;
 }
 
 function ArrowIcon() {
-  return (
-    <svg viewBox="0 0 20 20" aria-hidden="true">
-      <path d="M5 10h9M10.5 6.5 14 10l-3.5 3.5" />
-    </svg>
-  );
+  return <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 10h9M10.5 6.5 14 10l-3.5 3.5" /></svg>;
 }
 
 function DownIcon() {
-  return (
-    <svg viewBox="0 0 20 20" aria-hidden="true">
-      <path d="m6 8 4 4 4-4" />
-    </svg>
-  );
+  return <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg>;
 }

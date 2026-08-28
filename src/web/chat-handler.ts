@@ -1,14 +1,12 @@
-import type { AgentTurnEvent, SingleToolAgentSession } from "@/core/single-tool-agent";
-import type { ToolName } from "@/tools/types";
-import {
-  encodeWebChatEvent,
-  type WebChatEvent,
-} from "@/web/chat-contract";
+import type { AgentEvent, AgentMode } from "@/core/agent-events";
+import type { AgentSession } from "@/core/agent-loop";
+import { encodeWebChatEvent } from "@/web/chat-contract";
 
 export function streamAgentResponse(options: {
   readonly request: Request;
-  readonly agent: SingleToolAgentSession;
+  readonly agent: AgentSession;
   readonly input: string;
+  readonly mode: AgentMode;
 }): Response {
   const abortController = new AbortController();
   let consumerClosed = false;
@@ -20,24 +18,26 @@ export function streamAgentResponse(options: {
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
+      let stopped = false;
       try {
-        for await (const event of options.agent.streamTurn(
-          options.input,
-          abortController.signal,
-        )) {
+        for await (const event of options.agent.streamTurn({
+          input: options.input,
+          mode: options.mode,
+          signal: abortController.signal,
+        })) {
           if (consumerClosed) break;
-          const webEvent = toWebEvent(event);
-          if (webEvent) controller.enqueue(encodeWebChatEvent(webEvent));
+          if (stopped) {
+            throw new Error("Agent 在停止事件后仍返回了数据。");
+          }
+          controller.enqueue(encodeWebChatEvent(event));
+          if (event.type === "stopped") stopped = true;
+        }
+        if (!consumerClosed && !stopped) {
+          controller.enqueue(encodeWebChatEvent(unexpectedStop()));
         }
       } catch {
-        if (!consumerClosed) {
-          controller.enqueue(
-            encodeWebChatEvent({
-              type: "failed",
-              message: "Agent 执行发生未知错误，请重试。",
-              sideEffect: "none",
-            }),
-          );
+        if (!consumerClosed && !stopped) {
+          controller.enqueue(encodeWebChatEvent(unexpectedStop()));
         }
       } finally {
         options.request.signal.removeEventListener("abort", abort);
@@ -59,43 +59,12 @@ export function streamAgentResponse(options: {
   });
 }
 
-function toWebEvent(event: AgentTurnEvent): WebChatEvent | undefined {
-  switch (event.type) {
-    case "text-delta":
-      return event;
-    case "tool-started":
-      return isToolName(event.name)
-        ? { type: "tool-started", callId: event.callId, name: event.name }
-        : undefined;
-    case "tool-completed":
-      return isToolName(event.name)
-        ? {
-            type: "tool-completed",
-            callId: event.callId,
-            name: event.name,
-            result: event.result,
-          }
-        : undefined;
-    case "completed":
-      return { type: "completed", content: event.message.content };
-    case "failed":
-      return {
-        type: "failed",
-        message: event.error.message,
-        sideEffect: event.sideEffect,
-      };
-    case "cancelled":
-      return undefined;
-  }
-}
-
-function isToolName(value: string): value is ToolName {
-  return [
-    "read_file",
-    "write_file",
-    "edit_file",
-    "run_command",
-    "find_files",
-    "search_code",
-  ].includes(value);
+function unexpectedStop(): Extract<AgentEvent, { type: "stopped" }> {
+  return {
+    type: "stopped",
+    reason: "agent-error",
+    iterations: 0,
+    sideEffect: "none",
+    detail: "Agent 执行发生未知错误，请重试。",
+  };
 }

@@ -126,6 +126,7 @@ export function textDelta(text: string): string {
 }
 
 export function toolCallDelta(value: {
+  readonly index?: number;
   readonly id?: string;
   readonly name?: string;
   readonly argumentsJson?: string;
@@ -136,7 +137,7 @@ export function toolCallDelta(value: {
         delta: {
           tool_calls: [
             {
-              index: 0,
+              index: value.index ?? 0,
               ...(value.id === undefined ? {} : { id: value.id }),
               type: "function",
               function: {
@@ -150,6 +151,21 @@ export function toolCallDelta(value: {
         },
       },
     ],
+  })}\n\n`;
+}
+
+export function usageEvent(value: {
+  readonly promptTokens: number;
+  readonly completionTokens: number;
+  readonly totalTokens: number;
+}): string {
+  return `data: ${JSON.stringify({
+    choices: [],
+    usage: {
+      prompt_tokens: value.promptTokens,
+      completion_tokens: value.completionTokens,
+      total_tokens: value.totalTokens,
+    },
   })}\n\n`;
 }
 
