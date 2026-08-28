@@ -1,8 +1,9 @@
-import { SingleToolAgent } from "@/core/single-tool-agent";
+import { AgentLoop } from "@/core/agent-loop";
 import { ConfigurationError } from "@/models/config";
 import { createChatProvider } from "@/models/provider-factory";
 import { createDefaultToolRegistry } from "@/tools/default-registry";
 import { MacOsSeatbeltCommandSandbox } from "@/tools/macos-seatbelt-sandbox";
+import { createModeToolPolicy } from "@/tools/mode-policy";
 import { createWorkspaceBoundary } from "@/tools/workspace";
 import {
   MAX_WEB_CHAT_BODY_BYTES,
@@ -32,13 +33,20 @@ export async function POST(request: Request): Promise<Response> {
       throw new WebChatContractError("对话请求必须以用户消息结束。");
     }
     const workspace = await createWorkspaceBoundary(process.cwd());
-    const agent = new SingleToolAgent(
+    const registry = createDefaultToolRegistry(commandSandbox);
+    const agent = new AgentLoop(
       createChatProvider(config),
-      createDefaultToolRegistry(commandSandbox),
+      (mode) => createModeToolPolicy(registry, mode),
       workspace,
+      { maxIterations: context.maxIterations },
       chatRequest.messages.slice(0, -1),
     );
-    return streamAgentResponse({ request, agent, input: currentMessage.content });
+    return streamAgentResponse({
+      request,
+      agent,
+      input: currentMessage.content,
+      mode: chatRequest.mode,
+    });
   } catch (error) {
     return startupErrorResponse(error);
   }

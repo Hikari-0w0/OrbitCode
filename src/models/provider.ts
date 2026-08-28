@@ -4,6 +4,11 @@ export type PlainConversationMessage =
   | { readonly role: "user"; readonly content: string }
   | { readonly role: "assistant"; readonly content: string };
 
+export type SystemMessage = {
+  readonly role: "system";
+  readonly content: string;
+};
+
 export type ModelToolCall = {
   readonly id: string;
   readonly name: string;
@@ -11,11 +16,12 @@ export type ModelToolCall = {
 };
 
 export type ConversationMessage =
+  | SystemMessage
   | PlainConversationMessage
   | {
       readonly role: "assistant";
-      readonly content: null;
-      readonly toolCalls: readonly [ModelToolCall];
+      readonly content: string | null;
+      readonly toolCalls: readonly ModelToolCall[];
     }
   | {
       readonly role: "tool";
@@ -28,9 +34,16 @@ export type AssistantMessage = Extract<
   { readonly role: "assistant" }
 >;
 
+export type ModelTokenUsage = {
+  readonly promptTokens: number;
+  readonly completionTokens: number;
+  readonly totalTokens: number;
+};
+
 export type ModelStreamEvent =
   | { readonly type: "text-delta"; readonly text: string }
   | { readonly type: "tool-call"; readonly call: ModelToolCall }
+  | { readonly type: "usage"; readonly usage: ModelTokenUsage }
   | {
       readonly type: "done";
       readonly finishReason: "stop" | "tool-call";

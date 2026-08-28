@@ -100,6 +100,49 @@ test("完成两轮后按顺序提交完整历史", async () => {
   ]);
 });
 
+test("纯文本 CLI 兼容完成原因前后的 Usage 并拒绝重复用量", async () => {
+  const usage = {
+    type: "usage" as const,
+    usage: { promptTokens: 3, completionTokens: 2, totalTokens: 5 },
+  };
+  const provider = new ScriptedProvider(
+    () => events(
+      usage,
+      { type: "text-delta", text: "前置" },
+      { type: "done", finishReason: "stop" },
+    ),
+    () => events(
+      { type: "text-delta", text: "后置" },
+      { type: "done", finishReason: "stop" },
+      usage,
+    ),
+    () => events(
+      { type: "done", finishReason: "stop" },
+      usage,
+      usage,
+    ),
+  );
+  const session = new InMemoryConversationSession(provider);
+
+  const before = await collect(
+    session.streamTurn("前", new AbortController().signal),
+  );
+  const after = await collect(
+    session.streamTurn("后", new AbortController().signal),
+  );
+  const duplicate = await collect(
+    session.streamTurn("重复", new AbortController().signal),
+  );
+
+  assert.equal(before.at(-1)?.type, "completed");
+  assert.equal(after.at(-1)?.type, "completed");
+  assert.equal(duplicate.at(-1)?.type, "failed");
+  assert.deepEqual(session.getHistory().slice(-2), [
+    { role: "user", content: "后" },
+    { role: "assistant", content: "后置" },
+  ]);
+});
+
 test("历史快照不能修改会话内部状态", async () => {
   const provider = new ScriptedProvider(
     () =>

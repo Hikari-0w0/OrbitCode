@@ -7,9 +7,11 @@ import {
   DONE_EVENT,
   startOpenAIMockServer,
   textDelta,
+  TEXT_FINISH_EVENT,
   toolCallDelta,
   TOOL_FINISH_EVENT,
   TRANSPORT_DONE_EVENT,
+  usageEvent,
 } from "../../tests/helpers/openai-mock";
 
 async function collect(
@@ -77,6 +79,7 @@ test("发送正确请求并按网络分块实时产出文本", async () => {
       model: "test-model",
       messages: [{ role: "user", content: "问候" }],
       stream: true,
+      stream_options: { include_usage: true },
       tool_choice: "none",
     });
   } finally {
@@ -337,10 +340,537 @@ test("跨事件与网络分块拼接单个工具调用并发送标准定义", as
       model: "test-model",
       messages: [{ role: "user", content: "读取" }],
       stream: true,
+      stream_options: { include_usage: true },
       tool_choice: "auto",
       tools,
-      parallel_tool_calls: false,
+      parallel_tool_calls: true,
     });
+  } finally {
+    await server.close();
+  }
+});
+
+test("按索引拼接多个工具调用并在完成后接收 Token 用量", async () => {
+  const server = await startOpenAIMockServer(() => ({
+    chunks: [
+      {
+        data:
+          toolCallDelta({
+            index: 0,
+            id: "call_read",
+            name: "read_",
+            argumentsJson: '{"path":"',
+          }) +
+          toolCallDelta({
+            index: 1,
+            id: "call_search",
+            name: "search_",
+            argumentsJson: '{"query":"Agent',
+          }),
+      },
+      {
+        data:
+          toolCallDelta({ index: 0, name: "file", argumentsJson: 'README.md"}' }) +
+          toolCallDelta({ index: 1, name: "code", argumentsJson: 'Loop"}' }) +
+          TOOL_FINISH_EVENT +
+          usageEvent({ promptTokens: 12, completionTokens: 8, totalTokens: 20 }) +
+          TRANSPORT_DONE_EVENT,
+      },
+    ],
+  }));
+  try {
+    const provider = new OpenAICompatibleProvider({
+      model: "test-model",
+      baseUrl: server.baseUrl,
+      apiKey: "test-secret",
+    });
+    const tools = [{
+      type: "function" as const,
+      function: {
+        name: "read_file",
+        description: "读取",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+      },
+    }];
+    assert.deepEqual(
+      await collect(provider.stream([], {
+        signal: new AbortController().signal,
+        tools,
+        toolChoice: "auto",
+      })),
+      [
+        {
+          type: "tool-call",
+          call: {
+            id: "call_read",
+            name: "read_file",
+            argumentsJson: '{"path":"README.md"}',
+          },
+        },
+        {
+          type: "tool-call",
+          call: {
+            id: "call_search",
+            name: "search_code",
+            argumentsJson: '{"query":"AgentLoop"}',
+          },
+        },
+        { type: "done", finishReason: "tool-call" },
+        {
+          type: "usage",
+          usage: { promptTokens: 12, completionTokens: 8, totalTokens: 20 },
+        },
+      ],
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("最多接受十六个连续工具调用并拒绝第十七个", async () => {
+  const rawCalls = (count: number): string => `data: ${JSON.stringify({
+    choices: [{
+      delta: {
+        tool_calls: Array.from({ length: count }, (_, index) => ({
+          index,
+          id: `call_${index}`,
+          type: "function",
+          function: { name: "read_file", arguments: "{}" },
+        })),
+      },
+    }],
+  })}\n\n`;
+  const server = await startOpenAIMockServer(() => ({
+    chunks: [{
+      data: server.requests.length === 1
+        ? rawCalls(16) + TOOL_FINISH_EVENT + TRANSPORT_DONE_EVENT
+        : rawCalls(17) + TOOL_FINISH_EVENT + TRANSPORT_DONE_EVENT,
+    }],
+  }));
+  try {
+    const provider = new OpenAICompatibleProvider({
+      model: "test-model",
+      baseUrl: server.baseUrl,
+      apiKey: "test-secret",
+    });
+    const tools = [{
+      type: "function" as const,
+      function: {
+        name: "read_file",
+        description: "读取",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+      },
+    }];
+
+    const accepted = await collect(provider.stream([], {
+      signal: new AbortController().signal,
+      tools,
+      toolChoice: "auto",
+    }));
+    assert.deepEqual(
+      accepted.filter((event) => event.type === "tool-call").map((event) => event.call.id),
+      Array.from({ length: 16 }, (_, index) => `call_${index}`),
+    );
+    await assert.rejects(
+      collect(provider.stream([], {
+        signal: new AbortController().signal,
+        tools,
+        toolChoice: "auto",
+      })),
+      ProviderError,
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("缺失 Token 用量保持兼容，非法或递减用量被拒绝", async () => {
+  const scenarios = [
+    usageEvent({ promptTokens: 2, completionTokens: 3, totalTokens: 9 }),
+    usageEvent({ promptTokens: 2, completionTokens: 3, totalTokens: 5 }) +
+      usageEvent({ promptTokens: 2, completionTokens: 2, totalTokens: 4 }),
+  ];
+  for (const usage of scenarios) {
+    const server = await startOpenAIMockServer(() => ({
+      chunks: [{ data: TEXT_FINISH_EVENT + usage + TRANSPORT_DONE_EVENT }],
+    }));
+    try {
+      const provider = new OpenAICompatibleProvider({
+        model: "test-model",
+        baseUrl: server.baseUrl,
+        apiKey: "test-secret",
+      });
+      await assert.rejects(
+        collect(provider.stream([], {
+          signal: new AbortController().signal,
+          toolChoice: "none",
+        })),
+        ProviderError,
+      );
+    } finally {
+      await server.close();
+    }
+  }
+});
+
+test("兼容 Token 用量位于完成原因之前", async () => {
+  const server = await startOpenAIMockServer(() => ({
+    chunks: [{
+      data:
+        usageEvent({ promptTokens: 4, completionTokens: 2, totalTokens: 6 }) +
+        textDelta("完成") +
+        TEXT_FINISH_EVENT +
+        TRANSPORT_DONE_EVENT,
+    }],
+  }));
+  try {
+    const provider = new OpenAICompatibleProvider({
+      model: "test-model",
+      baseUrl: server.baseUrl,
+      apiKey: "test-secret",
+    });
+    assert.deepEqual(
+      await collect(provider.stream([], {
+        signal: new AbortController().signal,
+        toolChoice: "none",
+      })),
+      [
+        { type: "text-delta", text: "完成" },
+        { type: "done", finishReason: "stop" },
+        {
+          type: "usage",
+          usage: { promptTokens: 4, completionTokens: 2, totalTokens: 6 },
+        },
+      ],
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("兼容 SiliconFlow 在文本结束 chunk 中附带 Token 用量", async () => {
+  const server = await startOpenAIMockServer(() => ({
+    chunks: [{
+      data:
+        `data: ${JSON.stringify({
+          choices: [{
+            delta: { content: "完成" },
+            finish_reason: "stop",
+          }],
+          usage: {
+            prompt_tokens: 4,
+            completion_tokens: 2,
+            total_tokens: 6,
+          },
+        })}\n\n` + TRANSPORT_DONE_EVENT,
+    }],
+  }));
+  try {
+    const provider = new OpenAICompatibleProvider({
+      model: "test-model",
+      baseUrl: server.baseUrl,
+      apiKey: "test-secret",
+    });
+    assert.deepEqual(
+      await collect(provider.stream([], {
+        signal: new AbortController().signal,
+        toolChoice: "none",
+      })),
+      [
+        { type: "text-delta", text: "完成" },
+        { type: "done", finishReason: "stop" },
+        {
+          type: "usage",
+          usage: { promptTokens: 4, completionTokens: 2, totalTokens: 6 },
+        },
+      ],
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("兼容 SiliconFlow 在工具调用结束 chunk 中附带 Token 用量", async () => {
+  const server = await startOpenAIMockServer(() => ({
+    chunks: [{
+      data:
+        `data: ${JSON.stringify({
+          choices: [{
+            delta: {
+              tool_calls: [{
+                index: 0,
+                id: "call_write",
+                type: "function",
+                function: {
+                  name: "write_file",
+                  arguments: '{"path":"hello.txt","content":"Hello World"}',
+                },
+              }],
+            },
+            finish_reason: "tool_calls",
+          }],
+          usage: {
+            prompt_tokens: 10,
+            completion_tokens: 8,
+            total_tokens: 18,
+          },
+        })}\n\n` + TRANSPORT_DONE_EVENT,
+    }],
+  }));
+  try {
+    const provider = new OpenAICompatibleProvider({
+      model: "test-model",
+      baseUrl: server.baseUrl,
+      apiKey: "test-secret",
+    });
+    assert.deepEqual(
+      await collect(provider.stream([], {
+        signal: new AbortController().signal,
+        toolChoice: "auto",
+        tools: [{
+          type: "function",
+          function: {
+            name: "write_file",
+            description: "写入文件",
+            parameters: {
+              type: "object",
+              properties: {
+                path: { type: "string" },
+                content: { type: "string" },
+              },
+              required: ["path", "content"],
+              additionalProperties: false,
+            },
+          },
+        }],
+      })),
+      [
+        {
+          type: "tool-call",
+          call: {
+            id: "call_write",
+            name: "write_file",
+            argumentsJson: '{"path":"hello.txt","content":"Hello World"}',
+          },
+        },
+        { type: "done", finishReason: "tool-call" },
+        {
+          type: "usage",
+          usage: { promptTokens: 10, completionTokens: 8, totalTokens: 18 },
+        },
+      ],
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("兼容 SiliconFlow 用空响应选项承载尾随 Token 用量", async () => {
+  const server = await startOpenAIMockServer(() => ({
+    chunks: [{
+      data:
+        toolCallDelta({
+          id: "call_write",
+          name: "write_file",
+          argumentsJson: '{"path":"hello.txt","content":"hello world"}',
+        }) +
+        TOOL_FINISH_EVENT +
+        `data: ${JSON.stringify({
+          choices: [{ delta: {}, finish_reason: null }],
+          usage: {
+            prompt_tokens: 10,
+            completion_tokens: 8,
+            total_tokens: 18,
+          },
+        })}\n\n` +
+        TRANSPORT_DONE_EVENT,
+    }],
+  }));
+  try {
+    const provider = new OpenAICompatibleProvider({
+      model: "test-model",
+      baseUrl: server.baseUrl,
+      apiKey: "test-secret",
+    });
+    assert.deepEqual(
+      await collect(provider.stream([], {
+        signal: new AbortController().signal,
+        toolChoice: "auto",
+        tools: [{
+          type: "function",
+          function: {
+            name: "write_file",
+            description: "写入文件",
+            parameters: {
+              type: "object",
+              properties: {
+                path: { type: "string" },
+                content: { type: "string" },
+              },
+              required: ["path", "content"],
+              additionalProperties: false,
+            },
+          },
+        }],
+      })),
+      [
+        {
+          type: "tool-call",
+          call: {
+            id: "call_write",
+            name: "write_file",
+            argumentsJson: '{"path":"hello.txt","content":"hello world"}',
+          },
+        },
+        { type: "done", finishReason: "tool-call" },
+        {
+          type: "usage",
+          usage: { promptTokens: 10, completionTokens: 8, totalTokens: 18 },
+        },
+      ],
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("将 SiliconFlow 每个增量携带的累计 Token 用量归一为最终值", async () => {
+  const event = (
+    delta: Record<string, unknown>,
+    completionTokens: number,
+    finishReason: string | null = null,
+  ): string => `data: ${JSON.stringify({
+    choices: [{ delta, finish_reason: finishReason }],
+    usage: {
+      prompt_tokens: 10,
+      completion_tokens: completionTokens,
+      total_tokens: 10 + completionTokens,
+    },
+  })}\n\n`;
+  const server = await startOpenAIMockServer(() => ({
+    chunks: [{
+      data:
+        event({ role: "assistant", content: "" }, 0) +
+        event({ content: "", reasoning_content: "分析" }, 1) +
+        event({
+          content: "",
+          tool_calls: [{
+            index: 0,
+            id: "call_write",
+            type: "function",
+            function: {
+              name: "write_file",
+              arguments: '{"path":"hello.txt",',
+            },
+          }],
+        }, 4) +
+        event({
+          content: "",
+          tool_calls: [{
+            index: 0,
+            id: null,
+            type: "function",
+            function: { name: null, arguments: '"content":"Hello World"}' },
+          }],
+        }, 8) +
+        event({ content: "" }, 8, "tool_calls") +
+        usageEvent({ promptTokens: 10, completionTokens: 8, totalTokens: 18 }) +
+        TRANSPORT_DONE_EVENT,
+    }],
+  }));
+  try {
+    const provider = new OpenAICompatibleProvider({
+      model: "test-model",
+      baseUrl: server.baseUrl,
+      apiKey: "test-secret",
+    });
+    assert.deepEqual(
+      await collect(provider.stream([], {
+        signal: new AbortController().signal,
+        toolChoice: "auto",
+        tools: [{
+          type: "function",
+          function: {
+            name: "write_file",
+            description: "写入文件",
+            parameters: {
+              type: "object",
+              properties: {
+                path: { type: "string" },
+                content: { type: "string" },
+              },
+              required: ["path", "content"],
+              additionalProperties: false,
+            },
+          },
+        }],
+      })),
+      [
+        {
+          type: "tool-call",
+          call: {
+            id: "call_write",
+            name: "write_file",
+            argumentsJson: '{"path":"hello.txt","content":"Hello World"}',
+          },
+        },
+        { type: "done", finishReason: "tool-call" },
+        {
+          type: "usage",
+          usage: { promptTokens: 10, completionTokens: 8, totalTokens: 18 },
+        },
+      ],
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("兼容未结束的文本增量携带累计 Token 用量", async () => {
+  const server = await startOpenAIMockServer(() => ({
+    chunks: [{
+      data:
+        `data: ${JSON.stringify({
+          choices: [{ delta: { content: "尚未" }, finish_reason: null }],
+          usage: {
+            prompt_tokens: 4,
+            completion_tokens: 2,
+            total_tokens: 6,
+          },
+        })}\n\n` +
+        `data: ${JSON.stringify({
+          choices: [{ delta: { content: "完成" }, finish_reason: null }],
+          usage: {
+            prompt_tokens: 4,
+            completion_tokens: 3,
+            total_tokens: 7,
+          },
+        })}\n\n` +
+        TEXT_FINISH_EVENT +
+        TRANSPORT_DONE_EVENT,
+    }],
+  }));
+  try {
+    const provider = new OpenAICompatibleProvider({
+      model: "test-model",
+      baseUrl: server.baseUrl,
+      apiKey: "test-secret",
+    });
+    assert.deepEqual(
+      await collect(provider.stream([], {
+        signal: new AbortController().signal,
+        toolChoice: "none",
+      })),
+      [
+        { type: "text-delta", text: "尚未" },
+        { type: "text-delta", text: "完成" },
+        { type: "done", finishReason: "stop" },
+        {
+          type: "usage",
+          usage: { promptTokens: 4, completionTokens: 3, totalTokens: 7 },
+        },
+      ],
+    );
   } finally {
     await server.close();
   }
@@ -567,7 +1097,7 @@ test("禁用工具时拒绝工具响应，且工具消息按协议序列化", as
   }
 });
 
-test("拒绝冲突标识、缺失标识、错误索引、多个调用和错误完成原因", async () => {
+test("拒绝冲突/重复/不安全标识、错误索引、超长参数和错误完成原因", async () => {
   const raw = (value: unknown): string => `data: ${JSON.stringify(value)}\n\n`;
   const indexed = raw({
     choices: [{
@@ -581,23 +1111,32 @@ test("拒绝冲突标识、缺失标识、错误索引、多个调用和错误�
       },
     }],
   });
-  const multiple = raw({
-    choices: [{
-      delta: {
-        tool_calls: [
-          { index: 0, id: "one", function: { name: "read_file", arguments: "{}" } },
-          { index: 1, id: "two", function: { name: "read_file", arguments: "{}" } },
-        ],
-      },
-    }],
-  });
   const scenarios = [
     toolCallDelta({ id: "one", name: "read_file", argumentsJson: "{}" }) +
       toolCallDelta({ id: "two" }) + TOOL_FINISH_EVENT + TRANSPORT_DONE_EVENT,
     toolCallDelta({ name: "read_file", argumentsJson: "{}" }) +
       TOOL_FINISH_EVENT + TRANSPORT_DONE_EVENT,
     indexed + TOOL_FINISH_EVENT + TRANSPORT_DONE_EVENT,
-    multiple + TOOL_FINISH_EVENT + TRANSPORT_DONE_EVENT,
+    toolCallDelta({
+      index: 0,
+      id: "duplicate",
+      name: "read_file",
+      argumentsJson: "{}",
+    }) + toolCallDelta({
+      index: 1,
+      id: "duplicate",
+      name: "read_file",
+      argumentsJson: "{}",
+    }) + TOOL_FINISH_EVENT + TRANSPORT_DONE_EVENT,
+    toolCallDelta({ id: "unsafe id", name: "read_file", argumentsJson: "{}" }) +
+      TOOL_FINISH_EVENT + TRANSPORT_DONE_EVENT,
+    toolCallDelta({ id: "safe_id", name: "../write_file", argumentsJson: "{}" }) +
+      TOOL_FINISH_EVENT + TRANSPORT_DONE_EVENT,
+    toolCallDelta({
+      id: "too_large",
+      name: "read_file",
+      argumentsJson: "x".repeat(64 * 1024 + 1),
+    }) + TOOL_FINISH_EVENT + TRANSPORT_DONE_EVENT,
     toolCallDelta({ id: "wrong_finish", name: "read_file", argumentsJson: "{}" }) +
       DONE_EVENT,
   ];

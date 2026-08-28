@@ -22,6 +22,13 @@ export class ConversationStateError extends Error {
   }
 }
 
+export class AgentConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AgentConfigurationError";
+  }
+}
+
 export function toRecoverableChatError(error: unknown): RecoverableChatError {
   if (!(error instanceof ProviderError)) {
     return {

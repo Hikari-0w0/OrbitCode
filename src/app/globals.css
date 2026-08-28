@@ -106,6 +106,9 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .chatKicker { margin: 0 0 6px; color: var(--text-dim); font: 600 9px/1 ui-monospace, monospace; letter-spacing: .13em; }
 .chatHeader h2 { margin: 0; font-size: 17px; font-weight: 620; letter-spacing: -.02em; }
 .headerActions { display: flex; align-items: center; gap: 11px; }
+.modeBadge { display: inline-flex; height: 24px; align-items: center; padding: 0 8px; border: 1px solid; border-radius: 999px; font: 650 8px/1 ui-monospace, monospace; letter-spacing: .1em; }
+.modeBadge--do { border-color: rgb(168 240 184 / 26%); background: rgb(168 240 184 / 6%); color: var(--green); }
+.modeBadge--plan { border-color: rgb(230 163 111 / 30%); background: rgb(230 163 111 / 7%); color: var(--orange); }
 .connectionState { display: inline-flex; align-items: center; gap: 7px; color: var(--text-dim); font: 550 10px/1 ui-monospace, monospace; }
 .connectionState i { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
 .connectionState--loading i, .connectionState--streaming i, .connectionState--stopping i { animation: pulse 1.2s ease-in-out infinite; }
@@ -136,6 +139,15 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .messageDetail { display: inline-flex; margin: 10px 0 0; padding: 6px 9px; border-radius: 6px; font-size: 10px; line-height: 1.45; }
 .messageDetail--failed { background: rgb(241 140 131 / 8%); color: var(--danger); }
 .messageDetail--cancelled { background: rgb(230 163 111 / 8%); color: var(--orange); }
+.agentProgress { margin-top: 9px; padding: 9px 10px; border: 1px solid rgb(168 240 184 / 14%); border-radius: 7px; background: rgb(168 240 184 / 3%); }
+.progressHeader { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--text-dim); font: 500 9px/1.3 ui-monospace, monospace; }
+.progressHeader span:first-child { color: var(--green); }
+.progressTrack { height: 2px; margin-top: 8px; overflow: hidden; border-radius: 99px; background: var(--line); }
+.progressTrack span { display: block; height: 100%; border-radius: inherit; background: var(--green); box-shadow: 0 0 8px rgb(168 240 184 / 50%); transition: width .2s ease; }
+.usageLine { margin: 11px 0 0; color: var(--text-dim); font: 500 9px/1.4 ui-monospace, monospace; }
+.stopReason { margin: 8px 0 0; color: var(--text-dim); font: 500 9px/1.4 ui-monospace, monospace; }
+.stopReason--failed { color: var(--danger); }
+.stopReason--cancelled { color: var(--orange); }
 .streamingCursor { display: inline-block; width: 7px; height: 15px; margin: 9px 0 0 2px; vertical-align: -2px; background: var(--green); animation: blink 1s step-end infinite; }
 .toolExecutionList { display: grid; gap: 8px; margin-top: 12px; }
 .toolCard { overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: rgb(255 255 255 / 1.5%); }
@@ -149,6 +161,9 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .toolCard--failed, .toolCard--timed-out { border-color: rgb(241 140 131 / 22%); }
 .toolCard--failed .toolStateDot, .toolCard--timed-out .toolStateDot { background: var(--danger); }
 .toolCard--cancelled .toolStateDot { background: var(--orange); }
+.toolCard--queued .toolStateDot { background: var(--text-dim); animation: pulse 1.6s ease-in-out infinite; }
+.toolCard--skipped .toolStateDot { background: var(--text-dim); }
+.toolCard--skipped { opacity: .68; }
 .toolCardDetails { border-top: 1px solid var(--line-soft); }
 .toolCardDetails summary { padding: 8px 10px; color: var(--text-dim); cursor: pointer; font-size: 9px; }
 .toolCardDetails pre { max-height: 210px; margin: 0; overflow: auto; padding: 0 10px 10px; color: #aeb8b0; font: 500 9px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -177,7 +192,10 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .composer textarea::placeholder { color: #566058; }
 .composer textarea:disabled { color: var(--text-dim); }
 .composerFooter { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 7px; }
-.composerHint { color: #566058; font-size: 9px; }
+.composerHint { display: inline-flex; align-items: center; gap: 5px; color: #566058; font-size: 9px; }
+.composerMode { display: inline-flex; height: 19px; align-items: center; margin-right: 3px; padding: 0 6px; border: 1px solid; border-radius: 999px; font: 650 7px/1 ui-monospace, monospace; letter-spacing: .08em; }
+.composerMode--do { border-color: rgb(168 240 184 / 22%); color: var(--green); }
+.composerMode--plan { border-color: rgb(230 163 111 / 28%); color: var(--orange); }
 kbd { padding: 1px 4px; border: 1px solid var(--line); border-radius: 4px; background: #171b18; color: #7d877f; font: inherit; }
 .sendButton, .stopButton { display: inline-flex; height: 31px; align-items: center; justify-content: center; border-radius: 7px; }
 .sendButton { width: 34px; border: 0; background: var(--green); color: #101411; }
@@ -213,6 +231,7 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
   .orbitMark { width: 34px; height: 34px; }
   .chatHeader h2 { font-size: 15px; }
   .chatKicker, .connectionState { display: none; }
+  .modeBadge { display: none; }
   .clearButton { width: 34px; padding: 0; justify-content: center; font-size: 0; }
   .noticeBanner { margin: 10px 13px 0; }
   .suggestionGrid { grid-template-columns: 1fr; }

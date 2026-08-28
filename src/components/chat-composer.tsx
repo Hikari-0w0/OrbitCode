@@ -2,10 +2,14 @@
 
 import type { KeyboardEvent } from "react";
 
-import { MAX_WEB_CHAT_MESSAGE_LENGTH } from "@/web/chat-contract";
+import {
+  MAX_WEB_CHAT_MESSAGE_LENGTH,
+  type WebChatRequest,
+} from "@/web/chat-contract";
 
 type ChatComposerProps = {
   readonly value: string;
+  readonly mode: WebChatRequest["mode"];
   readonly disabled: boolean;
   readonly isStreaming: boolean;
   readonly isStopping: boolean;
@@ -16,6 +20,7 @@ type ChatComposerProps = {
 
 export function ChatComposer({
   value,
+  mode,
   disabled,
   isStreaming,
   isStopping,
@@ -47,14 +52,23 @@ export function ChatComposer({
           value={value}
           rows={3}
           maxLength={MAX_WEB_CHAT_MESSAGE_LENGTH}
-          placeholder={disabled ? "模型配置不可用" : "给 OrbitCode 发送消息…"}
+          placeholder={
+            disabled
+              ? "模型配置不可用"
+              : mode === "plan"
+                ? "描述需要分析和规划的任务…"
+                : "给 OrbitCode 发送任务…"
+          }
           disabled={disabled || isStreaming}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={handleKeyDown}
         />
         <div className="composerFooter">
           <span className="composerHint">
-            <kbd>Enter</kbd> 发送 · <kbd>Shift</kbd> + <kbd>Enter</kbd> 换行
+            <span className={`composerMode composerMode--${mode}`}>
+              {mode === "plan" ? "PLAN" : "DO"}
+            </span>
+            <kbd>Enter</kbd> 发送 · 输入 <kbd>/plan</kbd> 或 <kbd>/do</kbd> 切换
           </span>
           {isStreaming ? (
             <button

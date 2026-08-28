@@ -53,6 +53,7 @@ export class InMemoryConversationSession implements ConversationSession {
     const requestMessages = [...this.history, userMessage];
     let assistantContent = "";
     let completed = false;
+    let usageReceived = false;
 
     try {
       for await (const event of this.provider.stream(requestMessages, {
@@ -61,6 +62,14 @@ export class InMemoryConversationSession implements ConversationSession {
       })) {
         if (signal.aborted) {
           throw new ProviderError("cancelled", "模型请求已取消。");
+        }
+
+        if (event.type === "usage") {
+          if (usageReceived) {
+            throw new ProviderError("protocol", "模型重复返回 Token 用量。");
+          }
+          usageReceived = true;
+          continue;
         }
 
         if (completed) {

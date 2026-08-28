@@ -7,6 +7,7 @@ import {
   type ToolExecutionContext,
   type ToolExecutionResult,
   type ToolInputSchema,
+  type ToolMutability,
   type ToolName,
 } from "@/tools/types";
 
@@ -14,11 +15,17 @@ export type RegisteredTool = {
   readonly name: ToolName;
   readonly description: string;
   readonly inputSchema: ToolInputSchema<unknown>;
-  readonly mutability: "read-only" | "workspace-write" | "command";
+  readonly mutability: ToolMutability;
   executeUnknown(
     input: unknown,
     context: ToolExecutionContext,
   ): Promise<ToolExecutionResult>;
+};
+
+export type ToolDescriptor = {
+  readonly name: ToolName;
+  readonly mutability: ToolMutability;
+  readonly definition: ModelToolDefinition;
 };
 
 export class ToolRegistry {
@@ -36,14 +43,39 @@ export class ToolRegistry {
   }
 
   definitions(): readonly ModelToolDefinition[] {
+    return this.descriptors().map((descriptor) => descriptor.definition);
+  }
+
+  descriptors(): readonly ToolDescriptor[] {
     return [...this.tools.values()].map((tool) => ({
-      type: "function",
-      function: {
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.inputSchema.jsonSchema,
+      name: tool.name,
+      mutability: tool.mutability,
+      definition: {
+        type: "function",
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.inputSchema.jsonSchema,
+        },
       },
     }));
+  }
+
+  descriptor(name: string): ToolDescriptor | undefined {
+    const tool = this.tools.get(name);
+    if (!tool) return undefined;
+    return {
+      name: tool.name,
+      mutability: tool.mutability,
+      definition: {
+        type: "function",
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.inputSchema.jsonSchema,
+        },
+      },
+    };
   }
 
   has(name: string): name is ToolName {
@@ -58,7 +90,7 @@ export class ToolRegistry {
     const startedAt = Date.now();
     const tool = this.tools.get(name);
     if (!tool) {
-      return toolFailure("invalid-arguments", `未知工具：${safeName(name)}`, {
+      return toolFailure("unknown-tool", `未知工具：${safeName(name)}`, {
         retryable: true,
         durationMs: Date.now() - startedAt,
       });
