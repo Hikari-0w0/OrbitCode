@@ -103,7 +103,12 @@ test("完成两轮后按顺序提交完整历史", async () => {
 test("纯文本 CLI 兼容完成原因前后的 Usage 并拒绝重复用量", async () => {
   const usage = {
     type: "usage" as const,
-    usage: { promptTokens: 3, completionTokens: 2, totalTokens: 5 },
+    usage: {
+      promptTokens: 3,
+      completionTokens: 2,
+      totalTokens: 5,
+      promptCache: { availability: "unavailable" } as const,
+    },
   };
   const provider = new ScriptedProvider(
     () => events(

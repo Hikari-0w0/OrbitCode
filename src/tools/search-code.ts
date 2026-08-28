@@ -16,7 +16,8 @@ const MAX_LINE_PREVIEW = 500;
 
 export const searchCodeTool = defineTool({
   name: "search_code",
-  description: "在授权工作目录内按字面量搜索 UTF-8 代码内容。",
+  description:
+    "在授权 Workspace 内按字面量搜索 UTF-8 代码内容，优先于 shell 的 grep/rg。用于定位定义、引用和文本出现位置；需要完整文件内容时再用 read_file。",
   inputSchema: objectSchema({
     query: stringSchema({ minLength: 1, maxLength: 1_024 }),
     path: optionalSchema(stringSchema({

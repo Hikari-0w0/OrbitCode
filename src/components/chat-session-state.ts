@@ -14,6 +14,7 @@ export type ChatSessionState = {
   readonly selectedWorkspaceId: string;
   readonly selectedProvider: string;
   readonly mode: AgentMode;
+  readonly modeTurn: number;
   readonly messages: readonly VisibleMessage[];
   readonly history: readonly PlainConversationMessage[];
   readonly draft: string;
@@ -42,6 +43,7 @@ export type ChatSessionAction =
   | {
       readonly type: "request-started";
       readonly mode: AgentMode;
+      readonly modeTurn: number;
       readonly userId: string;
       readonly assistantId: string;
       readonly userMessage: PlainConversationMessage;
@@ -77,6 +79,7 @@ export const INITIAL_CHAT_SESSION_STATE: ChatSessionState = {
   selectedWorkspaceId: "",
   selectedProvider: "",
   mode: "do",
+  modeTurn: 0,
   messages: [],
   history: [],
   draft: "",
@@ -116,6 +119,7 @@ export function chatSessionReducer(
     return {
       ...state,
       mode: action.mode,
+      modeTurn: state.mode === action.mode ? state.modeTurn : 0,
       draft: action.clearDraft ? "" : state.draft,
       executablePlanMessageId: undefined,
       notice: action.notice,
@@ -137,6 +141,7 @@ export function chatSessionReducer(
     return {
       ...state,
       mode: action.mode,
+      modeTurn: action.modeTurn,
       draft: "",
       notice: undefined,
       requestState: "streaming",
@@ -274,6 +279,7 @@ function resetConversation(
     ...state,
     ...selections,
     mode: "do",
+    modeTurn: 0,
     messages: [],
     history: [],
     draft: "",

@@ -7,7 +7,8 @@ import { WORKSPACE_RELATIVE_PATH_DESCRIPTION } from "@/tools/workspace-path";
 
 export const editFileTool = defineTool({
   name: "edit_file",
-  description: "在文本文件中执行一次原文唯一匹配替换。",
+  description:
+    "在已有文本文件中执行一次原文唯一匹配替换。调用前必须先用 read_file 读取最新内容，并从该内容构造唯一、精确的 old_text；不要用 shell 命令编辑文件。",
   inputSchema: objectSchema({
     path: stringSchema({
       minLength: 1,

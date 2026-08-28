@@ -18,6 +18,7 @@ test("接受严格的多轮请求并保留消息顺序", () => {
     provider: " primary ",
     workspaceId: "project-a",
     mode: "plan",
+    modeTurn: 5,
     messages: [
       { role: "user", content: "第一问" },
       { role: "assistant", content: "第一答" },
@@ -28,6 +29,7 @@ test("接受严格的多轮请求并保留消息顺序", () => {
   assert.equal(result.provider, "primary");
   assert.equal(result.workspaceId, "project-a");
   assert.equal(result.mode, "plan");
+  assert.equal(result.modeTurn, 5);
   assert.deepEqual(result.messages, [
     { role: "user", content: "第一问" },
     { role: "assistant", content: "第一答" },
@@ -38,25 +40,27 @@ test("接受严格的多轮请求并保留消息顺序", () => {
 test("拒绝未知字段、非法角色顺序和空内容", () => {
   const invalidValues: readonly unknown[] = [
     null,
-    { provider: "primary", workspaceId: "project", mode: "do", messages: [], extra: true },
-    { provider: "", workspaceId: "project", mode: "do", messages: [{ role: "user", content: "问题" }] },
-    { provider: "primary", workspaceId: "project", mode: "invalid", messages: [{ role: "user", content: "问题" }] },
-    { provider: "primary", workspaceId: "project", mode: "do", messages: [{ role: "system", content: "越界" }] },
-    { provider: "primary", workspaceId: "project", mode: "do", messages: [{ role: "assistant", content: "回答" }] },
+    { provider: "primary", workspaceId: "project", mode: "do", modeTurn: 1, messages: [], extra: true },
+    { provider: "", workspaceId: "project", mode: "do", modeTurn: 1, messages: [{ role: "user", content: "问题" }] },
+    { provider: "primary", workspaceId: "project", mode: "invalid", modeTurn: 1, messages: [{ role: "user", content: "问题" }] },
+    { provider: "primary", workspaceId: "project", mode: "do", modeTurn: 1, messages: [{ role: "system", content: "越界" }] },
+    { provider: "primary", workspaceId: "project", mode: "do", modeTurn: 1, messages: [{ role: "assistant", content: "回答" }] },
     {
       provider: "primary",
       workspaceId: "project",
       mode: "do",
+      modeTurn: 1,
       messages: [
         { role: "user", content: "问题" },
         { role: "user", content: "重复" },
       ],
     },
-    { provider: "primary", workspaceId: "project", mode: "do", messages: [{ role: "user", content: "   " }] },
+    { provider: "primary", workspaceId: "project", mode: "do", modeTurn: 1, messages: [{ role: "user", content: "   " }] },
     {
       provider: "primary",
       workspaceId: "project",
       mode: "do",
+      modeTurn: 1,
       messages: [{ role: "user", content: "问题", extra: true }],
     },
   ];
@@ -73,6 +77,7 @@ test("拒绝超长内容和过多历史", () => {
         provider: "primary",
         workspaceId: "project",
         mode: "do",
+        modeTurn: 1,
         messages: [
           { role: "user", content: "x".repeat(MAX_WEB_CHAT_MESSAGE_LENGTH + 1) },
         ],
@@ -85,7 +90,7 @@ test("拒绝超长内容和过多历史", () => {
     content: String(index),
   }));
   assert.throws(
-    () => parseWebChatRequest({ provider: "primary", workspaceId: "project", mode: "do", messages }),
+    () => parseWebChatRequest({ provider: "primary", workspaceId: "project", mode: "do", modeTurn: 1, messages }),
     /数量/,
   );
 });
@@ -97,6 +102,7 @@ test("Workspace ID 必须是有界的不透明标识且不接受路径字段", (
         provider: "primary",
         workspaceId,
         mode: "do",
+        modeTurn: 1,
         messages: [{ role: "user", content: "问题" }],
       }),
       WebChatContractError,
@@ -108,10 +114,26 @@ test("Workspace ID 必须是有界的不透明标识且不接受路径字段", (
       workspaceId: "project",
       workspacePath: "/tmp/project",
       mode: "do",
+      modeTurn: 1,
       messages: [{ role: "user", content: "问题" }],
     }),
     WebChatContractError,
   );
+});
+
+test("模式连续轮次必须是有界正整数", () => {
+  for (const modeTurn of [undefined, 0, -1, 1.5, 10_001]) {
+    assert.throws(
+      () => parseWebChatRequest({
+        provider: "primary",
+        workspaceId: "project",
+        mode: "do",
+        modeTurn,
+        messages: [{ role: "user", content: "问题" }],
+      }),
+      WebChatContractError,
+    );
+  }
 });
 
 test("Web SSE 事件按网络分块往返解析", async () => {
@@ -156,12 +178,14 @@ test("Web SSE 事件按网络分块往返解析", async () => {
         promptTokens: 2,
         completionTokens: 1,
         totalTokens: 3,
+        promptCache: { availability: "tokens", cachedTokens: 1 },
       },
       cumulative: {
         availability: "reported",
         promptTokens: 2,
         completionTokens: 1,
         totalTokens: 3,
+        promptCache: { availability: "tokens", cachedTokens: 1 },
       },
     },
     { type: "text-delta", iteration: 2, text: "Code" },
@@ -274,6 +298,18 @@ test("拒绝非法 Web SSE JSON 与事件结构", async () => {
         asAsync([
           Buffer.from(
             'data: {"type":"stopped","reason":"final-response","iterations":1,"sideEffect":"none","detail":"失败"}\n\n',
+          ),
+        ]),
+      ),
+    ),
+    /无效的流式事件/,
+  );
+  await assert.rejects(
+    collect(
+      parseWebChatEvents(
+        asAsync([
+          Buffer.from(
+            'data: {"type":"token-usage","iteration":1,"usage":{"availability":"reported","promptTokens":2,"completionTokens":1,"totalTokens":3,"promptCache":{"availability":"tokens","cachedTokens":-1}},"cumulative":{"availability":"unavailable"}}\n\n',
           ),
         ]),
       ),

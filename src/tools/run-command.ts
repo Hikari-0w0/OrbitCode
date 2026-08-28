@@ -16,7 +16,8 @@ const OUTPUT_LIMIT_BYTES = 128 * 1024;
 export function createRunCommandTool(sandbox: CommandSandbox) {
   return defineTool({
     name: "run_command",
-    description: "在严格隔离的授权工作目录内执行 shell 命令。",
+    description:
+      "在严格隔离的授权 Workspace 内执行确有必要的 shell 命令。不得用本工具替代 read_file、find_files、search_code、write_file 或 edit_file；仅在专用工具无法合理完成任务时使用。",
     inputSchema: objectSchema({
       command: stringSchema({ minLength: 1, maxLength: 8 * 1024 }),
       cwd: optionalSchema(stringSchema({

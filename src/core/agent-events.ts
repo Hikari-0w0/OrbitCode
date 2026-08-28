@@ -1,4 +1,8 @@
-import type { AssistantMessage, ModelToolCall } from "@/models/provider";
+import type {
+  AssistantMessage,
+  ModelToolCall,
+  PromptCacheUsage,
+} from "@/models/provider";
 import type { SideEffectState, ToolExecutionResult } from "@/tools/types";
 
 export type AgentMode = "plan" | "do";
@@ -19,6 +23,7 @@ export type TokenUsage =
       readonly promptTokens: number;
       readonly completionTokens: number;
       readonly totalTokens: number;
+      readonly promptCache: PromptCacheUsage;
     }
   | { readonly availability: "unavailable" };
 

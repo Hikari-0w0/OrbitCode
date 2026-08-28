@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { AgentLoop } from "@/core/agent-loop";
 import type { AgentEvent } from "@/core/agent-events";
-import { ConversationStateError } from "@/core/errors";
+import { AgentConfigurationError, ConversationStateError } from "@/core/errors";
 import {
   ProviderError,
   type ChatProvider,
@@ -56,13 +56,19 @@ test("直接最终回复产生 Usage 和唯一停止事件并提交历史", asyn
     { type: "done", finishReason: "stop" },
     {
       type: "usage",
-      usage: { promptTokens: 3, completionTokens: 2, totalTokens: 5 },
+      usage: {
+        promptTokens: 3,
+        completionTokens: 2,
+        totalTokens: 5,
+        promptCache: { availability: "unavailable" },
+      },
     },
   ]]);
   const agent = createAgent(provider, registry(), 4);
   const result = await collect(agent.streamTurn({
     input: "问题",
     mode: "do",
+    modeTurn: 1,
     signal: new AbortController().signal,
   }));
 
@@ -96,13 +102,83 @@ test("Plan 和 Do 系统消息都声明 Workspace 相对路径契约", async () 
     await collect(agent.streamTurn({
       input: "处理文件",
       mode,
+      modeTurn: 1,
       signal: new AbortController().signal,
     }));
 
-    const systemMessage = provider.requests[0]?.messages[0];
-    assert.equal(systemMessage?.role, "system");
-    assert.match(systemMessage?.content ?? "", /path 和 cwd.*Workspace.*相对路径/u);
+    const messages = provider.requests[0]?.messages ?? [];
+    assert.equal(messages[0]?.role, "system");
+    assert.match(messages[0]?.content ?? "", /path 和 cwd.*Workspace.*相对路径/u);
+    assert.match(messages[1]?.content ?? "", /^<orbitcode_environment>/u);
+    assert.match(messages[2]?.content ?? "", /^<orbitcode_session_instructions>/u);
   }
+});
+
+test("累计缓存 Token，并在混合数量与命中状态时保守降级为状态", async () => {
+  const provider = new ScriptedProvider([
+    [
+      { type: "tool-call", call: call("read-1", "read_file", "a") },
+      { type: "done", finishReason: "tool-call" },
+      {
+        type: "usage",
+        usage: {
+          promptTokens: 10,
+          completionTokens: 2,
+          totalTokens: 12,
+          promptCache: { availability: "tokens", cachedTokens: 4 },
+        },
+      },
+    ],
+    [
+      { type: "tool-call", call: call("read-2", "read_file", "b") },
+      { type: "done", finishReason: "tool-call" },
+      {
+        type: "usage",
+        usage: {
+          promptTokens: 20,
+          completionTokens: 3,
+          totalTokens: 23,
+          promptCache: { availability: "tokens", cachedTokens: 6 },
+        },
+      },
+    ],
+    [
+      { type: "text-delta", text: "完成" },
+      { type: "done", finishReason: "stop" },
+      {
+        type: "usage",
+        usage: {
+          promptTokens: 30,
+          completionTokens: 4,
+          totalTokens: 34,
+          promptCache: { availability: "status", hit: false },
+        },
+      },
+    ],
+  ]);
+  const agent = createAgent(provider, registry(), 4);
+  const result = await collect(agent.streamTurn({
+    input: "读取后回答",
+    mode: "do",
+    modeTurn: 1,
+    signal: new AbortController().signal,
+  }));
+  const usageEvents = result.filter((event) => event.type === "token-usage");
+
+  assert.deepEqual(usageEvents[1]?.cumulative, {
+    availability: "reported",
+    promptTokens: 30,
+    completionTokens: 5,
+    totalTokens: 35,
+    promptCache: { availability: "tokens", cachedTokens: 10 },
+  });
+  assert.deepEqual(usageEvents[2]?.cumulative, {
+    availability: "reported",
+    promptTokens: 60,
+    completionTokens: 9,
+    totalTokens: 69,
+    promptCache: { availability: "status", hit: true },
+  });
 });
 
 test("连续工具迭代把原调用和有序结果写回模型", async () => {
@@ -125,10 +201,19 @@ test("连续工具迭代把原调用和有序结果写回模型", async () => {
   const result = await collect(agent.streamTurn({
     input: "执行任务",
     mode: "do",
+    modeTurn: 1,
     signal: new AbortController().signal,
   }));
 
   assert.equal(provider.requests.length, 3);
+  assert.deepEqual(
+    provider.requests.map((request) => request.messages.slice(0, 3)),
+    [
+      provider.requests[0].messages.slice(0, 3),
+      provider.requests[0].messages.slice(0, 3),
+      provider.requests[0].messages.slice(0, 3),
+    ],
+  );
   const requestMessages = provider.requests[1].messages;
   assert.deepEqual(requestMessages.at(-2), {
     role: "assistant",
@@ -158,6 +243,7 @@ test("最后允许迭代仍请求工具时不执行并停止", async () => {
   const result = await collect(agent.streamTurn({
     input: "不要无限循环",
     mode: "do",
+    modeTurn: 1,
     signal: new AbortController().signal,
   }));
 
@@ -191,6 +277,7 @@ test("连续两个全未知工具迭代停止，合法调用会重置计数", as
   const result = await collect(agent.streamTurn({
     input: "未知工具",
     mode: "do",
+    modeTurn: 1,
     signal: new AbortController().signal,
   }));
 
@@ -233,6 +320,7 @@ test("Plan 模式拒绝的工具调用会中断连续未知工具计数", async 
   const result = await collect(agent.streamTurn({
     input: "规划任务",
     mode: "plan",
+    modeTurn: 1,
     signal: new AbortController().signal,
   }));
 
@@ -256,6 +344,7 @@ test("Plan 只向模型公开只读工具并结构化拒绝伪造写入", async 
   const result = await collect(agent.streamTurn({
     input: "规划",
     mode: "plan",
+    modeTurn: 1,
     signal: new AbortController().signal,
   }));
 
@@ -285,6 +374,7 @@ test("Provider 流错误映射为 model-error 且不提交历史", async () => {
   const result = await collect(agent.streamTurn({
     input: "失败",
     mode: "do",
+    modeTurn: 1,
     signal: new AbortController().signal,
   }));
   assert.deepEqual(result.at(-1), {
@@ -316,6 +406,7 @@ test("模型阶段取消产生唯一 cancelled 并可继续下一轮", async () 
   const pending = collect(agent.streamTurn({
     input: "取消",
     mode: "do",
+    modeTurn: 1,
     signal: controller.signal,
   }));
   await Promise.resolve();
@@ -324,6 +415,7 @@ test("模型阶段取消产生唯一 cancelled 并可继续下一轮", async () 
   const recovered = await collect(agent.streamTurn({
     input: "继续",
     mode: "do",
+    modeTurn: 2,
     signal: new AbortController().signal,
   }));
 
@@ -334,6 +426,18 @@ test("模型阶段取消产生唯一 cancelled 并可继续下一轮", async () 
 
 test("拒绝非法配置、空白输入和并发轮次", async () => {
   assert.throws(() => createAgent(new ScriptedProvider([]), registry(), 0));
+  const invalidPromptProvider = new ScriptedProvider([]);
+  const invalidPromptAgent = createAgent(invalidPromptProvider, registry(), 3);
+  await assert.rejects(
+    collect(invalidPromptAgent.streamTurn({
+      input: "非法轮次",
+      mode: "do",
+      modeTurn: 0,
+      signal: new AbortController().signal,
+    })),
+    AgentConfigurationError,
+  );
+  assert.equal(invalidPromptProvider.requests.length, 0);
   const release = deferred<void>();
   const provider = new ScriptedProvider([
     async function* () {
@@ -347,6 +451,7 @@ test("拒绝非法配置、空白输入和并发轮次", async () => {
     collect(agent.streamTurn({
       input: "  ",
       mode: "do",
+      modeTurn: 1,
       signal: new AbortController().signal,
     })),
     ConversationStateError,
@@ -354,6 +459,7 @@ test("拒绝非法配置、空白输入和并发轮次", async () => {
   const iterator = agent.streamTurn({
     input: "运行中",
     mode: "do",
+    modeTurn: 1,
     signal: new AbortController().signal,
   })[Symbol.asyncIterator]();
   await iterator.next();
@@ -361,6 +467,7 @@ test("拒绝非法配置、空白输入和并发轮次", async () => {
     collect(agent.streamTurn({
       input: "并发",
       mode: "do",
+      modeTurn: 2,
       signal: new AbortController().signal,
     })),
     ConversationStateError,
@@ -380,7 +487,16 @@ function createAgent(
     provider,
     (mode) => createModeToolPolicy(registry, mode),
     requireWorkspace(),
-    { maxIterations },
+    {
+      maxIterations,
+      promptEnvironment: {
+        workspace: { id: "test", name: "Test Workspace" },
+        platform: "darwin",
+        currentDate: "2026-08-28",
+        timeZone: "Asia/Shanghai",
+        pathSemantics: "workspace-relative-posix",
+      },
+    },
   );
 }
 

@@ -9,9 +9,14 @@ const MAX_RESULTS = 1_000;
 
 export const findFilesTool = defineTool({
   name: "find_files",
-  description: "按受限 Glob 模式查找授权工作目录内的文件。",
+  description:
+    "按受限 Glob 模式发现授权 Workspace 内的文件，优先于 shell 的 ls/find。pattern 匹配 Workspace 相对完整路径；path 只缩小遍历范围，因此 pattern 仍应包含对应目录前缀。",
   inputSchema: objectSchema({
-    pattern: stringSchema({ minLength: 1, maxLength: 512 }),
+    pattern: stringSchema({
+      minLength: 1,
+      maxLength: 512,
+      description: "匹配 Workspace 相对完整路径的受限 Glob 模式。",
+    }),
     path: optionalSchema(stringSchema({
       minLength: 1,
       maxLength: 1_024,

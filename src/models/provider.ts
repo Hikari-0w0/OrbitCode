@@ -34,10 +34,16 @@ export type AssistantMessage = Extract<
   { readonly role: "assistant" }
 >;
 
+export type PromptCacheUsage =
+  | { readonly availability: "tokens"; readonly cachedTokens: number }
+  | { readonly availability: "status"; readonly hit: boolean }
+  | { readonly availability: "unavailable" };
+
 export type ModelTokenUsage = {
   readonly promptTokens: number;
   readonly completionTokens: number;
   readonly totalTokens: number;
+  readonly promptCache: PromptCacheUsage;
 };
 
 export type ModelStreamEvent =
