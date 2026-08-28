@@ -8,6 +8,7 @@ import {
   stringSchema,
 } from "@/tools/schema";
 import { emptyResultMeta, toolFailure } from "@/tools/types";
+import { WORKSPACE_RELATIVE_PATH_DESCRIPTION } from "@/tools/workspace-path";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const OUTPUT_LIMIT_BYTES = 128 * 1024;
@@ -18,7 +19,11 @@ export function createRunCommandTool(sandbox: CommandSandbox) {
     description: "在严格隔离的授权工作目录内执行 shell 命令。",
     inputSchema: objectSchema({
       command: stringSchema({ minLength: 1, maxLength: 8 * 1024 }),
-      cwd: optionalSchema(stringSchema({ minLength: 1, maxLength: 1_024 })),
+      cwd: optionalSchema(stringSchema({
+        minLength: 1,
+        maxLength: 1_024,
+        description: WORKSPACE_RELATIVE_PATH_DESCRIPTION,
+      })),
       timeout_ms: optionalSchema(integerSchema({ minimum: 100, maximum: 120_000 })),
     }),
     mutability: "command",

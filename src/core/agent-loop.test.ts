@@ -85,6 +85,26 @@ test("直接最终回复产生 Usage 和唯一停止事件并提交历史", asyn
   ]);
 });
 
+test("Plan 和 Do 系统消息都声明 Workspace 相对路径契约", async () => {
+  for (const mode of ["plan", "do"] as const) {
+    const provider = new ScriptedProvider([[
+      { type: "text-delta", text: "完成" },
+      { type: "done", finishReason: "stop" },
+    ]]);
+    const agent = createAgent(provider, registry(), 1);
+
+    await collect(agent.streamTurn({
+      input: "处理文件",
+      mode,
+      signal: new AbortController().signal,
+    }));
+
+    const systemMessage = provider.requests[0]?.messages[0];
+    assert.equal(systemMessage?.role, "system");
+    assert.match(systemMessage?.content ?? "", /path 和 cwd.*Workspace.*相对路径/u);
+  }
+});
+
 test("连续工具迭代把原调用和有序结果写回模型", async () => {
   const provider = new ScriptedProvider([
     [

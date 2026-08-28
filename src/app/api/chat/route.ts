@@ -4,7 +4,6 @@ import { createChatProvider } from "@/models/provider-factory";
 import { createDefaultToolRegistry } from "@/tools/default-registry";
 import { MacOsSeatbeltCommandSandbox } from "@/tools/macos-seatbelt-sandbox";
 import { createModeToolPolicy } from "@/tools/mode-policy";
-import { createWorkspaceBoundary } from "@/tools/workspace";
 import {
   MAX_WEB_CHAT_BODY_BYTES,
   parseWebChatRequest,
@@ -16,6 +15,11 @@ import {
   loadWebProviderContext,
   resolveWebProvider,
 } from "@/web/server-config";
+import {
+  loadWorkspaceCatalog,
+  resolveWorkspaceBoundary,
+  WorkspaceCatalogError,
+} from "@/web/workspace-config";
 
 export const dynamic = "force-dynamic";
 
@@ -32,7 +36,11 @@ export async function POST(request: Request): Promise<Response> {
     if (!currentMessage || currentMessage.role !== "user") {
       throw new WebChatContractError("对话请求必须以用户消息结束。");
     }
-    const workspace = await createWorkspaceBoundary(process.cwd());
+    const workspaceCatalog = await loadWorkspaceCatalog();
+    const workspace = await resolveWorkspaceBoundary(
+      workspaceCatalog,
+      chatRequest.workspaceId,
+    );
     const registry = createDefaultToolRegistry(commandSandbox);
     const agent = new AgentLoop(
       createChatProvider(config),
@@ -96,14 +104,27 @@ async function readJsonBody(request: Request): Promise<unknown> {
 function startupErrorResponse(error: unknown): Response {
   let status = 500;
   let message = "聊天服务暂时不可用。";
+  let code: WebApiError["code"];
   if (error instanceof WebChatContractError) {
     status = 400;
     message = error.message;
   } else if (error instanceof ConfigurationError) {
     status = error.kind === "config-value" ? 400 : 503;
     message = error.message;
+  } else if (error instanceof WorkspaceCatalogError) {
+    status = error.kind === "unknown-workspace" || error.kind === "config-value"
+      ? 400
+      : 503;
+    message = error.message;
+    code = error.kind === "unknown-workspace"
+      ? "workspace-unknown"
+      : error.kind === "workspace-unavailable"
+        ? "workspace-unavailable"
+        : "workspace-config";
   }
-  const response: WebApiError = { error: message };
+  const response: WebApiError = code === undefined
+    ? { error: message }
+    : { error: message, code };
   return Response.json(response, {
     status,
     headers: { "cache-control": "no-store" },

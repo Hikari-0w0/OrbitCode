@@ -3,6 +3,7 @@ import { compileGlob, GlobPatternError } from "@/tools/glob";
 import { defineTool, successfulToolResult } from "@/tools/registry";
 import { objectSchema, optionalSchema, stringSchema } from "@/tools/schema";
 import { emptyResultMeta, toolFailure } from "@/tools/types";
+import { WORKSPACE_RELATIVE_PATH_DESCRIPTION } from "@/tools/workspace-path";
 
 const MAX_RESULTS = 1_000;
 
@@ -11,7 +12,11 @@ export const findFilesTool = defineTool({
   description: "按受限 Glob 模式查找授权工作目录内的文件。",
   inputSchema: objectSchema({
     pattern: stringSchema({ minLength: 1, maxLength: 512 }),
-    path: optionalSchema(stringSchema({ minLength: 1, maxLength: 1_024 })),
+    path: optionalSchema(stringSchema({
+      minLength: 1,
+      maxLength: 1_024,
+      description: WORKSPACE_RELATIVE_PATH_DESCRIPTION,
+    })),
   }),
   mutability: "read-only",
   async execute(input, context) {

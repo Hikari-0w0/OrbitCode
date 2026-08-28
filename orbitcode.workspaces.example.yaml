@@ -1,0 +1,8 @@
+default: orbitcode
+workspaces:
+  - id: orbitcode
+    name: OrbitCode
+    path: /absolute/path/to/OrbitCode
+  - id: another-project
+    name: Another Project
+    path: /absolute/path/to/another-project

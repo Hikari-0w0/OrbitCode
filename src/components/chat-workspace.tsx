@@ -1,195 +1,237 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 
 import { ChatComposer } from "@/components/chat-composer";
 import {
-  MessageList,
-  type VisibleMessage,
-  type VisibleToolExecution,
-} from "@/components/message-list";
+  chatSessionReducer,
+  INITIAL_CHAT_SESSION_STATE,
+} from "@/components/chat-session-state";
+import { MessageList } from "@/components/message-list";
+import { WorkspaceSelector } from "@/components/workspace-selector";
+import type { AgentMode } from "@/core/agent-events";
 import type { PlainConversationMessage } from "@/models/provider";
 import {
   parseProviderCatalogResponse,
   parseWebApiError,
   parseWebChatEvents,
+  parseWorkspaceCatalogResponse,
   readWebStream,
   type ProviderSummary,
-  type WebChatEvent,
+  type WebApiError,
   type WebChatRequest,
+  type WorkspaceSummary,
 } from "@/web/chat-contract";
 
-type AgentMode = WebChatRequest["mode"];
-type ToolResultEvent = Extract<WebChatEvent, { type: "tool-result" }>;
-type StoppedEvent = Extract<WebChatEvent, { type: "stopped" }>;
-type WorkspaceStatus =
-  | "loading"
-  | "ready"
-  | "streaming"
-  | "stopping"
-  | "config-error";
+const PLAN_EXECUTION_PROMPT = "请按照上述计划开始执行。";
+
+type CatalogState = "loading" | "ready" | "config-error";
+type UiStatus = "loading" | "ready" | "streaming" | "stopping" | "config-error";
 
 export function ChatWorkspace() {
+  const [session, dispatch] = useReducer(
+    chatSessionReducer,
+    INITIAL_CHAT_SESSION_STATE,
+  );
   const [providers, setProviders] = useState<readonly ProviderSummary[]>([]);
-  const [selectedProvider, setSelectedProvider] = useState("");
-  const [messages, setMessages] = useState<readonly VisibleMessage[]>([]);
-  const [history, setHistory] = useState<readonly PlainConversationMessage[]>([]);
-  const [mode, setMode] = useState<AgentMode>("do");
-  const [draft, setDraft] = useState("");
-  const [status, setStatus] = useState<WorkspaceStatus>("loading");
-  const [notice, setNotice] = useState<string>();
+  const [workspaces, setWorkspaces] = useState<readonly WorkspaceSummary[]>([]);
+  const [catalogState, setCatalogState] = useState<CatalogState>("loading");
+  const [catalogError, setCatalogError] = useState<string>();
   const [catalogRevision, setCatalogRevision] = useState(0);
   const activeRequestRef = useRef<AbortController | undefined>(undefined);
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
 
   useEffect(() => {
     const controller = new AbortController();
-    async function loadProviders(): Promise<void> {
-      setStatus("loading");
-      setNotice(undefined);
+    async function loadCatalogs(): Promise<void> {
+      setCatalogState("loading");
+      setCatalogError(undefined);
       try {
-        const response = await fetch("/api/providers", {
-          cache: "no-store",
-          signal: controller.signal,
+        const [providerResponse, workspaceResponse] = await Promise.all([
+          fetch("/api/providers", { cache: "no-store", signal: controller.signal }),
+          fetch("/api/workspaces", { cache: "no-store", signal: controller.signal }),
+        ]);
+        const [providerValue, workspaceValue]: readonly unknown[] = await Promise.all([
+          providerResponse.json(),
+          workspaceResponse.json(),
+        ]);
+        if (!providerResponse.ok) {
+          throw new Error(
+            parseWebApiError(providerValue)?.error ?? "无法加载模型配置。",
+          );
+        }
+        if (!workspaceResponse.ok) {
+          throw new Error(
+            parseWebApiError(workspaceValue)?.error ?? "无法加载 Workspace 列表。",
+          );
+        }
+
+        const providerCatalog = parseProviderCatalogResponse(providerValue);
+        const workspaceCatalog = parseWorkspaceCatalogResponse(workspaceValue);
+        const availableProvider = providerCatalog.providers.find(
+          (provider) => provider.available,
+        );
+        const defaultWorkspace = workspaceCatalog.workspaces.find(
+          (workspace) =>
+            workspace.id === workspaceCatalog.defaultWorkspaceId && workspace.available,
+        );
+        if (!availableProvider) {
+          throw new Error("没有可用的模型配置，请检查本地 YAML 与 .env。");
+        }
+        if (!defaultWorkspace) {
+          throw new Error("没有可用的 Workspace，请检查本地授权目录配置。");
+        }
+
+        setProviders(providerCatalog.providers);
+        setWorkspaces(workspaceCatalog.workspaces);
+
+        const current = sessionRef.current;
+        const selectedProvider = providerCatalog.providers.some(
+          (provider) =>
+            provider.name === current.selectedProvider && provider.available,
+        )
+          ? current.selectedProvider
+          : availableProvider.name;
+        const selectedWorkspaceId = workspaceCatalog.workspaces.some(
+          (workspace) =>
+            workspace.id === current.selectedWorkspaceId && workspace.available,
+        )
+          ? current.selectedWorkspaceId
+          : defaultWorkspace.id;
+
+        if (
+          current.selectedWorkspaceId &&
+          current.selectedWorkspaceId !== selectedWorkspaceId
+        ) {
+          dispatch({ type: "workspace-selected", workspaceId: selectedWorkspaceId });
+        }
+        if (
+          current.selectedProvider &&
+          current.selectedProvider !== selectedProvider
+        ) {
+          dispatch({ type: "provider-selected", provider: selectedProvider });
+        }
+        dispatch({
+          type: "catalogs-ready",
+          workspaceId: selectedWorkspaceId,
+          provider: selectedProvider,
         });
-        const value: unknown = await response.json();
-        if (!response.ok) {
-          throw new Error(parseWebApiError(value)?.error ?? "无法加载模型配置。");
-        }
-        const catalog = parseProviderCatalogResponse(value);
-        const firstAvailable = catalog.providers.find((provider) => provider.available);
-        setProviders(catalog.providers);
-        if (!firstAvailable) {
-          setSelectedProvider("");
-          setStatus("config-error");
-          setNotice("没有可用的模型配置，请检查本地 YAML 与 .env。");
-          return;
-        }
-        setSelectedProvider(firstAvailable.name);
-        setStatus("ready");
+        dispatch({ type: "notice-set", notice: undefined });
+        setCatalogState("ready");
       } catch (error) {
         if (controller.signal.aborted) return;
-        setStatus("config-error");
-        setNotice(safeErrorMessage(error, "无法加载模型配置。"));
+        setCatalogState("config-error");
+        setCatalogError(safeErrorMessage(error, "无法加载本地配置。"));
       }
     }
-    void loadProviders();
+    void loadCatalogs();
     return () => controller.abort();
   }, [catalogRevision]);
 
   useEffect(() => () => activeRequestRef.current?.abort(), []);
 
-  const currentProvider = providers.find((provider) => provider.name === selectedProvider);
-  const isStreaming = status === "streaming" || status === "stopping";
+  const currentProvider = providers.find(
+    (provider) => provider.name === session.selectedProvider,
+  );
+  const isStreaming =
+    session.requestState === "streaming" || session.requestState === "stopping";
+  const status: UiStatus = isStreaming
+    ? session.requestState
+    : catalogState === "ready"
+      ? "ready"
+      : catalogState;
+  const controlsDisabled = catalogState !== "ready" || isStreaming;
+  const notice = catalogError ?? session.notice;
 
-  function selectProvider(name: string): void {
-    if (isStreaming || name === selectedProvider) return;
-    if (!providers.find((provider) => provider.name === name)?.available) return;
-    setSelectedProvider(name);
-    resetConversation();
-  }
-
-  function resetConversation(): void {
-    setMessages([]);
-    setHistory([]);
-    setMode("do");
-    setDraft("");
-    setNotice(undefined);
-  }
-
-  function updateMessage(
-    id: string,
-    update: (message: VisibleMessage) => VisibleMessage,
-  ): void {
-    setMessages((current) =>
-      current.map((message) => (message.id === id ? update(message) : message)),
-    );
-  }
-
-  function applyStopped(
-    assistantId: string,
-    userMessage: PlainConversationMessage,
-    event: StoppedEvent,
-  ): void {
-    if (event.reason === "final-response" && event.finalMessage) {
-      const finalMessage = event.finalMessage;
-      updateMessage(assistantId, (message) => ({
-        ...message,
-        content: finalMessage.content,
-        state: "complete",
-        stopReason: event.reason,
-        progress: undefined,
-      }));
-      setHistory((current) => [...current, userMessage, finalMessage]);
+  function selectWorkspace(workspaceId: string): void {
+    if (controlsDisabled) return;
+    if (!workspaces.some((workspace) => workspace.id === workspaceId && workspace.available)) {
       return;
     }
-    const detail = stopDetail(event);
-    updateMessage(assistantId, (message) => ({
-      ...message,
-      state: event.reason === "cancelled" ? "cancelled" : "failed",
-      detail,
-      stopReason: event.reason,
-      progress: undefined,
-      toolExecutions: settleInterruptedTools(message.toolExecutions ?? []),
-    }));
-    if (event.reason !== "cancelled") setNotice(detail);
+    dispatch({ type: "workspace-selected", workspaceId });
   }
 
-  async function submitMessage(): Promise<void> {
-    const input = draft.trim();
-    if (
-      status !== "ready" ||
-      input.length === 0 ||
-      !selectedProvider ||
-      activeRequestRef.current
-    ) return;
+  function selectProvider(provider: string): void {
+    if (controlsDisabled) return;
+    if (!providers.some((candidate) => candidate.name === provider && candidate.available)) {
+      return;
+    }
+    dispatch({ type: "provider-selected", provider });
+  }
 
+  function selectMode(mode: AgentMode, clearDraft = false): void {
+    if (controlsDisabled) return;
+    dispatch({
+      type: "mode-selected",
+      mode,
+      clearDraft,
+      notice:
+        mode === "plan"
+          ? "已切换到 Plan Mode：服务端只会开放读取、查找和搜索工具。"
+          : "已切换到 Do Mode：服务端已恢复全部 Workspace 工具。",
+    });
+  }
+
+  function submitMessage(): void {
+    const input = sessionRef.current.draft.trim();
     if (input === "/plan" || input === "/do") {
-      const nextMode: AgentMode = input === "/plan" ? "plan" : "do";
-      setMode(nextMode);
-      setDraft("");
-      setNotice(nextMode === "plan"
-        ? "已切换到 Plan Mode：服务端只会开放读取、查找和搜索工具。"
-        : "已切换到 Do Mode：服务端已恢复全部工作区工具。");
+      selectMode(input === "/plan" ? "plan" : "do", true);
       return;
     }
+    void submitInput(input, sessionRef.current.mode);
+  }
+
+  async function submitInput(
+    input: string,
+    requestMode: AgentMode,
+    requiredPlanMessageId?: string,
+  ): Promise<void> {
+    const snapshot = sessionRef.current;
+    if (
+      catalogState !== "ready" ||
+      input.length === 0 ||
+      !snapshot.selectedProvider ||
+      !snapshot.selectedWorkspaceId ||
+      snapshot.requestState !== "idle" ||
+      activeRequestRef.current ||
+      (requiredPlanMessageId !== undefined &&
+        snapshot.executablePlanMessageId !== requiredPlanMessageId)
+    ) return;
 
     const userMessage: PlainConversationMessage = { role: "user", content: input };
     const userId = crypto.randomUUID();
     const assistantId = crypto.randomUUID();
-    setMessages((current) => [
-      ...current,
-      { id: userId, role: "user", content: input, state: "complete" },
-      {
-        id: assistantId,
-        role: "assistant",
-        content: "",
-        state: "streaming",
-        toolExecutions: [],
-      },
-    ]);
-    setDraft("");
-    setNotice(undefined);
-    setStatus("streaming");
-
     const controller = new AbortController();
     activeRequestRef.current = controller;
-    let assistantContent = "";
-    let stopped = false;
+    dispatch({
+      type: "request-started",
+      mode: requestMode,
+      userId,
+      assistantId,
+      userMessage,
+    });
 
+    let stopped = false;
     try {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          provider: selectedProvider,
-          mode,
-          messages: [...history, userMessage],
+          provider: snapshot.selectedProvider,
+          workspaceId: snapshot.selectedWorkspaceId,
+          mode: requestMode,
+          messages: [...snapshot.history, userMessage],
         } satisfies WebChatRequest),
         signal: controller.signal,
       });
       if (!response.ok) {
         const value: unknown = await response.json().catch(() => undefined);
-        throw new Error(parseWebApiError(value)?.error ?? "模型请求失败，请重试。");
+        const apiError = parseWebApiError(value);
+        throw new WebRequestError(
+          apiError?.error ?? "模型请求失败，请重试。",
+          apiError?.code,
+        );
       }
       if (!response.headers.get("content-type")?.startsWith("text/event-stream")) {
         throw new Error("聊天服务没有返回 SSE 响应。");
@@ -198,76 +240,66 @@ export function ChatWorkspace() {
 
       for await (const event of parseWebChatEvents(readWebStream(response.body))) {
         if (event.type === "text-delta") {
-          assistantContent += event.text;
-          updateMessage(assistantId, (message) => ({ ...message, content: assistantContent }));
+          dispatch({ type: "text-delta", assistantId, text: event.text });
         } else if (event.type === "progress") {
-          updateMessage(assistantId, (message) => ({ ...message, progress: event }));
+          dispatch({ type: "progress", assistantId, event });
         } else if (event.type === "tool-call") {
-          updateMessage(assistantId, (message) => ({
-            ...message,
-            toolExecutions: upsertToolExecution(message.toolExecutions ?? [], {
-              iteration: event.iteration,
-              sequence: event.sequence,
-              callId: event.call.id,
-              name: event.call.name,
-              argumentsJson: event.call.argumentsJson,
-              state: "queued",
-            }),
-          }));
+          dispatch({ type: "tool-call", assistantId, event });
         } else if (event.type === "tool-started") {
-          updateMessage(assistantId, (message) => ({
-            ...message,
-            toolExecutions: updateToolState(
-              message.toolExecutions ?? [],
-              event.iteration,
-              event.callId,
-              "running",
-            ),
-          }));
+          dispatch({ type: "tool-started", assistantId, event });
         } else if (event.type === "tool-result") {
-          updateMessage(assistantId, (message) => ({
-            ...message,
-            toolExecutions: applyToolResult(message.toolExecutions ?? [], event),
-          }));
+          dispatch({ type: "tool-result", assistantId, event });
         } else if (event.type === "token-usage") {
-          updateMessage(assistantId, (message) => ({
-            ...message,
-            usage: event.usage,
-            cumulativeUsage: event.cumulative,
-          }));
+          dispatch({ type: "token-usage", assistantId, event });
         } else if (event.type === "stopped") {
           stopped = true;
-          applyStopped(assistantId, userMessage, event);
+          if (event.reason === "final-response" && event.finalMessage) {
+            dispatch({
+              type: "request-completed",
+              assistantId,
+              userMessage,
+              finalMessage: event.finalMessage,
+              mode: requestMode,
+            });
+          } else {
+            dispatch({ type: "request-stopped", assistantId, event });
+          }
         }
       }
       if (!stopped) throw new Error("流式响应意外结束，请重试。");
     } catch (error) {
-      if (controller.signal.aborted) {
-        updateMessage(assistantId, (message) => ({
-          ...message,
-          state: "cancelled",
-          detail: "回复已停止，本轮不会加入后续上下文。",
-          toolExecutions: settleInterruptedTools(message.toolExecutions ?? []),
-        }));
-      } else {
-        const message = safeErrorMessage(error, "模型请求失败，请重试。");
-        updateMessage(assistantId, (current) => ({
-          ...current,
-          state: "failed",
-          detail: message,
-          toolExecutions: settleInterruptedTools(current.toolExecutions ?? []),
-        }));
-        setNotice(message);
+      const cancelled = controller.signal.aborted;
+      const detail = cancelled
+        ? "回复已停止，本轮不会加入后续上下文。"
+        : safeErrorMessage(error, "模型请求失败，请重试。");
+      dispatch({
+        type: "request-transport-failed",
+        assistantId,
+        detail,
+        cancelled,
+      });
+      if (
+        error instanceof WebRequestError &&
+        error.code?.startsWith("workspace-")
+      ) {
+        setCatalogState("config-error");
+        setCatalogError(detail);
       }
     } finally {
-      if (activeRequestRef.current === controller) activeRequestRef.current = undefined;
-      setStatus("ready");
+      if (activeRequestRef.current === controller) {
+        activeRequestRef.current = undefined;
+      }
+      dispatch({ type: "request-settled" });
     }
   }
 
+  function executePlan(messageId: string): void {
+    void submitInput(PLAN_EXECUTION_PROMPT, "do", messageId);
+  }
+
   function stopGeneration(): void {
-    if (!activeRequestRef.current || status !== "streaming") return;
-    setStatus("stopping");
+    if (!activeRequestRef.current || session.requestState !== "streaming") return;
+    dispatch({ type: "request-stopping" });
     activeRequestRef.current.abort();
   }
 
@@ -284,12 +316,19 @@ export function ChatWorkspace() {
 
         <div className="phaseCard">
           <div className="phaseHeader">
-            <span>PHASE 03</span>
+            <span>PHASE 04</span>
             <span className="liveBadge"><i /> LIVE</span>
           </div>
-          <strong>自主 Agent Loop</strong>
-          <p>模型会读取工具结果并继续行动，直到完成任务或触发安全上限</p>
+          <strong>Workspace · Plan · Execute</strong>
+          <p>选择授权项目，只读规划，确认后在同一上下文自主执行</p>
         </div>
+
+        <WorkspaceSelector
+          workspaces={workspaces}
+          selectedWorkspaceId={session.selectedWorkspaceId}
+          disabled={controlsDisabled}
+          onChange={selectWorkspace}
+        />
 
         <div className="providerSection">
           <label htmlFor="provider-select">MODEL PROVIDER</label>
@@ -297,8 +336,8 @@ export function ChatWorkspace() {
             <select
               id="provider-select"
               aria-label="MODEL PROVIDER"
-              value={selectedProvider}
-              disabled={isStreaming || status === "loading"}
+              value={session.selectedProvider}
+              disabled={controlsDisabled}
               onChange={(event) => selectProvider(event.target.value)}
             >
               {providers.length === 0 && <option value="">等待配置</option>}
@@ -319,8 +358,8 @@ export function ChatWorkspace() {
         </div>
 
         <div className="sessionInfo">
-          <div><span>当前模式</span><strong>{modeLabel(mode)}</strong></div>
-          <div><span>工具范围</span><strong>{mode === "plan" ? "只读" : "当前工作目录"}</strong></div>
+          <div><span>当前模式</span><strong>{modeLabel(session.mode)}</strong></div>
+          <div><span>工具范围</span><strong>{session.mode === "plan" ? "只读三项" : "完整 Workspace"}</strong></div>
           <div><span>存储</span><strong>仅当前页面</strong></div>
         </div>
 
@@ -328,7 +367,7 @@ export function ChatWorkspace() {
           <span className="shieldIcon" aria-hidden="true">◇</span>
           <div>
             <strong>SERVER ENFORCED</strong>
-            <span>模式权限由服务端过滤</span>
+            <span>Workspace 与模式权限由服务端校验</span>
           </div>
         </div>
       </aside>
@@ -336,19 +375,21 @@ export function ChatWorkspace() {
       <section className="chatPanel" aria-label="OrbitCode 对话工作区">
         <header className="chatHeader">
           <div>
-            <p className="chatKicker">SESSION / UNTITLED</p>
+            <p className="chatKicker">SESSION / {session.selectedWorkspaceId || "LOADING"}</p>
             <h2>对话工作区</h2>
           </div>
           <div className="headerActions">
-            <span className={`modeBadge modeBadge--${mode}`}>{modeLabel(mode)}</span>
+            <span className={`modeBadge modeBadge--${session.mode}`}>
+              {modeLabel(session.mode)}
+            </span>
             <span className={`connectionState connectionState--${status}`}>
               <i /> {statusLabel(status)}
             </span>
             <button
               className="clearButton"
               type="button"
-              onClick={resetConversation}
-              disabled={isStreaming || (messages.length === 0 && mode === "do")}
+              onClick={() => dispatch({ type: "conversation-cleared" })}
+              disabled={isStreaming || (session.messages.length === 0 && session.mode === "do")}
             >
               <TrashIcon />
               清空
@@ -361,7 +402,7 @@ export function ChatWorkspace() {
             <div className="noticeBanner" role="status">
               <span>!</span>
               <p>{notice}</p>
-              {status === "config-error" && (
+              {catalogState === "config-error" && (
                 <button type="button" onClick={() => setCatalogRevision((value) => value + 1)}>
                   重新加载
                 </button>
@@ -370,15 +411,22 @@ export function ChatWorkspace() {
           )}
         </div>
 
-        <MessageList messages={messages} onSuggestion={setDraft} />
+        <MessageList
+          messages={session.messages}
+          onSuggestion={(draft) => dispatch({ type: "draft-changed", draft })}
+          executablePlanMessageId={session.executablePlanMessageId}
+          planActionDisabled={controlsDisabled}
+          onExecutePlan={executePlan}
+        />
         <ChatComposer
-          value={draft}
-          mode={mode}
-          disabled={status === "loading" || status === "config-error"}
+          value={session.draft}
+          mode={session.mode}
+          disabled={catalogState !== "ready"}
           isStreaming={isStreaming}
-          isStopping={status === "stopping"}
-          onChange={setDraft}
-          onSubmit={() => void submitMessage()}
+          isStopping={session.requestState === "stopping"}
+          onModeChange={(mode) => selectMode(mode)}
+          onChange={(draft) => dispatch({ type: "draft-changed", draft })}
+          onSubmit={submitMessage}
           onStop={stopGeneration}
         />
       </section>
@@ -386,7 +434,14 @@ export function ChatWorkspace() {
   );
 }
 
-function statusLabel(status: WorkspaceStatus): string {
+class WebRequestError extends Error {
+  constructor(message: string, readonly code?: WebApiError["code"]) {
+    super(message);
+    this.name = "WebRequestError";
+  }
+}
+
+function statusLabel(status: UiStatus): string {
   if (status === "loading") return "载入配置";
   if (status === "streaming") return "Agent 运行中";
   if (status === "stopping") return "正在停止";
@@ -400,81 +455,6 @@ function modeLabel(mode: AgentMode): string {
 
 function safeErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message.length > 0 ? error.message : fallback;
-}
-
-function upsertToolExecution(
-  current: readonly VisibleToolExecution[],
-  next: VisibleToolExecution,
-): readonly VisibleToolExecution[] {
-  const index = current.findIndex(
-    (execution) => execution.iteration === next.iteration && execution.callId === next.callId,
-  );
-  if (index < 0) return [...current, next];
-  return current.map((execution, currentIndex) => currentIndex === index ? next : execution);
-}
-
-function updateToolState(
-  current: readonly VisibleToolExecution[],
-  iteration: number,
-  callId: string,
-  state: VisibleToolExecution["state"],
-): readonly VisibleToolExecution[] {
-  return current.map((execution) =>
-    execution.iteration === iteration && execution.callId === callId
-      ? { ...execution, state }
-      : execution,
-  );
-}
-
-function applyToolResult(
-  current: readonly VisibleToolExecution[],
-  event: ToolResultEvent,
-): readonly VisibleToolExecution[] {
-  const existing = current.find(
-    (execution) => execution.iteration === event.iteration && execution.callId === event.callId,
-  );
-  return upsertToolExecution(current, {
-    iteration: event.iteration,
-    sequence: event.sequence,
-    callId: event.callId,
-    name: event.name,
-    argumentsJson: existing?.argumentsJson ?? "{}",
-    state: toolExecutionState(event.result),
-    result: event.result,
-  });
-}
-
-function settleInterruptedTools(
-  current: readonly VisibleToolExecution[],
-): readonly VisibleToolExecution[] {
-  return current.map((execution) => {
-    if (execution.state === "running") return { ...execution, state: "cancelled" };
-    if (execution.state === "queued") return { ...execution, state: "skipped" };
-    return execution;
-  });
-}
-
-function toolExecutionState(result: ToolResultEvent["result"]): VisibleToolExecution["state"] {
-  if (result.ok) return "succeeded";
-  if (result.error.kind === "timeout") return "timed-out";
-  if (result.error.kind === "cancelled") return "cancelled";
-  return "failed";
-}
-
-function stopDetail(event: StoppedEvent): string {
-  const base = event.detail ?? stopReasonLabel(event.reason);
-  return event.sideEffect === "none"
-    ? base
-    : `${base} 工具可能已产生本地副作用，请检查工作目录。`;
-}
-
-function stopReasonLabel(reason: StoppedEvent["reason"]): string {
-  if (reason === "final-response") return "任务已完成";
-  if (reason === "max-iterations") return "已达到最大迭代次数";
-  if (reason === "cancelled") return "用户已取消运行";
-  if (reason === "repeated-unknown-tool") return "模型连续请求未知工具";
-  if (reason === "model-error") return "模型响应流发生错误";
-  return "Agent 内部发生错误";
 }
 
 function OrbitMark() {

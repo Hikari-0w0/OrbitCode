@@ -51,7 +51,30 @@ CLI 当前仍保持纯文本流式对话；本地 Tool Calling 暂由 Web 入口
 npm run dev
 ```
 
-浏览器访问 [http://localhost:3000](http://localhost:3000)。Web 与 CLI 共用项目根目录的 `.env` 和 `orbitcode.yaml`，无需在页面中重复配置密钥或服务地址。
+浏览器访问 [http://localhost:3000](http://localhost:3000)。Web 与 CLI 共用项目根目录的 `.env` 和 `orbitcode.yaml`，无需在页面中重复配置密钥或服务地址。Web 可另外从未入库的 `orbitcode.workspaces.yaml` 加载本地授权项目；未创建该文件时，保持以 OrbitCode 启动目录作为唯一默认 Workspace。
+
+### 选择本地 Workspace
+
+需要管理多个本地项目时，先复制示例并把每个 `path` 改为已存在的绝对目录：
+
+```bash
+cp orbitcode.workspaces.example.yaml orbitcode.workspaces.yaml
+```
+
+```yaml
+default: orbitcode
+workspaces:
+  - id: orbitcode
+    name: OrbitCode
+    path: /absolute/path/to/OrbitCode
+  - id: my-app
+    name: My App
+    path: /absolute/path/to/my-app
+```
+
+`id` 是浏览器与服务端之间传递的不透明标识，`name` 用于页面展示，`path` 只在服务端解析。页面不接受任意绝对路径，也不会把完整目录发送给模型。修改配置后点击页面错误提示中的“重新加载”即可刷新。
+
+切换 Workspace 会清空当前对话、草稿和可执行计划，并回到 Do Mode，避免把一个项目的上下文带入另一个项目。生成期间 Workspace 选择器会禁用。所有文件与命令工具仍经过路径、符号链接、敏感文件和命令沙箱校验，选择 Workspace 不会放宽这些边界。
 
 页面支持：
 
@@ -64,6 +87,7 @@ npm run dev
 - 展示模型文本、迭代进度、工具排队/执行/结果、累计 Token 用量与最终停止原因
 - 当前页面生命周期内的多轮上下文
 - 多 Provider 选择（切换时清空当前历史）
+- 多个服务端授权的本地 Workspace 选择（切换时隔离并重置会话）
 - 停止生成、失败后继续和清空会话
 - `/plan` 只读分析模式与 `/do` 完整执行模式
 - 桌面与移动端响应式布局
@@ -84,11 +108,13 @@ OpenAI 兼容服务若报告 Token Usage，页面会显示本次及累计的输�
 
 ### Plan Mode 与 Do Mode
 
-在输入框中单独发送 `/plan` 可切换到 Plan Mode。该命令只改变当前页面模式，不会请求模型；后续请求由服务端只公开并只允许 `read_file`、`find_files` 和 `search_code`，即使模型伪造写入或命令调用也会被拒绝。模型完成分析并给出计划后，单独发送 `/do` 恢复六个工具，再显式提交执行任务。
+页面输入区提供持续可见的 Plan/Do 切换，也继续支持在输入框中单独发送 `/plan` 或 `/do`。模式切换只改变当前页面状态，不会请求模型；Plan 后续请求由服务端只公开并只允许 `read_file`、`find_files` 和 `search_code`，即使模型伪造写入或命令调用也会被拒绝。
+
+Plan 模式中的需求澄清使用普通多轮对话。最新一条成功 Plan 回复会显示“按此计划执行”；只有用户点击后，页面才会保留当前 Workspace 与已有计划上下文、切换到 Do，并追加一条可见的执行请求。失败、取消、旧回复或 Workspace 切换后的计划不可执行；模型文本也不能自动触发模式切换或副作用。
 
 只有严格独立的 `/plan` 和 `/do` 会切换模式，`/plan 请分析这个任务` 会作为普通用户消息发送。切换 Provider、清空会话或刷新页面都会恢复 Do Mode。
 
-文件和命令工具只接受项目工作目录内的相对路径，拒绝路径穿越、符号链接和敏感配置文件。`run_command` 还会过滤环境变量并在 OS 级沙箱内禁用网络和工作目录外的用户数据访问；当前平台无法通过沙箱能力探测时，命令工具直接返回不可用，不会降级为普通子进程。
+文件和命令工具只接受当前选定 Workspace 内的相对路径，拒绝路径穿越、符号链接和敏感配置文件。`run_command` 还会过滤环境变量并在 OS 级沙箱内禁用网络和 Workspace 外的用户数据访问；当前平台无法通过沙箱能力探测时，命令工具直接返回不可用，不会降级为普通子进程。
 
 > Web API 当前没有身份认证，且具备受限的本地文件和命令能力，只适合在本机使用。不要把开发服务器绑定或暴露到不受信任的网络；Plan Mode 也不是完整权限系统，后续仍需加入身份认证、细粒度权限与交互式确认。
 

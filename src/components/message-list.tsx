@@ -42,6 +42,9 @@ export type VisibleMessage = {
 type MessageListProps = {
   readonly messages: readonly VisibleMessage[];
   readonly onSuggestion: (value: string) => void;
+  readonly executablePlanMessageId?: string;
+  readonly planActionDisabled: boolean;
+  readonly onExecutePlan: (messageId: string) => void;
 };
 
 const suggestions = [
@@ -50,7 +53,13 @@ const suggestions = [
   "搜索代码中所有 ProviderError 的位置",
 ];
 
-export function MessageList({ messages, onSuggestion }: MessageListProps) {
+export function MessageList({
+  messages,
+  onSuggestion,
+  executablePlanMessageId,
+  planActionDisabled,
+  onExecutePlan,
+}: MessageListProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const followsLatestRef = useRef(true);
   const [followsLatest, setFollowsLatest] = useState(true);
@@ -128,6 +137,22 @@ export function MessageList({ messages, onSuggestion }: MessageListProps) {
                       {message.detail}
                     </p>
                   )}
+                  {message.id === executablePlanMessageId && message.state === "complete" && (
+                    <div className="planAction">
+                      <div>
+                        <strong>计划已就绪</strong>
+                        <span>将保留当前 Workspace 和对话上下文，以 Do 模式开始执行。</span>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={planActionDisabled}
+                        onClick={() => onExecutePlan(message.id)}
+                      >
+                        按此计划执行
+                        <ArrowIcon />
+                      </button>
+                    </div>
+                  )}
                 </div>
               </article>
             ))}
@@ -201,7 +226,16 @@ function EmptyConversation({ onSuggestion }: { readonly onSuggestion: (value: st
 
 function ToolExecutionCard({ execution }: { readonly execution: VisibleToolExecution }) {
   const result = execution.result;
-  const detail = result?.ok ? JSON.stringify(result.output, null, 2) : result?.error.message;
+  const detail = result?.ok
+    ? JSON.stringify(result.output, null, 2)
+    : result
+      ? `错误：\n${result.error.message}\n\n调用参数：\n${execution.argumentsJson}`
+      : execution.argumentsJson;
+  const summary = result
+    ? result.ok
+      ? "查看执行结果"
+      : "查看错误详情与调用参数"
+    : "查看调用参数";
 
   return (
     <section className={`toolCard toolCard--${execution.state}`}>
@@ -211,8 +245,8 @@ function ToolExecutionCard({ execution }: { readonly execution: VisibleToolExecu
         <span>第 {execution.iteration} 轮 · {toolStateLabel(execution.state)}</span>
       </div>
       <details className="toolCardDetails" open={execution.state === "failed" || execution.state === "timed-out"}>
-        <summary>{result ? (result.ok ? "查看执行结果" : "查看错误详情") : "查看调用参数"}</summary>
-        <pre>{detail ?? execution.argumentsJson}</pre>
+        <summary>{summary}</summary>
+        <pre>{detail}</pre>
       </details>
     </section>
   );

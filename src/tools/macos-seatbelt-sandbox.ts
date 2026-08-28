@@ -129,12 +129,20 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
     const executionRoot = path.join(runtimeRoot, `run-${randomUUID()}`);
     await mkdir(executionRoot, { recursive: true, mode: 0o700 });
     const protectedPaths = await collectProtectedPaths(workspace.root);
-    const profile = await createProfile(workspace.root, protectedPaths);
+    const developerRoot = await resolveDeveloperRoot();
+    const profile = await createProfile(
+      workspace.root,
+      protectedPaths,
+      developerRoot,
+    );
     const environment: NodeJS.ProcessEnv = {
       NODE_ENV: "production",
       PATH: [
         path.join(workspace.root, "node_modules", ".bin"),
         path.dirname(process.execPath),
+        ...(developerRoot === undefined
+          ? []
+          : [path.join(developerRoot, "usr", "bin")]),
         "/usr/bin",
         "/bin",
         "/usr/sbin",
@@ -144,6 +152,9 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
       LC_ALL: "en_US.UTF-8",
       HOME: executionRoot,
       TMPDIR: executionRoot,
+      ...(developerRoot === undefined
+        ? {}
+        : { SDKROOT: path.join(developerRoot, "SDKs", "MacOSX.sdk") }),
     };
     try {
       return await spawnAndCollect(
@@ -174,9 +185,14 @@ export class SandboxUnavailableError extends Error {
 async function createProfile(
   workspaceRoot: string,
   protectedPaths: readonly string[],
+  developerRoot: string | undefined,
 ): Promise<string> {
   const executable = await realpath(process.execPath).catch(() => process.execPath);
   const runtimeRoot = path.dirname(path.dirname(executable));
+  const trustedReadRoots = [
+    runtimeRoot,
+    ...(developerRoot === undefined ? [] : [developerRoot]),
+  ];
   const protectedRules = protectedPaths.map(
     (target) => `(deny file-read* file-write* (literal ${schemeString(target)}))`,
   );
@@ -192,25 +208,90 @@ async function createProfile(
     "/private/var",
     "/usr/local",
   ];
-  const systemReadExemptions = ["/private/var/select/sh"];
-  const readBoundaryRules = dataRoots.map(
-    (dataRoot) =>
-      `(deny file-read* (require-all (subpath ${schemeString(dataRoot)}) ` +
-      `(require-not (subpath ${schemeString(workspaceRoot)})) ` +
-      `(require-not (subpath ${schemeString(runtimeRoot)})) ` +
-      systemReadExemptions
-        .map((target) => `(require-not (literal ${schemeString(target)}))`)
-        .join(" ") +
-      "))",
-  );
+  const systemReadExemptions = [
+    "/private/var/select/sh",
+    "/private/var/select/developer_dir",
+    "/var/select/developer_dir",
+  ];
+  const metadataReadExemptions = [
+    ...systemReadExemptions,
+    ...ancestorDirectories(workspaceRoot),
+    ...trustedReadRoots.flatMap(ancestorDirectories),
+  ];
+  const readBoundaryRules = dataRoots.flatMap((dataRoot) => [
+    createReadBoundaryRule(
+      "file-read-data",
+      dataRoot,
+      workspaceRoot,
+      trustedReadRoots,
+      systemReadExemptions,
+    ),
+    createReadBoundaryRule(
+      "file-read-metadata",
+      dataRoot,
+      workspaceRoot,
+      trustedReadRoots,
+      metadataReadExemptions,
+    ),
+  ]);
   return [
     "(version 1)",
     "(allow default)",
     "(deny network*)",
-    `(deny file-write* (require-not (subpath ${schemeString(workspaceRoot)})))`,
+    `(deny file-write* (require-all ` +
+      `(require-not (subpath ${schemeString(workspaceRoot)})) ` +
+      `(require-not (literal ${schemeString("/dev/null")}))))`,
     ...readBoundaryRules,
     ...protectedRules,
   ].join("\n");
+}
+
+function createReadBoundaryRule(
+  operation: "file-read-data" | "file-read-metadata",
+  dataRoot: string,
+  workspaceRoot: string,
+  trustedReadRoots: readonly string[],
+  exemptions: readonly string[],
+): string {
+  return (
+    `(deny ${operation} (require-all (subpath ${schemeString(dataRoot)}) ` +
+    `(require-not (subpath ${schemeString(workspaceRoot)})) ` +
+    trustedReadRoots
+      .map((target) => `(require-not (subpath ${schemeString(target)}))`)
+      .join(" ") +
+    " " +
+    exemptions
+      .map((target) => `(require-not (literal ${schemeString(target)}))`)
+      .join(" ") +
+    "))"
+  );
+}
+
+function ancestorDirectories(target: string): readonly string[] {
+  const ancestors: string[] = [];
+  let cursor = path.dirname(target);
+  while (cursor !== path.dirname(cursor)) {
+    ancestors.push(cursor);
+    cursor = path.dirname(cursor);
+  }
+  return ancestors;
+}
+
+async function resolveDeveloperRoot(): Promise<string | undefined> {
+  const selected = await realpath("/var/select/developer_dir").catch(() => undefined);
+  if (selected === undefined) return undefined;
+  if (
+    isWithinTrustedRoot("/Library/Developer", selected) ||
+    isWithinTrustedRoot("/Applications", selected)
+  ) {
+    return selected;
+  }
+  return undefined;
+}
+
+function isWithinTrustedRoot(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 async function collectProtectedPaths(root: string): Promise<readonly string[]> {
