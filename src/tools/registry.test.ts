@@ -64,6 +64,26 @@ test("默认注册中心恰好公开六个核心工具", () => {
   ), true);
 });
 
+test("默认工具定义明确要求 Workspace 相对路径", () => {
+  const sandbox: CommandSandbox = {
+    async probe() {
+      return { available: true };
+    },
+    async run() {
+      throw new Error("本测试不执行命令");
+    },
+  };
+  const registry = createDefaultToolRegistry(sandbox);
+
+  for (const definition of registry.definitions()) {
+    assert.match(
+      JSON.stringify(definition.function.parameters),
+      /相对当前 Workspace 根目录的 POSIX 路径/u,
+      definition.function.name,
+    );
+  }
+});
+
 test("非法参数和未知工具不会触发副作用", async () => {
   let executions = 0;
   const registry = new ToolRegistry([fakeTool(() => executions++)]);

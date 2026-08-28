@@ -13,6 +13,7 @@ type ChatComposerProps = {
   readonly disabled: boolean;
   readonly isStreaming: boolean;
   readonly isStopping: boolean;
+  readonly onModeChange: (mode: WebChatRequest["mode"]) => void;
   readonly onChange: (value: string) => void;
   readonly onSubmit: () => void;
   readonly onStop: () => void;
@@ -24,6 +25,7 @@ export function ChatComposer({
   disabled,
   isStreaming,
   isStopping,
+  onModeChange,
   onChange,
   onSubmit,
   onStop,
@@ -64,12 +66,32 @@ export function ChatComposer({
           onKeyDown={handleKeyDown}
         />
         <div className="composerFooter">
-          <span className="composerHint">
-            <span className={`composerMode composerMode--${mode}`}>
-              {mode === "plan" ? "PLAN" : "DO"}
+          <div className="composerControls">
+            <div className="modeSwitch" role="group" aria-label="Agent 模式">
+              <button
+                type="button"
+                className={mode === "plan" ? "modeSwitchButton modeSwitchButton--active" : "modeSwitchButton"}
+                aria-pressed={mode === "plan"}
+                disabled={disabled || isStreaming}
+                onClick={() => onModeChange("plan")}
+              >
+                PLAN
+              </button>
+              <button
+                type="button"
+                className={mode === "do" ? "modeSwitchButton modeSwitchButton--active" : "modeSwitchButton"}
+                aria-pressed={mode === "do"}
+                disabled={disabled || isStreaming}
+                onClick={() => onModeChange("do")}
+              >
+                DO
+              </button>
+            </div>
+            <span className="composerHint">
+              {mode === "plan" ? "只读文件、查找与搜索" : "允许完整 Workspace 工具"}
+              <span className="composerShortcut"><kbd>Enter</kbd> 发送</span>
             </span>
-            <kbd>Enter</kbd> 发送 · 输入 <kbd>/plan</kbd> 或 <kbd>/do</kbd> 切换
-          </span>
+          </div>
           {isStreaming ? (
             <button
               className="stopButton"

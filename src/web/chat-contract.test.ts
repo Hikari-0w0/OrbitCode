@@ -6,6 +6,7 @@ import {
   MAX_WEB_CHAT_MESSAGE_LENGTH,
   MAX_WEB_CHAT_MESSAGES,
   parseProviderCatalogResponse,
+  parseWorkspaceCatalogResponse,
   parseWebChatEvents,
   parseWebChatRequest,
   WebChatContractError,
@@ -15,6 +16,7 @@ import {
 test("接受严格的多轮请求并保留消息顺序", () => {
   const result = parseWebChatRequest({
     provider: " primary ",
+    workspaceId: "project-a",
     mode: "plan",
     messages: [
       { role: "user", content: "第一问" },
@@ -24,6 +26,7 @@ test("接受严格的多轮请求并保留消息顺序", () => {
   });
 
   assert.equal(result.provider, "primary");
+  assert.equal(result.workspaceId, "project-a");
   assert.equal(result.mode, "plan");
   assert.deepEqual(result.messages, [
     { role: "user", content: "第一问" },
@@ -35,22 +38,24 @@ test("接受严格的多轮请求并保留消息顺序", () => {
 test("拒绝未知字段、非法角色顺序和空内容", () => {
   const invalidValues: readonly unknown[] = [
     null,
-    { provider: "primary", mode: "do", messages: [], extra: true },
-    { provider: "", mode: "do", messages: [{ role: "user", content: "问题" }] },
-    { provider: "primary", mode: "invalid", messages: [{ role: "user", content: "问题" }] },
-    { provider: "primary", mode: "do", messages: [{ role: "system", content: "越界" }] },
-    { provider: "primary", mode: "do", messages: [{ role: "assistant", content: "回答" }] },
+    { provider: "primary", workspaceId: "project", mode: "do", messages: [], extra: true },
+    { provider: "", workspaceId: "project", mode: "do", messages: [{ role: "user", content: "问题" }] },
+    { provider: "primary", workspaceId: "project", mode: "invalid", messages: [{ role: "user", content: "问题" }] },
+    { provider: "primary", workspaceId: "project", mode: "do", messages: [{ role: "system", content: "越界" }] },
+    { provider: "primary", workspaceId: "project", mode: "do", messages: [{ role: "assistant", content: "回答" }] },
     {
       provider: "primary",
+      workspaceId: "project",
       mode: "do",
       messages: [
         { role: "user", content: "问题" },
         { role: "user", content: "重复" },
       ],
     },
-    { provider: "primary", mode: "do", messages: [{ role: "user", content: "   " }] },
+    { provider: "primary", workspaceId: "project", mode: "do", messages: [{ role: "user", content: "   " }] },
     {
       provider: "primary",
+      workspaceId: "project",
       mode: "do",
       messages: [{ role: "user", content: "问题", extra: true }],
     },
@@ -66,6 +71,7 @@ test("拒绝超长内容和过多历史", () => {
     () =>
       parseWebChatRequest({
         provider: "primary",
+        workspaceId: "project",
         mode: "do",
         messages: [
           { role: "user", content: "x".repeat(MAX_WEB_CHAT_MESSAGE_LENGTH + 1) },
@@ -79,8 +85,32 @@ test("拒绝超长内容和过多历史", () => {
     content: String(index),
   }));
   assert.throws(
-    () => parseWebChatRequest({ provider: "primary", mode: "do", messages }),
+    () => parseWebChatRequest({ provider: "primary", workspaceId: "project", mode: "do", messages }),
     /数量/,
+  );
+});
+
+test("Workspace ID 必须是有界的不透明标识且不接受路径字段", () => {
+  for (const workspaceId of ["", " project", "/tmp/project", "../project", "x".repeat(65)]) {
+    assert.throws(
+      () => parseWebChatRequest({
+        provider: "primary",
+        workspaceId,
+        mode: "do",
+        messages: [{ role: "user", content: "问题" }],
+      }),
+      WebChatContractError,
+    );
+  }
+  assert.throws(
+    () => parseWebChatRequest({
+      provider: "primary",
+      workspaceId: "project",
+      workspacePath: "/tmp/project",
+      mode: "do",
+      messages: [{ role: "user", content: "问题" }],
+    }),
+    WebChatContractError,
   );
 });
 
@@ -176,6 +206,41 @@ test("只接受安全的 Provider 摘要", () => {
       }),
     /无效的模型配置列表/,
   );
+});
+
+test("严格解析 Workspace Catalog 且不允许路径字段", () => {
+  const expected = {
+    workspaces: [
+      { id: "alpha", name: "项目 A", available: true, isDefault: true },
+      { id: "beta", name: "项目 B", available: true, isDefault: false },
+    ],
+    defaultWorkspaceId: "alpha",
+  } as const;
+  assert.deepEqual(parseWorkspaceCatalogResponse(expected), expected);
+
+  for (const value of [
+    { workspaces: [], defaultWorkspaceId: "alpha" },
+    {
+      workspaces: [
+        { id: "alpha", name: "A", available: true, isDefault: false },
+      ],
+      defaultWorkspaceId: "alpha",
+    },
+    {
+      workspaces: [
+        {
+          id: "alpha",
+          name: "A",
+          available: true,
+          isDefault: true,
+          path: "/private/project",
+        },
+      ],
+      defaultWorkspaceId: "alpha",
+    },
+  ]) {
+    assert.throws(() => parseWorkspaceCatalogResponse(value), WebChatContractError);
+  }
 });
 
 test("拒绝非法 Web SSE JSON 与事件结构", async () => {

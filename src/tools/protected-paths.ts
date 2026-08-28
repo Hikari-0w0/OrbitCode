@@ -2,6 +2,7 @@ import path from "node:path";
 
 const PROTECTED_NAMES = new Set([
   "orbitcode.yaml",
+  "orbitcode.workspaces.yaml",
   ".npmrc",
   ".netrc",
   ".git-credentials",

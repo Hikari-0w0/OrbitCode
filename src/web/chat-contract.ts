@@ -22,9 +22,13 @@ import type {
 export const MAX_WEB_CHAT_BODY_BYTES = 256 * 1024;
 export const MAX_WEB_CHAT_MESSAGES = 50;
 export const MAX_WEB_CHAT_MESSAGE_LENGTH = 20_000;
+export const MAX_WEB_WORKSPACES = 32;
+export const MAX_WEB_WORKSPACE_ID_LENGTH = 64;
+export const MAX_WEB_WORKSPACE_NAME_LENGTH = 80;
 
 export type WebChatRequest = {
   readonly provider: string;
+  readonly workspaceId: string;
   readonly mode: AgentMode;
   readonly messages: readonly PlainConversationMessage[];
 };
@@ -41,8 +45,24 @@ export type ProviderCatalogResponse = {
   readonly providers: readonly ProviderSummary[];
 };
 
+export type WorkspaceSummary = {
+  readonly id: string;
+  readonly name: string;
+  readonly available: boolean;
+  readonly isDefault: boolean;
+};
+
+export type WorkspaceCatalogResponse = {
+  readonly workspaces: readonly WorkspaceSummary[];
+  readonly defaultWorkspaceId: string;
+};
+
 export type WebApiError = {
   readonly error: string;
+  readonly code?:
+    | "workspace-config"
+    | "workspace-unknown"
+    | "workspace-unavailable";
 };
 
 export class WebChatContractError extends Error {
@@ -53,7 +73,10 @@ export class WebChatContractError extends Error {
 }
 
 export function parseWebChatRequest(value: unknown): WebChatRequest {
-  if (!isRecord(value) || !hasExactFields(value, ["provider", "mode", "messages"])) {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, ["provider", "workspaceId", "mode", "messages"])
+  ) {
     throw new WebChatContractError("对话请求格式无效。");
   }
   if (typeof value.provider !== "string" || value.provider.trim().length === 0) {
@@ -61,6 +84,14 @@ export function parseWebChatRequest(value: unknown): WebChatRequest {
   }
   if (value.provider.length > 128) {
     throw new WebChatContractError("模型配置名称过长。");
+  }
+  if (
+    typeof value.workspaceId !== "string" ||
+    value.workspaceId.length === 0 ||
+    value.workspaceId.length > MAX_WEB_WORKSPACE_ID_LENGTH ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value.workspaceId)
+  ) {
+    throw new WebChatContractError("Workspace ID 无效。");
   }
   if (!isAgentMode(value.mode)) {
     throw new WebChatContractError("Agent 模式无效。");
@@ -88,7 +119,12 @@ export function parseWebChatRequest(value: unknown): WebChatRequest {
     throw new WebChatContractError("对话请求必须以用户消息结束。");
   }
 
-  return { provider: value.provider.trim(), mode: value.mode, messages };
+  return {
+    provider: value.provider.trim(),
+    workspaceId: value.workspaceId,
+    mode: value.mode,
+    messages,
+  };
 }
 
 export function encodeWebChatEvent(event: WebChatEvent): Uint8Array {
@@ -123,14 +159,71 @@ export function parseProviderCatalogResponse(
   return { providers };
 }
 
+export function parseWorkspaceCatalogResponse(
+  value: unknown,
+): WorkspaceCatalogResponse {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, ["workspaces", "defaultWorkspaceId"]) ||
+    !Array.isArray(value.workspaces) ||
+    value.workspaces.length === 0 ||
+    value.workspaces.length > MAX_WEB_WORKSPACES ||
+    typeof value.defaultWorkspaceId !== "string"
+  ) {
+    throw new WebChatContractError("服务端返回了无效的 Workspace 列表。");
+  }
+  const workspaces = value.workspaces.map((workspace) => {
+    if (
+      !isRecord(workspace) ||
+      !hasExactFields(workspace, ["id", "name", "available", "isDefault"]) ||
+      typeof workspace.id !== "string" ||
+      workspace.id.length === 0 ||
+      workspace.id.length > MAX_WEB_WORKSPACE_ID_LENGTH ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(workspace.id) ||
+      typeof workspace.name !== "string" ||
+      workspace.name.trim().length === 0 ||
+      workspace.name.length > MAX_WEB_WORKSPACE_NAME_LENGTH ||
+      typeof workspace.available !== "boolean" ||
+      typeof workspace.isDefault !== "boolean"
+    ) {
+      throw new WebChatContractError("服务端返回了无效的 Workspace 列表。");
+    }
+    return {
+      id: workspace.id,
+      name: workspace.name,
+      available: workspace.available,
+      isDefault: workspace.isDefault,
+    };
+  });
+  const ids = new Set(workspaces.map((workspace) => workspace.id));
+  const defaultMatches = workspaces.filter(
+    (workspace) => workspace.id === value.defaultWorkspaceId && workspace.isDefault,
+  );
+  if (
+    ids.size !== workspaces.length ||
+    defaultMatches.length !== 1 ||
+    !defaultMatches[0].available ||
+    workspaces.filter((workspace) => workspace.isDefault).length !== 1
+  ) {
+    throw new WebChatContractError("服务端返回了无效的 Workspace 列表。");
+  }
+  return { workspaces, defaultWorkspaceId: value.defaultWorkspaceId };
+}
+
 export function parseWebApiError(value: unknown): WebApiError | undefined {
   if (
     isRecord(value) &&
-    hasExactFields(value, ["error"]) &&
+    (hasExactFields(value, ["error"]) || hasExactFields(value, ["error", "code"])) &&
     typeof value.error === "string" &&
-    value.error.length > 0
+    value.error.length > 0 &&
+    (value.code === undefined ||
+      value.code === "workspace-config" ||
+      value.code === "workspace-unknown" ||
+      value.code === "workspace-unavailable")
   ) {
-    return { error: value.error };
+    return value.code === undefined
+      ? { error: value.error }
+      : { error: value.error, code: value.code };
   }
   return undefined;
 }

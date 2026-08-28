@@ -8,6 +8,7 @@ import {
   stringSchema,
 } from "@/tools/schema";
 import { emptyResultMeta, toolFailure } from "@/tools/types";
+import { WORKSPACE_RELATIVE_PATH_DESCRIPTION } from "@/tools/workspace-path";
 
 const MAX_SCAN_BYTES = 1024 * 1024;
 const MAX_MATCHES = 500;
@@ -18,7 +19,11 @@ export const searchCodeTool = defineTool({
   description: "在授权工作目录内按字面量搜索 UTF-8 代码内容。",
   inputSchema: objectSchema({
     query: stringSchema({ minLength: 1, maxLength: 1_024 }),
-    path: optionalSchema(stringSchema({ minLength: 1, maxLength: 1_024 })),
+    path: optionalSchema(stringSchema({
+      minLength: 1,
+      maxLength: 1_024,
+      description: WORKSPACE_RELATIVE_PATH_DESCRIPTION,
+    })),
     file_pattern: optionalSchema(stringSchema({ minLength: 1, maxLength: 512 })),
     case_sensitive: optionalSchema(booleanSchema()),
   }),

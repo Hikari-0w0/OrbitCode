@@ -3,12 +3,17 @@ import { defineTool, successfulToolResult } from "@/tools/registry";
 import { objectSchema, stringSchema } from "@/tools/schema";
 import { toolFailure } from "@/tools/types";
 import { MAX_TEXT_FILE_BYTES } from "@/tools/read-file";
+import { WORKSPACE_RELATIVE_PATH_DESCRIPTION } from "@/tools/workspace-path";
 
 export const editFileTool = defineTool({
   name: "edit_file",
   description: "在文本文件中执行一次原文唯一匹配替换。",
   inputSchema: objectSchema({
-    path: stringSchema({ minLength: 1, maxLength: 1_024 }),
+    path: stringSchema({
+      minLength: 1,
+      maxLength: 1_024,
+      description: WORKSPACE_RELATIVE_PATH_DESCRIPTION,
+    }),
     old_text: stringSchema({ minLength: 1, maxLength: MAX_TEXT_FILE_BYTES }),
     new_text: stringSchema({ maxLength: MAX_TEXT_FILE_BYTES }),
   }),

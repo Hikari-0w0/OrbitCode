@@ -145,6 +145,10 @@ test("文件工具结构化拒绝敏感路径、非法模式和超限写入", as
       { path: "orbitcode.yaml", content: "blocked" },
       context,
     );
+    const protectedWorkspaceConfig = await readFileTool.execute(
+      { path: "orbitcode.workspaces.yaml" },
+      context,
+    );
     const linkedWrite = await writeFileTool.execute(
       { path: "linked.txt", content: "blocked" },
       context,
@@ -157,6 +161,12 @@ test("文件工具结构化拒绝敏感路径、非法模式和超限写入", as
     assert.equal(invalidGlob.ok ? undefined : invalidGlob.error.kind, "invalid-arguments");
     assert.equal(tooLarge.ok ? undefined : tooLarge.error.kind, "limit-exceeded");
     assert.equal(protectedWrite.ok ? undefined : protectedWrite.error.kind, "protected-path");
+    assert.equal(
+      protectedWorkspaceConfig.ok
+        ? undefined
+        : protectedWorkspaceConfig.error.kind,
+      "protected-path",
+    );
     assert.equal(linkedWrite.ok, false);
     assert.equal(escapedWrite.ok, false);
     assert.equal(JSON.stringify(protectedRead).includes("sentinel"), false);

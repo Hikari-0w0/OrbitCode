@@ -27,12 +27,14 @@ import type {
 export const DEFAULT_MAX_AGENT_ITERATIONS = 8;
 export const MAX_AGENT_ITERATIONS = 32;
 const UNKNOWN_TOOL_ITERATION_LIMIT = 2;
+const WORKSPACE_PATH_PROMPT =
+  "工具中的 path 和 cwd 必须使用相对当前 Workspace 根目录的 POSIX 相对路径；不要传绝对路径、./、../ 或反斜杠。";
 
 const MODE_PROMPTS: Readonly<Record<AgentMode, string>> = {
   plan:
-    "你处于 Plan 模式。只分析任务、读取必要上下文并输出清晰计划；不要声称已经修改文件或执行命令。",
+    `你处于 Plan 模式。只分析任务、读取必要上下文并输出清晰计划；不要声称已经修改文件或执行命令。${WORKSPACE_PATH_PROMPT}`,
   do:
-    "你处于 Do 模式。根据用户目标自主使用可用工具，读取执行结果并继续，直到给出完整最终回复。",
+    `你处于 Do 模式。根据用户目标自主使用可用工具，读取执行结果并继续，直到给出完整最终回复。${WORKSPACE_PATH_PROMPT}`,
 };
 
 export interface AgentSession {

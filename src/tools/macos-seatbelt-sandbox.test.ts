@@ -116,3 +116,79 @@ test("Seatbelt 命令输出受限并可超时终止进程组", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("Seatbelt 允许命令安全使用 /dev/null", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-seatbelt-dev-null-"));
+  try {
+    const workspace = await createWorkspaceBoundary(root);
+    const cwd = await workspace.resolveExistingDirectory();
+    const sandbox = new MacOsSeatbeltCommandSandbox();
+    const result = await sandbox.run(
+      {
+        command: "printf ignored >/dev/null; printf ok",
+        cwd,
+        timeoutMs: 2_000,
+        outputLimitBytes: 1_024,
+      },
+      { workspace, signal: new AbortController().signal },
+    );
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout, "ok");
+    assert.equal(result.stderr, "");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Seatbelt 允许当前 Node 运行时内的 npm 启动", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-seatbelt-node-runtime-"));
+  try {
+    const workspace = await createWorkspaceBoundary(root);
+    const cwd = await workspace.resolveExistingDirectory();
+    const sandbox = new MacOsSeatbeltCommandSandbox();
+    const result = await sandbox.run(
+      {
+        command: "npm --version",
+        cwd,
+        timeoutMs: 10_000,
+        outputLimitBytes: 4_096,
+      },
+      { workspace, signal: new AbortController().signal },
+    );
+
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.match(result.stdout.trim(), /^\d+\.\d+\.\d+/u);
+    assert.equal(result.stderr, "");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Seatbelt 允许系统 C++ 工具链编译 Workspace 源码", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-seatbelt-cpp-"));
+  try {
+    await writeFile(
+      path.join(root, "main.cpp"),
+      "#include <iostream>\nint main() { std::cout << 42; }\n",
+    );
+    const workspace = await createWorkspaceBoundary(root);
+    const cwd = await workspace.resolveExistingDirectory();
+    const sandbox = new MacOsSeatbeltCommandSandbox();
+    const result = await sandbox.run(
+      {
+        command: "c++ main.cpp -o main && ./main",
+        cwd,
+        timeoutMs: 20_000,
+        outputLimitBytes: 16_384,
+      },
+      { workspace, signal: new AbortController().signal },
+    );
+
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.equal(result.stdout, "42");
+    assert.equal(result.stderr, "");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

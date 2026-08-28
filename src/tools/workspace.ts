@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { constants as fileSystemConstants } from "node:fs";
 import {
+  access,
   lstat,
   open,
   readdir,
@@ -62,6 +64,10 @@ export async function createWorkspaceBoundary(
     resolvedRoot = await realpath(root);
     const rootStat = await stat(resolvedRoot);
     if (!rootStat.isDirectory()) throw new Error("not a directory");
+    await access(
+      resolvedRoot,
+      fileSystemConstants.R_OK | fileSystemConstants.X_OK,
+    );
   } catch (error) {
     throw new WorkspaceError("not-directory", "授权工作目录不可用。", error);
   }
