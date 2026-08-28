@@ -48,8 +48,11 @@ test("默认注册中心恰好公开六个核心工具", () => {
     },
   };
   const registry = createDefaultToolRegistry(sandbox);
+  const first = registry.definitions();
+  const second = registry.definitions();
+  assert.deepEqual(first, second);
   assert.deepEqual(
-    registry.definitions().map((definition) => definition.function.name),
+    first.map((definition) => definition.function.name),
     [
       "read_file",
       "write_file",
@@ -59,9 +62,22 @@ test("默认注册中心恰好公开六个核心工具", () => {
       "search_code",
     ],
   );
-  assert.equal(registry.definitions().every(
+  assert.equal(first.every(
     (definition) => definition.function.parameters.additionalProperties === false,
   ), true);
+
+  const descriptions = new Map(
+    first.map((definition) => [
+      definition.function.name,
+      definition.function.description,
+    ]),
+  );
+  assert.match(descriptions.get("read_file") ?? "", /优先使用本工具/u);
+  assert.match(descriptions.get("write_file") ?? "", /覆盖已有文件前必须先用 read_file/u);
+  assert.match(descriptions.get("edit_file") ?? "", /调用前必须先用 read_file/u);
+  assert.match(descriptions.get("run_command") ?? "", /不得用本工具替代/u);
+  assert.match(descriptions.get("find_files") ?? "", /优先于 shell/u);
+  assert.match(descriptions.get("search_code") ?? "", /优先于 shell/u);
 });
 
 test("默认工具定义明确要求 Workspace 相对路径", () => {

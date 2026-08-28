@@ -24,6 +24,7 @@ test("Workspace 真实切换清空会话并恢复 Do，重选当前项不重置"
   assert.equal(next.selectedWorkspaceId, "beta");
   assert.equal(next.selectedProvider, "primary");
   assert.equal(next.mode, "do");
+  assert.equal(next.modeTurn, 0);
   assert.deepEqual(next.messages, []);
   assert.deepEqual(next.history, []);
   assert.equal(next.draft, "");
@@ -38,6 +39,7 @@ test("Provider 切换和清空会话保留 Workspace", () => {
   assert.equal(switched.selectedWorkspaceId, "alpha");
   assert.equal(switched.selectedProvider, "secondary");
   assert.equal(switched.mode, "do");
+  assert.equal(switched.modeTurn, 0);
   assert.deepEqual(switched.history, []);
 
   const cleared = chatSessionReducer(populatedState(), {
@@ -46,6 +48,7 @@ test("Provider 切换和清空会话保留 Workspace", () => {
   assert.equal(cleared.selectedWorkspaceId, "alpha");
   assert.equal(cleared.selectedProvider, "primary");
   assert.equal(cleared.mode, "do");
+  assert.equal(cleared.modeTurn, 0);
 });
 
 test("模式切换使 Plan 候选失效，重选当前模式保持幂等", () => {
@@ -60,6 +63,7 @@ test("模式切换使 Plan 候选失效，重选当前模式保持幂等", () =>
     mode: "do",
   });
   assert.equal(byControl.draft, "草稿");
+  assert.equal(byControl.modeTurn, 0);
   assert.equal(byControl.executablePlanMessageId, undefined);
 
   const byCommand = chatSessionReducer(populatedState(), {
@@ -68,6 +72,7 @@ test("模式切换使 Plan 候选失效，重选当前模式保持幂等", () =>
     clearDraft: true,
   });
   assert.equal(byCommand.draft, "");
+  assert.equal(byCommand.modeTurn, initial.modeTurn);
 });
 
 test("仅成功 Plan 回复成为最新可执行候选", () => {
@@ -146,6 +151,7 @@ function populatedState(): ChatSessionState {
     selectedWorkspaceId: "alpha",
     selectedProvider: "primary",
     mode: "plan",
+    modeTurn: 3,
     messages: [
       { id: "assistant-old", role: "assistant", content: "旧计划", state: "complete" },
     ],
@@ -159,9 +165,11 @@ function populatedState(): ChatSessionState {
 }
 
 function startRequest(state: ChatSessionState, mode: "plan" | "do") {
+  const modeTurn = state.mode === mode ? state.modeTurn + 1 : 1;
   return chatSessionReducer(state, {
     type: "request-started",
     mode,
+    modeTurn,
     userId: "user-new",
     assistantId: "assistant-new",
     userMessage: { role: "user", content: "新计划" },

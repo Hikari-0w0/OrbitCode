@@ -17,7 +17,13 @@ import {
   type ModelTokenUsage,
   type ModelToolCall,
   type PlainConversationMessage,
+  type PromptCacheUsage,
 } from "@/models/provider";
+import { buildSystemPromptMessages } from "@/core/system-prompt/assemble";
+import type {
+  OptionalPromptContext,
+  PromptEnvironment,
+} from "@/core/system-prompt/types";
 import type { ToolAccess } from "@/tools/mode-policy";
 import type {
   SideEffectState,
@@ -27,21 +33,12 @@ import type {
 export const DEFAULT_MAX_AGENT_ITERATIONS = 8;
 export const MAX_AGENT_ITERATIONS = 32;
 const UNKNOWN_TOOL_ITERATION_LIMIT = 2;
-const WORKSPACE_PATH_PROMPT =
-  "工具中的 path 和 cwd 必须使用相对当前 Workspace 根目录的 POSIX 相对路径；不要传绝对路径、./、../ 或反斜杠。";
-
-const MODE_PROMPTS: Readonly<Record<AgentMode, string>> = {
-  plan:
-    `你处于 Plan 模式。只分析任务、读取必要上下文并输出清晰计划；不要声称已经修改文件或执行命令。${WORKSPACE_PATH_PROMPT}`,
-  do:
-    `你处于 Do 模式。根据用户目标自主使用可用工具，读取执行结果并继续，直到给出完整最终回复。${WORKSPACE_PATH_PROMPT}`,
-};
-
 export interface AgentSession {
   getHistory(): readonly PlainConversationMessage[];
   streamTurn(options: {
     readonly input: string;
     readonly mode: AgentMode;
+    readonly modeTurn: number;
     readonly signal: AbortSignal;
   }): AsyncIterable<AgentEvent>;
 }
@@ -50,16 +47,24 @@ export class AgentLoop implements AgentSession {
   private history: PlainConversationMessage[];
   private state: "idle" | "running" = "idle";
   private readonly maxIterations: number;
+  private readonly promptEnvironment: PromptEnvironment;
+  private readonly optionalPromptContext?: OptionalPromptContext;
 
   constructor(
     private readonly provider: ChatProvider,
     private readonly toolAccessForMode: (mode: AgentMode) => ToolAccess,
     private readonly workspace: WorkspaceBoundary,
-    options: { readonly maxIterations: number },
+    options: {
+      readonly maxIterations: number;
+      readonly promptEnvironment: PromptEnvironment;
+      readonly optionalPromptContext?: OptionalPromptContext;
+    },
     initialHistory: readonly PlainConversationMessage[] = [],
   ) {
     assertMaxAgentIterations(options.maxIterations);
     this.maxIterations = options.maxIterations;
+    this.promptEnvironment = options.promptEnvironment;
+    this.optionalPromptContext = options.optionalPromptContext;
     this.history = initialHistory.map((message) => ({ ...message }));
   }
 
@@ -70,6 +75,7 @@ export class AgentLoop implements AgentSession {
   async *streamTurn(options: {
     readonly input: string;
     readonly mode: AgentMode;
+    readonly modeTurn: number;
     readonly signal: AbortSignal;
   }): AsyncIterable<AgentEvent> {
     if (this.state !== "idle") {
@@ -82,10 +88,15 @@ export class AgentLoop implements AgentSession {
       throw new ConversationStateError("Agent 模式无效。");
     }
 
+    const systemMessages = buildSystemPromptMessages({
+      environment: this.promptEnvironment,
+      optional: this.optionalPromptContext,
+      session: { mode: options.mode, modeTurn: options.modeTurn },
+    });
     this.state = "running";
     const userMessage = { role: "user", content: options.input } as const;
     const transcript: ConversationMessage[] = [
-      { role: "system", content: MODE_PROMPTS[options.mode] },
+      ...systemMessages,
       ...this.history,
       userMessage,
     ];
@@ -93,7 +104,7 @@ export class AgentLoop implements AgentSession {
     let completedIterations = 0;
     let consecutiveUnknownIterations = 0;
     let sideEffect: SideEffectState = "none";
-    let cumulativeUsage: TokenUsage = reportedUsage(0, 0, 0);
+    let cumulativeUsage: TokenUsage | undefined;
 
     try {
       for (let iteration = 1; iteration <= this.maxIterations; iteration += 1) {
@@ -138,13 +149,17 @@ export class AgentLoop implements AgentSession {
               usage.promptTokens,
               usage.completionTokens,
               usage.totalTokens,
+              usage.promptCache,
             );
-        cumulativeUsage = addUsage(cumulativeUsage, iterationUsage);
+        const nextCumulativeUsage = cumulativeUsage === undefined
+          ? iterationUsage
+          : addUsage(cumulativeUsage, iterationUsage);
+        cumulativeUsage = nextCumulativeUsage;
         yield {
           type: "token-usage",
           iteration,
           usage: iterationUsage,
-          cumulative: cumulativeUsage,
+          cumulative: nextCumulativeUsage,
         };
 
         if (finishReason === "stop") {
@@ -371,12 +386,14 @@ function reportedUsage(
   promptTokens: number,
   completionTokens: number,
   totalTokens: number,
+  promptCache: PromptCacheUsage,
 ): TokenUsage {
   return {
     availability: "reported",
     promptTokens,
     completionTokens,
     totalTokens,
+    promptCache,
   };
 }
 
@@ -388,7 +405,36 @@ function addUsage(left: TokenUsage, right: TokenUsage): TokenUsage {
     left.promptTokens + right.promptTokens,
     left.completionTokens + right.completionTokens,
     left.totalTokens + right.totalTokens,
+    addPromptCacheUsage(left.promptCache, right.promptCache),
   );
+}
+
+function addPromptCacheUsage(
+  left: PromptCacheUsage,
+  right: PromptCacheUsage,
+): PromptCacheUsage {
+  if (
+    left.availability === "unavailable" ||
+    right.availability === "unavailable"
+  ) {
+    return { availability: "unavailable" };
+  }
+  if (left.availability === "tokens" && right.availability === "tokens") {
+    return {
+      availability: "tokens",
+      cachedTokens: left.cachedTokens + right.cachedTokens,
+    };
+  }
+  return {
+    availability: "status",
+    hit: cacheUsageIsHit(left) || cacheUsageIsHit(right),
+  };
+}
+
+function cacheUsageIsHit(
+  usage: Exclude<PromptCacheUsage, { readonly availability: "unavailable" }>,
+): boolean {
+  return usage.availability === "tokens" ? usage.cachedTokens > 0 : usage.hit;
 }
 
 function higherSideEffect(

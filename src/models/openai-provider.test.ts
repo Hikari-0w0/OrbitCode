@@ -418,7 +418,12 @@ test("按索引拼接多个工具调用并在完成后接收 Token 用量", asyn
         { type: "done", finishReason: "tool-call" },
         {
           type: "usage",
-          usage: { promptTokens: 12, completionTokens: 8, totalTokens: 20 },
+          usage: {
+            promptTokens: 12,
+            completionTokens: 8,
+            totalTokens: 20,
+            promptCache: { availability: "unavailable" },
+          },
         },
       ],
     );
@@ -513,6 +518,123 @@ test("缺失 Token 用量保持兼容，非法或递减用量被拒绝", async (
   }
 });
 
+test("解析标准与兼容缓存字段并保留字段能力差异", async () => {
+  const scenarios = [
+    {
+      cache: { promptTokensDetails: { cached_tokens: 6 } },
+      expected: { availability: "tokens", cachedTokens: 6 },
+    },
+    {
+      cache: { promptCacheHitTokens: 4 },
+      expected: { availability: "tokens", cachedTokens: 4 },
+    },
+    {
+      cache: { promptCacheHit: true },
+      expected: { availability: "status", hit: true },
+    },
+    {
+      cache: {
+        promptTokensDetails: { cached_tokens: 0 },
+        promptCacheHit: false,
+      },
+      expected: { availability: "tokens", cachedTokens: 0 },
+    },
+  ] as const;
+
+  for (const scenario of scenarios) {
+    const server = await startOpenAIMockServer(() => ({
+      chunks: [{
+        data:
+          TEXT_FINISH_EVENT +
+          usageEvent({
+            promptTokens: 10,
+            completionTokens: 2,
+            totalTokens: 12,
+            ...scenario.cache,
+          }) +
+          TRANSPORT_DONE_EVENT,
+      }],
+    }));
+    try {
+      const provider = new OpenAICompatibleProvider({
+        model: "test-model",
+        baseUrl: server.baseUrl,
+        apiKey: "test-secret",
+      });
+      const result = await collect(provider.stream([], {
+        signal: new AbortController().signal,
+        toolChoice: "none",
+      }));
+      assert.deepEqual(result.at(-1), {
+        type: "usage",
+        usage: {
+          promptTokens: 10,
+          completionTokens: 2,
+          totalTokens: 12,
+          promptCache: scenario.expected,
+        },
+      });
+    } finally {
+      await server.close();
+    }
+  }
+});
+
+test("缓存扩展字段无效或冲突时仍保留基础 Token 用量", async () => {
+  const scenarios = [
+    { promptTokensDetails: null },
+    { promptTokensDetails: { cached_tokens: "6" } },
+    { promptCacheHitTokens: 11 },
+    {
+      promptTokensDetails: { cached_tokens: 2 },
+      promptCacheHitTokens: 3,
+    },
+    {
+      promptTokensDetails: { cached_tokens: 2 },
+      promptCacheHit: false,
+    },
+    { promptCacheHit: "yes" },
+  ] as const;
+
+  for (const cache of scenarios) {
+    const server = await startOpenAIMockServer(() => ({
+      chunks: [{
+        data:
+          TEXT_FINISH_EVENT +
+          usageEvent({
+            promptTokens: 10,
+            completionTokens: 2,
+            totalTokens: 12,
+            ...cache,
+          }) +
+          TRANSPORT_DONE_EVENT,
+      }],
+    }));
+    try {
+      const provider = new OpenAICompatibleProvider({
+        model: "test-model",
+        baseUrl: server.baseUrl,
+        apiKey: "test-secret",
+      });
+      const result = await collect(provider.stream([], {
+        signal: new AbortController().signal,
+        toolChoice: "none",
+      }));
+      assert.deepEqual(result.at(-1), {
+        type: "usage",
+        usage: {
+          promptTokens: 10,
+          completionTokens: 2,
+          totalTokens: 12,
+          promptCache: { availability: "unavailable" },
+        },
+      });
+    } finally {
+      await server.close();
+    }
+  }
+});
+
 test("兼容 Token 用量位于完成原因之前", async () => {
   const server = await startOpenAIMockServer(() => ({
     chunks: [{
@@ -539,7 +661,12 @@ test("兼容 Token 用量位于完成原因之前", async () => {
         { type: "done", finishReason: "stop" },
         {
           type: "usage",
-          usage: { promptTokens: 4, completionTokens: 2, totalTokens: 6 },
+          usage: {
+            promptTokens: 4,
+            completionTokens: 2,
+            totalTokens: 6,
+            promptCache: { availability: "unavailable" },
+          },
         },
       ],
     );
@@ -581,7 +708,12 @@ test("兼容 SiliconFlow 在文本结束 chunk 中附带 Token 用量", async ()
         { type: "done", finishReason: "stop" },
         {
           type: "usage",
-          usage: { promptTokens: 4, completionTokens: 2, totalTokens: 6 },
+          usage: {
+            promptTokens: 4,
+            completionTokens: 2,
+            totalTokens: 6,
+            promptCache: { availability: "unavailable" },
+          },
         },
       ],
     );
@@ -656,7 +788,12 @@ test("兼容 SiliconFlow 在工具调用结束 chunk 中附带 Token 用量", as
         { type: "done", finishReason: "tool-call" },
         {
           type: "usage",
-          usage: { promptTokens: 10, completionTokens: 8, totalTokens: 18 },
+          usage: {
+            promptTokens: 10,
+            completionTokens: 8,
+            totalTokens: 18,
+            promptCache: { availability: "unavailable" },
+          },
         },
       ],
     );
@@ -725,7 +862,12 @@ test("兼容 SiliconFlow 用空响应选项承载尾随 Token 用量", async () 
         { type: "done", finishReason: "tool-call" },
         {
           type: "usage",
-          usage: { promptTokens: 10, completionTokens: 8, totalTokens: 18 },
+          usage: {
+            promptTokens: 10,
+            completionTokens: 8,
+            totalTokens: 18,
+            promptCache: { availability: "unavailable" },
+          },
         },
       ],
     );
@@ -817,7 +959,12 @@ test("将 SiliconFlow 每个增量携带的累计 Token 用量归一为最终值
         { type: "done", finishReason: "tool-call" },
         {
           type: "usage",
-          usage: { promptTokens: 10, completionTokens: 8, totalTokens: 18 },
+          usage: {
+            promptTokens: 10,
+            completionTokens: 8,
+            totalTokens: 18,
+            promptCache: { availability: "unavailable" },
+          },
         },
       ],
     );
@@ -867,7 +1014,12 @@ test("兼容未结束的文本增量携带累计 Token 用量", async () => {
         { type: "done", finishReason: "stop" },
         {
           type: "usage",
-          usage: { promptTokens: 4, completionTokens: 3, totalTokens: 7 },
+          usage: {
+            promptTokens: 4,
+            completionTokens: 3,
+            totalTokens: 7,
+            promptCache: { availability: "unavailable" },
+          },
         },
       ],
     );

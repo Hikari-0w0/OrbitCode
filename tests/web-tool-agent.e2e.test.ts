@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { AgentLoop } from "@/core/agent-loop";
 import { OpenAICompatibleProvider } from "@/models/openai-provider";
+import { editFileTool } from "@/tools/edit-file";
 import { createModeToolPolicy } from "@/tools/mode-policy";
 import { readFileTool } from "@/tools/read-file";
 import { ToolRegistry } from "@/tools/registry";
@@ -20,6 +21,7 @@ import { streamAgentResponse } from "@/web/chat-handler";
 import {
   startOpenAIMockServer,
   textDelta,
+  TEXT_FINISH_EVENT,
   TOOL_FINISH_EVENT,
   toolCallDelta,
   TRANSPORT_DONE_EVENT,
@@ -34,28 +36,25 @@ test(
     const workspaceDirectory = await mkdtemp(
       path.join(tmpdir(), "orbitcode-web-agent-e2e-"),
     );
-    await writeFile(path.join(workspaceDirectory, "note-a.txt"), "ORBIT-A\n");
-    await writeFile(path.join(workspaceDirectory, "note-b.txt"), "ORBIT-B\n");
+    await writeFile(path.join(workspaceDirectory, "settings.ts"), "timeoutMs = 1000\n");
     const server = await startOpenAIMockServer(() => {
       if (server.requests.length === 1) {
         return {
           chunks: [{
             data:
-              textDelta("我先并发读取两个文件。") +
+              textDelta("先读取最新内容。") +
               toolCallDelta({
-                index: 0,
-                id: "call_a",
+                id: "call_read_before",
                 name: "read_file",
-                argumentsJson: '{"path":"note-a.txt"}',
-              }) +
-              toolCallDelta({
-                index: 1,
-                id: "call_b",
-                name: "read_file",
-                argumentsJson: '{"path":"note-b.txt"}',
+                argumentsJson: '{"path":"settings.ts"}',
               }) +
               TOOL_FINISH_EVENT +
-              usageEvent({ promptTokens: 10, completionTokens: 5, totalTokens: 15 }) +
+              usageEvent({
+                promptTokens: 10,
+                completionTokens: 5,
+                totalTokens: 15,
+                promptTokensDetails: { cached_tokens: 4 },
+              }) +
               TRANSPORT_DONE_EVENT,
           }],
         };
@@ -65,12 +64,38 @@ test(
           chunks: [{
             data:
               toolCallDelta({
-                id: "call_again",
-                name: "read_file",
-                argumentsJson: '{"path":"note-a.txt"}',
+                id: "call_edit",
+                name: "edit_file",
+                argumentsJson:
+                  '{"path":"settings.ts","old_text":"timeoutMs = 1000","new_text":"timeoutMs = 1500"}',
               }) +
               TOOL_FINISH_EVENT +
-              usageEvent({ promptTokens: 20, completionTokens: 4, totalTokens: 24 }) +
+              usageEvent({
+                promptTokens: 20,
+                completionTokens: 4,
+                totalTokens: 24,
+                promptCacheHitTokens: 10,
+              }) +
+              TRANSPORT_DONE_EVENT,
+          }],
+        };
+      }
+      if (server.requests.length === 3) {
+        return {
+          chunks: [{
+            data:
+              toolCallDelta({
+                id: "call_read_after",
+                name: "read_file",
+                argumentsJson: '{"path":"settings.ts"}',
+              }) +
+              TOOL_FINISH_EVENT +
+              usageEvent({
+                promptTokens: 30,
+                completionTokens: 3,
+                totalTokens: 33,
+                promptTokensDetails: { cached_tokens: 15 },
+              }) +
               TRANSPORT_DONE_EVENT,
           }],
         };
@@ -78,9 +103,14 @@ test(
       return {
         chunks: [{
           data:
-            textDelta("两个文件分别包含 ORBIT-A 和 ORBIT-B，复核完成。") +
-            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n' +
-            usageEvent({ promptTokens: 30, completionTokens: 8, totalTokens: 38 }) +
+            textDelta("已将 timeoutMs 改为 1500，并读取最终文件确认。") +
+            TEXT_FINISH_EVENT +
+            usageEvent({
+              promptTokens: 40,
+              completionTokens: 8,
+              totalTokens: 48,
+              promptTokensDetails: { cached_tokens: 20 },
+            }) +
             TRANSPORT_DONE_EVENT,
         }],
       };
@@ -93,18 +123,28 @@ test(
         apiKey: "test-key",
       });
       const workspace = await createWorkspaceBoundary(workspaceDirectory);
-      const registry = new ToolRegistry([readFileTool]);
+      const registry = new ToolRegistry([readFileTool, editFileTool]);
       const agent = new AgentLoop(
         provider,
         (mode) => createModeToolPolicy(registry, mode),
         workspace,
-        { maxIterations: 5 },
+        {
+          maxIterations: 5,
+          promptEnvironment: {
+            workspace: { id: "test", name: "Test Workspace" },
+            platform: "darwin",
+            currentDate: "2026-08-28",
+            timeZone: "Asia/Shanghai",
+            pathSemantics: "workspace-relative-posix",
+          },
+        },
       );
       const response = streamAgentResponse({
         request: new Request("http://localhost/api/chat", { method: "POST" }),
         agent,
-        input: "读取并复核两个文件",
+        input: "把 timeoutMs 从 1000 改为 1500，并验证结果",
         mode: "do",
+        modeTurn: 1,
       });
 
       assert.match(response.headers.get("content-type") ?? "", /^text\/event-stream/);
@@ -113,35 +153,57 @@ test(
       assert.equal(events.filter((event) => event.type === "tool-call").length, 3);
       assert.equal(events.filter((event) => event.type === "tool-started").length, 3);
       assert.equal(events.filter((event) => event.type === "tool-result").length, 3);
-      assert.equal(events.filter((event) => event.type === "token-usage").length, 3);
-      const firstResults = events.filter(
-        (event) => event.type === "tool-result" && event.iteration === 1,
-      );
-      assert.equal(firstResults.length, 2);
-      assert.match(JSON.stringify(firstResults), /ORBIT-A/);
-      assert.match(JSON.stringify(firstResults), /ORBIT-B/);
+      const usageEvents = events.filter((event) => event.type === "token-usage");
+      assert.equal(usageEvents.length, 4);
+      assert.deepEqual(usageEvents[1]?.cumulative, {
+        availability: "reported",
+        promptTokens: 30,
+        completionTokens: 9,
+        totalTokens: 39,
+        promptCache: { availability: "tokens", cachedTokens: 14 },
+      });
+      assert.deepEqual(usageEvents[3]?.cumulative, {
+        availability: "reported",
+        promptTokens: 100,
+        completionTokens: 20,
+        totalTokens: 120,
+        promptCache: { availability: "tokens", cachedTokens: 49 },
+      });
+      const toolResults = events.filter((event) => event.type === "tool-result");
+      assert.match(JSON.stringify(toolResults[0]), /timeoutMs = 1000/);
+      assert.match(JSON.stringify(toolResults[1]), /"replacements":1/);
+      assert.match(JSON.stringify(toolResults[2]), /timeoutMs = 1500/);
       assert.deepEqual(events.at(-1), {
         type: "stopped",
         reason: "final-response",
-        iterations: 3,
-        sideEffect: "none",
+        iterations: 4,
+        sideEffect: "applied",
         finalMessage: {
           role: "assistant",
-          content: "两个文件分别包含 ORBIT-A 和 ORBIT-B，复核完成。",
+          content: "已将 timeoutMs 改为 1500，并读取最终文件确认。",
         },
       });
 
-      assert.equal(server.requests.length, 3);
-      assert.equal(toolChoiceOf(server.requests[0]), "auto");
-      assert.equal(toolChoiceOf(server.requests[1]), "auto");
-      assert.equal(toolChoiceOf(server.requests[2]), "auto");
-      assert.match(JSON.stringify(server.requests[1].body), /ORBIT-A/);
-      assert.match(JSON.stringify(server.requests[1].body), /ORBIT-B/);
+      assert.equal(server.requests.length, 4);
+      assert.ok(server.requests.every((request) => toolChoiceOf(request) === "auto"));
+      const requestBodies = server.requests.map((request) => requestBody(request));
+      const firstPrefix = messagesOf(requestBodies[0]).slice(0, 3);
+      for (const body of requestBodies) {
+        assert.deepEqual(messagesOf(body).slice(0, 3), firstPrefix);
+        assert.deepEqual(body.tools, requestBodies[0].tools);
+        assert.equal(JSON.stringify(body).includes("cache_control"), false);
+        assert.equal(JSON.stringify(body).includes(workspaceDirectory), false);
+      }
+      assert.match(JSON.stringify(firstPrefix[0]), /你是 OrbitCode/u);
+      assert.match(JSON.stringify(firstPrefix[1]), /^\{"role":"system","content":"<orbitcode_environment>/u);
+      assert.match(JSON.stringify(firstPrefix[2]), /^\{"role":"system","content":"<orbitcode_session_instructions>/u);
+      assert.match(JSON.stringify(server.requests[1].body), /timeoutMs = 1000/);
+      assert.match(JSON.stringify(server.requests[3].body), /timeoutMs = 1500/);
       assert.deepEqual(agent.getHistory(), [
-        { role: "user", content: "读取并复核两个文件" },
+        { role: "user", content: "把 timeoutMs 从 1000 改为 1500，并验证结果" },
         {
           role: "assistant",
-          content: "两个文件分别包含 ORBIT-A 和 ORBIT-B，复核完成。",
+          content: "已将 timeoutMs 改为 1500，并读取最终文件确认。",
         },
       ]);
     } finally {
@@ -154,6 +216,16 @@ test(
 function toolChoiceOf(request: MockRequest): unknown {
   if (!isRecord(request.body)) return undefined;
   return request.body.tool_choice;
+}
+
+function requestBody(request: MockRequest): Record<string, unknown> {
+  assert.ok(isRecord(request.body));
+  return request.body;
+}
+
+function messagesOf(body: Record<string, unknown>): readonly unknown[] {
+  assert.ok(Array.isArray(body.messages));
+  return body.messages;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

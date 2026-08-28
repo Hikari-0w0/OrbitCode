@@ -4,9 +4,11 @@ import type {
   AgentStopReason,
   TokenUsage,
 } from "@/core/agent-events";
+import { MAX_MODE_TURN } from "@/core/system-prompt/session-instructions";
 import type {
   ModelToolCall,
   PlainConversationMessage,
+  PromptCacheUsage,
 } from "@/models/provider";
 import { parseServerSentEvents, SseError } from "@/models/sse";
 import type {
@@ -30,6 +32,7 @@ export type WebChatRequest = {
   readonly provider: string;
   readonly workspaceId: string;
   readonly mode: AgentMode;
+  readonly modeTurn: number;
   readonly messages: readonly PlainConversationMessage[];
 };
 
@@ -75,7 +78,13 @@ export class WebChatContractError extends Error {
 export function parseWebChatRequest(value: unknown): WebChatRequest {
   if (
     !isRecord(value) ||
-    !hasExactFields(value, ["provider", "workspaceId", "mode", "messages"])
+    !hasExactFields(value, [
+      "provider",
+      "workspaceId",
+      "mode",
+      "modeTurn",
+      "messages",
+    ])
   ) {
     throw new WebChatContractError("对话请求格式无效。");
   }
@@ -95,6 +104,9 @@ export function parseWebChatRequest(value: unknown): WebChatRequest {
   }
   if (!isAgentMode(value.mode)) {
     throw new WebChatContractError("Agent 模式无效。");
+  }
+  if (!isPositiveInteger(value.modeTurn, MAX_MODE_TURN)) {
+    throw new WebChatContractError("模式连续轮次无效。");
   }
   if (
     !Array.isArray(value.messages) ||
@@ -123,6 +135,7 @@ export function parseWebChatRequest(value: unknown): WebChatRequest {
     provider: value.provider.trim(),
     workspaceId: value.workspaceId,
     mode: value.mode,
+    modeTurn: value.modeTurn,
     messages,
   };
 }
@@ -517,6 +530,7 @@ function parseTokenUsage(value: unknown): TokenUsage {
       "promptTokens",
       "completionTokens",
       "totalTokens",
+      "promptCache",
     ]) &&
     isNonNegativeInteger(value.promptTokens) &&
     isNonNegativeInteger(value.completionTokens) &&
@@ -528,7 +542,35 @@ function parseTokenUsage(value: unknown): TokenUsage {
       promptTokens: value.promptTokens,
       completionTokens: value.completionTokens,
       totalTokens: value.totalTokens,
+      promptCache: parsePromptCacheUsage(value.promptCache),
     };
+  }
+  throw invalidEvent();
+}
+
+function parsePromptCacheUsage(value: unknown): PromptCacheUsage {
+  if (!isRecord(value) || typeof value.availability !== "string") {
+    throw invalidEvent();
+  }
+  if (
+    value.availability === "unavailable" &&
+    hasExactFields(value, ["availability"])
+  ) {
+    return { availability: "unavailable" };
+  }
+  if (
+    value.availability === "tokens" &&
+    hasExactFields(value, ["availability", "cachedTokens"]) &&
+    isNonNegativeInteger(value.cachedTokens)
+  ) {
+    return { availability: "tokens", cachedTokens: value.cachedTokens };
+  }
+  if (
+    value.availability === "status" &&
+    hasExactFields(value, ["availability", "hit"]) &&
+    typeof value.hit === "boolean"
+  ) {
+    return { availability: "status", hit: value.hit };
   }
   throw invalidEvent();
 }

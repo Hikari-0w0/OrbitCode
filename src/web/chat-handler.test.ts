@@ -50,6 +50,7 @@ test("Web 流消费者取消会中止 Agent 并释放响应流", async () => {
     agent,
     input: "长命令",
     mode: "do",
+    modeTurn: 1,
   });
   assert.ok(response.body);
   const reader = response.body.getReader();
@@ -74,6 +75,7 @@ test("Agent 未知异常被收敛为安全停止 SSE", async () => {
     agent,
     input: "失败",
     mode: "do",
+    modeTurn: 1,
   });
   assert.ok(response.body);
   const events = [];
@@ -110,6 +112,7 @@ test("Agent 正常停止后不追加第二个终止事件", async () => {
     agent,
     input: "完成",
     mode: "plan",
+    modeTurn: 1,
   });
   assert.ok(response.body);
   const events = [];

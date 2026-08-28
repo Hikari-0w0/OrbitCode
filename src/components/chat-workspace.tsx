@@ -200,6 +200,7 @@ export function ChatWorkspace() {
     ) return;
 
     const userMessage: PlainConversationMessage = { role: "user", content: input };
+    const modeTurn = snapshot.mode === requestMode ? snapshot.modeTurn + 1 : 1;
     const userId = crypto.randomUUID();
     const assistantId = crypto.randomUUID();
     const controller = new AbortController();
@@ -207,6 +208,7 @@ export function ChatWorkspace() {
     dispatch({
       type: "request-started",
       mode: requestMode,
+      modeTurn,
       userId,
       assistantId,
       userMessage,
@@ -221,6 +223,7 @@ export function ChatWorkspace() {
           provider: snapshot.selectedProvider,
           workspaceId: snapshot.selectedWorkspaceId,
           mode: requestMode,
+          modeTurn,
           messages: [...snapshot.history, userMessage],
         } satisfies WebChatRequest),
         signal: controller.signal,

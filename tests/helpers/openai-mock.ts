@@ -158,6 +158,9 @@ export function usageEvent(value: {
   readonly promptTokens: number;
   readonly completionTokens: number;
   readonly totalTokens: number;
+  readonly promptTokensDetails?: unknown;
+  readonly promptCacheHitTokens?: unknown;
+  readonly promptCacheHit?: unknown;
 }): string {
   return `data: ${JSON.stringify({
     choices: [],
@@ -165,6 +168,15 @@ export function usageEvent(value: {
       prompt_tokens: value.promptTokens,
       completion_tokens: value.completionTokens,
       total_tokens: value.totalTokens,
+      ...(value.promptTokensDetails === undefined
+        ? {}
+        : { prompt_tokens_details: value.promptTokensDetails }),
+      ...(value.promptCacheHitTokens === undefined
+        ? {}
+        : { prompt_cache_hit_tokens: value.promptCacheHitTokens }),
+      ...(value.promptCacheHit === undefined
+        ? {}
+        : { prompt_cache_hit: value.promptCacheHit }),
     },
   })}\n\n`;
 }

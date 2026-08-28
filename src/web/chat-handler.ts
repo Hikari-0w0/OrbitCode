@@ -7,6 +7,7 @@ export function streamAgentResponse(options: {
   readonly agent: AgentSession;
   readonly input: string;
   readonly mode: AgentMode;
+  readonly modeTurn: number;
 }): Response {
   const abortController = new AbortController();
   let consumerClosed = false;
@@ -23,6 +24,7 @@ export function streamAgentResponse(options: {
         for await (const event of options.agent.streamTurn({
           input: options.input,
           mode: options.mode,
+          modeTurn: options.modeTurn,
           signal: abortController.signal,
         })) {
           if (consumerClosed) break;

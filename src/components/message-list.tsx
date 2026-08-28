@@ -199,8 +199,27 @@ function UsageLine({ usage }: { readonly usage: TokenUsageEvent["cumulative"] })
   return (
     <p className="usageLine">
       Token：{usage.totalTokens.toLocaleString()}（输入 {usage.promptTokens.toLocaleString()} · 输出 {usage.completionTokens.toLocaleString()}）
+      {cacheUsageLabel(usage)}
     </p>
   );
+}
+
+function cacheUsageLabel(
+  usage: Extract<TokenUsageEvent["cumulative"], { availability: "reported" }>,
+): string {
+  if (usage.promptCache.availability === "unavailable") {
+    return " · 缓存：模型未报告";
+  }
+  if (usage.promptCache.availability === "status") {
+    return ` · 缓存：${usage.promptCache.hit ? "命中" : "未命中"}`;
+  }
+  const percentage = usage.promptTokens === 0
+    ? 0
+    : usage.promptCache.cachedTokens / usage.promptTokens * 100;
+  const formatted = percentage.toLocaleString(undefined, {
+    maximumFractionDigits: 1,
+  });
+  return ` · 缓存：${usage.promptCache.cachedTokens.toLocaleString()} Token（${formatted}%）`;
 }
 
 function EmptyConversation({ onSuggestion }: { readonly onSuggestion: (value: string) => void }) {

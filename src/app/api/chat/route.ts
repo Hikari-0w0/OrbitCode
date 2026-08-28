@@ -20,6 +20,7 @@ import {
   resolveWorkspaceBoundary,
   WorkspaceCatalogError,
 } from "@/web/workspace-config";
+import { createPromptEnvironment } from "@/web/prompt-environment";
 
 export const dynamic = "force-dynamic";
 
@@ -41,12 +42,26 @@ export async function POST(request: Request): Promise<Response> {
       workspaceCatalog,
       chatRequest.workspaceId,
     );
+    const workspaceEntry = workspaceCatalog.entries.find(
+      (entry) => entry.id === chatRequest.workspaceId,
+    );
+    if (!workspaceEntry) {
+      throw new WorkspaceCatalogError(
+        "unknown-workspace",
+        "选择的 Workspace 未经服务端授权。",
+      );
+    }
     const registry = createDefaultToolRegistry(commandSandbox);
     const agent = new AgentLoop(
       createChatProvider(config),
       (mode) => createModeToolPolicy(registry, mode),
       workspace,
-      { maxIterations: context.maxIterations },
+      {
+        maxIterations: context.maxIterations,
+        promptEnvironment: createPromptEnvironment({
+          workspace: { id: workspaceEntry.id, name: workspaceEntry.name },
+        }),
+      },
       chatRequest.messages.slice(0, -1),
     );
     return streamAgentResponse({
@@ -54,6 +69,7 @@ export async function POST(request: Request): Promise<Response> {
       agent,
       input: currentMessage.content,
       mode: chatRequest.mode,
+      modeTurn: chatRequest.modeTurn,
     });
   } catch (error) {
     return startupErrorResponse(error);

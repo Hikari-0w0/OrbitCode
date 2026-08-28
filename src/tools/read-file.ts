@@ -7,7 +7,8 @@ export const MAX_TEXT_FILE_BYTES = 512 * 1024;
 
 export const readFileTool = defineTool({
   name: "read_file",
-  description: "读取授权工作目录内的 UTF-8 文本文件。",
+  description:
+    "读取授权 Workspace 内 UTF-8 文本文件的最新内容。检查文件或准备修改、覆盖已有文件时优先使用本工具；不要用 shell 命令代替读取。",
   inputSchema: objectSchema({
     path: stringSchema({
       minLength: 1,

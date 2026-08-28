@@ -5,6 +5,7 @@ import {
   type ModelStreamEvent,
   type ModelTokenUsage,
   type ModelToolCall,
+  type PromptCacheUsage,
 } from "@/models/provider";
 import { parseServerSentEvents, SseError } from "@/models/sse";
 import type { ModelToolDefinition } from "@/tools/types";
@@ -407,7 +408,92 @@ function parseUsage(value: unknown): ModelTokenUsage {
   if (promptTokens + completionTokens !== totalTokens) {
     throw new ProviderError("protocol", "模型服务返回了矛盾的 Token 用量。");
   }
-  return { promptTokens, completionTokens, totalTokens };
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    promptCache: parsePromptCacheUsage(value, promptTokens),
+  };
+}
+
+type CacheField<T> =
+  | { readonly state: "absent" }
+  | { readonly state: "invalid" }
+  | { readonly state: "valid"; readonly value: T };
+
+function parsePromptCacheUsage(
+  usage: Readonly<Record<string, unknown>>,
+  promptTokens: number,
+): PromptCacheUsage {
+  const standard = parseStandardCachedTokens(usage, promptTokens);
+  const compatible = parseOptionalCachedTokens(
+    usage,
+    "prompt_cache_hit_tokens",
+    promptTokens,
+  );
+  const status = parseOptionalCacheHit(usage);
+  const fields = [standard, compatible, status];
+  if (fields.some((field) => field.state === "invalid")) {
+    return { availability: "unavailable" };
+  }
+
+  const numericValues = [standard, compatible].flatMap((field) =>
+    field.state === "valid" ? [field.value] : [],
+  );
+  if (
+    numericValues.length === 2 &&
+    numericValues[0] !== numericValues[1]
+  ) {
+    return { availability: "unavailable" };
+  }
+  const numericValue = numericValues[0];
+  if (numericValue !== undefined) {
+    if (status.state === "valid" && status.value !== (numericValue > 0)) {
+      return { availability: "unavailable" };
+    }
+    return { availability: "tokens", cachedTokens: numericValue };
+  }
+  if (status.state === "valid") {
+    return { availability: "status", hit: status.value };
+  }
+  return { availability: "unavailable" };
+}
+
+function parseStandardCachedTokens(
+  usage: Readonly<Record<string, unknown>>,
+  promptTokens: number,
+): CacheField<number> {
+  if (!("prompt_tokens_details" in usage)) return { state: "absent" };
+  const details = usage.prompt_tokens_details;
+  if (!isRecord(details)) return { state: "invalid" };
+  return parseOptionalCachedTokens(details, "cached_tokens", promptTokens);
+}
+
+function parseOptionalCachedTokens(
+  source: Readonly<Record<string, unknown>>,
+  key: string,
+  promptTokens: number,
+): CacheField<number> {
+  if (!(key in source)) return { state: "absent" };
+  const value = source[key];
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < 0 ||
+    value > promptTokens
+  ) {
+    return { state: "invalid" };
+  }
+  return { state: "valid", value };
+}
+
+function parseOptionalCacheHit(
+  usage: Readonly<Record<string, unknown>>,
+): CacheField<boolean> {
+  if (!("prompt_cache_hit" in usage)) return { state: "absent" };
+  return typeof usage.prompt_cache_hit === "boolean"
+    ? { state: "valid", value: usage.prompt_cache_hit }
+    : { state: "invalid" };
 }
 
 function requireTokenCount(value: unknown): number {
