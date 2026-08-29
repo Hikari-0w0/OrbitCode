@@ -80,6 +80,33 @@ test("默认注册中心恰好公开六个核心工具", () => {
   assert.match(descriptions.get("search_code") ?? "", /优先于 shell/u);
 });
 
+test("Context Session 只为对应注册中心追加内部读取工具", () => {
+  const sandbox: CommandSandbox = {
+    async probe() { return { available: false, message: "测试不执行命令" }; },
+    async run() { throw new Error("测试不应执行命令"); },
+  };
+  const registry = createDefaultToolRegistry(sandbox, async () => ({
+    content: "chunk",
+    offset: 0,
+    nextOffset: 5,
+    totalCharacters: 5,
+    hasMore: false,
+  }));
+  assert.deepEqual(
+    registry.definitions().map((definition) => definition.function.name),
+    [
+      "read_file",
+      "write_file",
+      "edit_file",
+      "run_command",
+      "find_files",
+      "search_code",
+      "read_context",
+    ],
+  );
+  assert.equal(registry.permissionTargets().has("read_context"), false);
+});
+
 test("默认工具定义明确要求 Workspace 相对路径", () => {
   const sandbox: CommandSandbox = {
     async probe() {

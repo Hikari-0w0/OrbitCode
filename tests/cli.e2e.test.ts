@@ -234,11 +234,15 @@ function yamlConfig(baseUrl: string, environmentVariable: string): string {
     "    model: e2e-model",
     `    base_url: ${baseUrl}`,
     `    api_key: ${environmentVariable}`,
+    "    context:",
+    "      window_tokens: 128000",
     "  - name: unused",
     "    protocol: openai",
     "    model: unused-model",
     "    base_url: http://127.0.0.1:1/v1",
     "    api_key: UNUSED_API_KEY",
+    "    context:",
+    "      window_tokens: 128000",
     "",
   ].join("\n");
 }

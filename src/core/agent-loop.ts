@@ -4,6 +4,8 @@ import type {
   AgentStopReason,
   TokenUsage,
 } from "@/core/agent-events";
+import { ContextManagementError } from "@/core/context/context-errors";
+import type { ContextManager } from "@/core/context/context-manager";
 import {
   AgentConfigurationError,
   ConversationStateError,
@@ -26,9 +28,10 @@ import type {
 } from "@/core/system-prompt/types";
 import type { ToolAccess } from "@/tools/mode-policy";
 import type { PermissionGateway } from "@/tools/permission-gateway";
-import type {
-  SideEffectState,
-  WorkspaceBoundary,
+import {
+  toolFailure,
+  type SideEffectState,
+  type WorkspaceBoundary,
 } from "@/tools/types";
 
 export const DEFAULT_MAX_AGENT_ITERATIONS = 8;
@@ -65,6 +68,7 @@ export class AgentLoop implements AgentSession {
       readonly permissionGatewayForMode?: (
         mode: AgentMode,
       ) => PermissionGateway;
+      readonly contextManager?: ContextManager;
     },
     initialHistory: readonly PlainConversationMessage[] = [],
   ) {
@@ -73,8 +77,11 @@ export class AgentLoop implements AgentSession {
     this.promptEnvironment = options.promptEnvironment;
     this.optionalPromptContext = options.optionalPromptContext;
     this.permissionGatewayForMode = options.permissionGatewayForMode;
+    this.contextManager = options.contextManager;
     this.history = initialHistory.map((message) => ({ ...message }));
   }
+
+  private readonly contextManager?: ContextManager;
 
   getHistory(): readonly PlainConversationMessage[] {
     return this.history.map((message) => ({ ...message }));
@@ -109,16 +116,38 @@ export class AgentLoop implements AgentSession {
       userMessage,
     ];
     const access = this.toolAccessForMode(options.mode);
+    const toolDefinitions = access.definitions();
+    const promptEnvelope = {
+      systemMessages,
+      tools: toolDefinitions,
+    } as const;
     const permissionGateway = this.permissionGatewayForMode?.(options.mode);
     let completedIterations = 0;
     let consecutiveUnknownIterations = 0;
     let sideEffect: SideEffectState = "none";
     let cumulativeUsage: TokenUsage | undefined;
+    let contextTurnActive = false;
+    let partialAssistantContent = "";
+    let interruption:
+      | {
+          readonly reason: Exclude<AgentStopReason, "final-response">;
+          readonly detail: string;
+        }
+      | undefined;
+    const interrupt = (
+      reason: Exclude<AgentStopReason, "final-response">,
+      detail: string,
+    ): Extract<AgentEvent, { type: "stopped" }> => {
+      interruption = { reason, detail };
+      return stopped(reason, completedIterations, sideEffect, detail);
+    };
 
     try {
+      this.contextManager?.beginTurn(options.input);
+      contextTurnActive = this.contextManager !== undefined;
       for (let iteration = 1; iteration <= this.maxIterations; iteration += 1) {
         if (options.signal.aborted) {
-          yield stopped("cancelled", completedIterations, sideEffect, "Agent 轮次已取消。");
+          yield interrupt("cancelled", "Agent 轮次已取消。");
           return;
         }
         yield {
@@ -128,20 +157,30 @@ export class AgentLoop implements AgentSession {
           phase: "model",
         };
 
+        const modelMessages = this.contextManager
+          ? (await this.contextManager.prepareForModel(
+              promptEnvelope,
+              options.signal,
+            )).messages
+          : transcript;
         const response = this.collectModelResponse(
-          transcript,
-          access,
+          modelMessages,
+          toolDefinitions,
           options.signal,
           iteration,
         );
         let content = "";
+        let reasoningContent = "";
         const calls: ModelToolCall[] = [];
         let finishReason: "stop" | "tool-call" | undefined;
         let usage: ModelTokenUsage | undefined;
         for await (const event of response) {
           if (event.type === "agent-text") {
             content += event.text;
+            partialAssistantContent = content;
             yield { type: "text-delta", iteration, text: event.text };
+          } else if (event.type === "model-reasoning") {
+            reasoningContent += event.text;
           } else if (event.type === "model-tool-call") {
             calls.push(event.call);
           } else if (event.type === "model-usage") {
@@ -151,6 +190,9 @@ export class AgentLoop implements AgentSession {
           }
         }
         completedIterations = iteration;
+        if (usage !== undefined) {
+          this.contextManager?.recordAgentUsage(usage.promptTokens, promptEnvelope);
+        }
 
         const iterationUsage = usage === undefined
           ? ({ availability: "unavailable" } as const)
@@ -179,7 +221,15 @@ export class AgentLoop implements AgentSession {
             role: "assistant",
             content,
           };
-          this.history = [...this.history, userMessage, finalMessage];
+          if (this.contextManager) {
+            this.contextManager.appendFinal(content);
+            await this.contextManager.commitTurn();
+            contextTurnActive = false;
+            partialAssistantContent = "";
+            this.history = [...this.contextManager.getPlainHistory()];
+          } else {
+            this.history = [...this.history, userMessage, finalMessage];
+          }
           yield {
             type: "stopped",
             reason: "final-response",
@@ -202,10 +252,18 @@ export class AgentLoop implements AgentSession {
           };
         }
         if (iteration === this.maxIterations) {
-          yield stopped(
+          if (this.contextManager) {
+            this.contextManager.appendToolExchange(
+              content.length > 0 ? content : null,
+              calls,
+              cancelledToolResults(calls, [], "达到最大迭代次数，工具未执行。")
+                .map(toContextToolResult),
+              reasoningContent.length > 0 ? reasoningContent : undefined,
+            );
+            partialAssistantContent = "";
+          }
+          yield interrupt(
             "max-iterations",
-            completedIterations,
-            sideEffect,
             `Agent 已达到最大迭代次数 ${this.maxIterations}。`,
           );
           return;
@@ -287,36 +345,58 @@ export class AgentLoop implements AgentSession {
         }
 
         if (options.signal.aborted) {
-          yield stopped("cancelled", completedIterations, sideEffect, "Agent 轮次已取消。");
-          return;
-        }
-        if (
-          allUnknown &&
-          consecutiveUnknownIterations >= UNKNOWN_TOOL_ITERATION_LIMIT
-        ) {
-          yield stopped(
-            "repeated-unknown-tool",
-            completedIterations,
-            sideEffect,
-            "模型连续请求未知工具，Agent 已安全停止。",
-          );
+          if (this.contextManager) {
+            this.contextManager.appendToolExchange(
+              content.length > 0 ? content : null,
+              calls,
+              cancelledToolResults(
+                calls,
+                orderedResults,
+                "Agent 轮次已取消，工具未执行。",
+              ).map(toContextToolResult),
+              reasoningContent.length > 0 ? reasoningContent : undefined,
+            );
+            partialAssistantContent = "";
+          }
+          yield interrupt("cancelled", "Agent 轮次已取消。");
           return;
         }
         if (orderedResults.length !== calls.length) {
           throw new Error("工具调度未返回完整结果。");
         }
 
-        transcript.push({
-          role: "assistant",
-          content: content.length > 0 ? content : null,
-          toolCalls: calls.map(safeToolCallForDisplay),
-        });
-        for (const item of orderedResults) {
+        if (this.contextManager) {
+          this.contextManager.appendToolExchange(
+            content.length > 0 ? content : null,
+            calls,
+            orderedResults.map(toContextToolResult),
+            reasoningContent.length > 0 ? reasoningContent : undefined,
+          );
+          partialAssistantContent = "";
+        } else {
           transcript.push({
-            role: "tool",
-            toolCallId: item.call.id,
-            content: JSON.stringify(item.result),
+            role: "assistant",
+            content: content.length > 0 ? content : null,
+            ...(reasoningContent.length > 0 ? { reasoningContent } : {}),
+            toolCalls: calls.map(safeToolCallForDisplay),
           });
+          for (const item of orderedResults) {
+            transcript.push({
+              role: "tool",
+              toolCallId: item.call.id,
+              content: JSON.stringify(item.result),
+            });
+          }
+        }
+        if (
+          allUnknown &&
+          consecutiveUnknownIterations >= UNKNOWN_TOOL_ITERATION_LIMIT
+        ) {
+          yield interrupt(
+            "repeated-unknown-tool",
+            "模型连续请求未知工具，Agent 已安全停止。",
+          );
+          return;
         }
       }
       throw new Error("Agent 循环越过了最大迭代边界。");
@@ -325,31 +405,52 @@ export class AgentLoop implements AgentSession {
         options.signal.aborted ||
         (error instanceof ProviderError && error.kind === "cancelled")
       ) {
-        yield stopped("cancelled", completedIterations, sideEffect, "Agent 轮次已取消。");
+        yield interrupt("cancelled", "Agent 轮次已取消。");
+        return;
+      }
+      if (error instanceof ContextManagementError) {
+        const circuitOpen =
+          this.contextManager?.snapshot().consecutiveSummaryFailures === 3;
+        const reason = circuitOpen
+          ? "context-circuit-open"
+          : error.kind === "capacity"
+            ? "context-capacity"
+            : "context-error";
+        yield interrupt(reason, error.message);
         return;
       }
       if (error instanceof ProviderError) {
-        yield stopped("model-error", completedIterations, sideEffect, error.message);
+        yield interrupt("model-error", error.message);
         return;
       }
-      yield stopped(
-        "agent-error",
-        completedIterations,
-        sideEffect,
-        "Agent 执行发生未知错误，请重试。",
-      );
+      yield interrupt("agent-error", "Agent 执行发生未知错误，请重试。");
     } finally {
+      if (this.contextManager && contextTurnActive) {
+        const terminal = interruption ?? {
+          reason: options.signal.aborted ? "cancelled" as const : "agent-error" as const,
+          detail: options.signal.aborted
+            ? "Agent 轮次已取消。"
+            : "Agent 轮次在完成前中断。",
+        };
+        await this.contextManager.commitInterruptedTurn({
+          ...terminal,
+          partialAssistantContent,
+          sideEffect,
+        });
+        this.history = [...this.contextManager.getPlainHistory()];
+      }
       this.state = "idle";
     }
   }
 
   private async *collectModelResponse(
     messages: readonly ConversationMessage[],
-    access: ToolAccess,
+    tools: readonly ReturnType<ToolAccess["definitions"]>[number][],
     signal: AbortSignal,
     iteration: number,
   ): AsyncIterable<
     | { readonly type: "agent-text"; readonly text: string }
+    | { readonly type: "model-reasoning"; readonly text: string }
     | { readonly type: "model-tool-call"; readonly call: ModelToolCall }
     | { readonly type: "model-usage"; readonly usage: ModelTokenUsage }
     | {
@@ -361,7 +462,7 @@ export class AgentLoop implements AgentSession {
     let usageReceived = false;
     for await (const event of this.provider.stream(messages, {
       signal,
-      tools: access.definitions(),
+      tools,
       toolChoice: "auto",
     })) {
       if (signal.aborted) {
@@ -370,7 +471,9 @@ export class AgentLoop implements AgentSession {
       if (completed && event.type !== "usage") {
         throw new ProviderError("protocol", "模型在完成事件后仍返回了数据。");
       }
-      if (event.type === "text-delta") {
+      if (event.type === "reasoning-delta") {
+        yield { type: "model-reasoning", text: event.text };
+      } else if (event.type === "text-delta") {
         yield { type: "agent-text", text: event.text };
       } else if (event.type === "tool-call") {
         yield { type: "model-tool-call", call: event.call };
@@ -491,4 +594,29 @@ function higherSideEffect(
     applied: 2,
   };
   return rank[right] > rank[left] ? right : left;
+}
+
+function cancelledToolResults(
+  calls: readonly ModelToolCall[],
+  completed: readonly ToolCallResult[],
+  message: string,
+): readonly ToolCallResult[] {
+  const completedById = new Map(
+    completed.map((item) => [item.call.id, item] as const),
+  );
+  return calls.map((call, sequence) => completedById.get(call.id) ?? {
+    call,
+    sequence,
+    result: toolFailure("cancelled", message, { retryable: true }),
+  });
+}
+
+function toContextToolResult(item: ToolCallResult): {
+  readonly toolCallId: string;
+  readonly content: string;
+} {
+  return {
+    toolCallId: item.call.id,
+    content: JSON.stringify(item.result),
+  };
 }

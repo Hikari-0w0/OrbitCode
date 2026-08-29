@@ -3,6 +3,7 @@ import {
   type ChatProvider,
   type ConversationMessage,
   type ModelStreamEvent,
+  type ModelThinkingConfig,
   type ModelTokenUsage,
   type ModelToolCall,
   type PromptCacheUsage,
@@ -12,6 +13,7 @@ import type { ModelToolDefinition } from "@/tools/types";
 
 const MAX_MODEL_TOOL_CALLS = 16;
 const MAX_MODEL_TOOL_ARGUMENTS_LENGTH = 64 * 1024;
+const MAX_REASONING_CONTENT_LENGTH = 256 * 1024;
 const SAFE_TOOL_CALL_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const SAFE_TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -19,6 +21,7 @@ type OpenAIProviderOptions = {
   readonly model: string;
   readonly baseUrl: string;
   readonly apiKey: string;
+  readonly thinking?: ModelThinkingConfig;
   readonly fetchImplementation?: typeof fetch;
 };
 
@@ -38,6 +41,7 @@ type ParsedToolCallDelta = {
 
 type ParsedEvent = {
   readonly content?: string;
+  readonly reasoningContent?: string;
   readonly toolCalls: readonly ParsedToolCallDelta[];
   readonly finishReason?: string;
   readonly usage?: ModelTokenUsage;
@@ -47,17 +51,20 @@ export class OpenAICompatibleProvider implements ChatProvider {
   private readonly model: string;
   private readonly endpoint: URL;
   private readonly apiKey: string;
+  private readonly thinking?: ModelThinkingConfig;
   private readonly fetchImplementation: typeof fetch;
 
   constructor({
     model,
     baseUrl,
     apiKey,
+    thinking,
     fetchImplementation = fetch,
   }: OpenAIProviderOptions) {
     this.model = model;
     this.endpoint = new URL(`${baseUrl.replace(/\/+$/, "")}/chat/completions`);
     this.apiKey = apiKey;
+    this.thinking = thinking;
     this.fetchImplementation = fetchImplementation;
   }
 
@@ -89,6 +96,14 @@ export class OpenAICompatibleProvider implements ChatProvider {
           stream: true,
           stream_options: { include_usage: true },
           tool_choice: options.toolChoice,
+          ...(this.thinking === undefined
+            ? {}
+            : {
+                enable_thinking: this.thinking.enabled,
+                ...(this.thinking.enabled && this.thinking.budgetTokens !== undefined
+                  ? { thinking_budget: this.thinking.budgetTokens }
+                  : {}),
+              }),
           ...(tools.length > 0
             ? { tools, parallel_tool_calls: true }
             : {}),
@@ -124,6 +139,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     let modelFinished = false;
     let transportFinished = false;
     let latestUsage: ModelTokenUsage | undefined;
+    let reasoningContentLength = 0;
 
     try {
       for await (const data of parseServerSentEvents(readResponseBody(response.body))) {
@@ -150,6 +166,16 @@ export class OpenAICompatibleProvider implements ChatProvider {
         }
         if (event.usage !== undefined) {
           latestUsage = acceptCumulativeUsage(latestUsage, event.usage);
+        }
+        if (
+          event.reasoningContent !== undefined &&
+          event.reasoningContent.length > 0
+        ) {
+          reasoningContentLength += event.reasoningContent.length;
+          if (reasoningContentLength > MAX_REASONING_CONTENT_LENGTH) {
+            throw new ProviderError("protocol", "模型推理内容过长。");
+          }
+          yield { type: "reasoning-delta", text: event.reasoningContent };
         }
         if (event.content !== undefined && event.content.length > 0) {
           yield { type: "text-delta", text: event.content };
@@ -219,6 +245,9 @@ function toOpenAIMessage(message: ConversationMessage): Record<string, unknown> 
   return {
     role: "assistant",
     content: message.content,
+    ...(message.reasoningContent === undefined
+      ? {}
+      : { reasoning_content: message.reasoningContent }),
     tool_calls: message.toolCalls.map((call) => ({
       id: call.id,
       type: "function",
@@ -258,6 +287,14 @@ function parseOpenAIEvent(data: string): ParsedEvent {
   if (content !== undefined && content !== null && typeof content !== "string") {
     throw new ProviderError("protocol", "模型服务返回了非文本增量。");
   }
+  const reasoningContent = choice.delta.reasoning_content;
+  if (
+    reasoningContent !== undefined &&
+    reasoningContent !== null &&
+    typeof reasoningContent !== "string"
+  ) {
+    throw new ProviderError("protocol", "模型服务返回了无效的推理内容。");
+  }
 
   const rawToolCalls = choice.delta.tool_calls;
   const toolCallDeltas: ParsedToolCallDelta[] = [];
@@ -285,6 +322,8 @@ function parseOpenAIEvent(data: string): ParsedEvent {
   }
   return {
     content: typeof content === "string" ? content : undefined,
+    reasoningContent:
+      typeof reasoningContent === "string" ? reasoningContent : undefined,
     toolCalls: toolCallDeltas,
     finishReason: typeof finishReason === "string" ? finishReason : undefined,
     usage,
@@ -521,6 +560,7 @@ function acceptCumulativeUsage(
 function eventHasModelData(event: ParsedEvent): boolean {
   return (
     event.content !== undefined ||
+    event.reasoningContent !== undefined ||
     event.toolCalls.length > 0 ||
     event.finishReason !== undefined
   );

@@ -4,6 +4,10 @@ import { useEffect, useReducer, useRef, useState } from "react";
 
 import { ChatComposer } from "@/components/chat-composer";
 import {
+  ContextCompressionControl,
+  type ContextCompressionUiState,
+} from "@/components/context-compression-control";
+import {
   chatSessionReducer,
   INITIAL_CHAT_SESSION_STATE,
 } from "@/components/chat-session-state";
@@ -16,6 +20,8 @@ import type { PermissionMode } from "@/core/permissions/types";
 import type { PlainConversationMessage } from "@/models/provider";
 import {
   parseProviderCatalogResponse,
+  parseContextCompressionResponse,
+  parseContextSessionResponse,
   parsePermissionDecisionResponse,
   parsePermissionSessionResponse,
   parseWebApiError,
@@ -23,6 +29,7 @@ import {
   parseWorkspaceCatalogResponse,
   readWebStream,
   type ProviderSummary,
+  type ContextSessionResponse,
   type WebApiError,
   type WebChatRequest,
   type WorkspaceSummary,
@@ -36,6 +43,10 @@ type PermissionSessionUi =
   | { readonly status: "loading"; readonly mode: PermissionMode }
   | { readonly status: "ready"; readonly id: string; readonly mode: PermissionMode }
   | { readonly status: "error"; readonly mode: PermissionMode; readonly error: string };
+type ContextSessionUi =
+  | { readonly status: "loading" }
+  | ({ readonly status: "ready" } & ContextSessionResponse)
+  | { readonly status: "error"; readonly error: string };
 
 export function ChatWorkspace() {
   const [session, dispatch] = useReducer(
@@ -48,16 +59,24 @@ export function ChatWorkspace() {
   const [catalogError, setCatalogError] = useState<string>();
   const [catalogRevision, setCatalogRevision] = useState(0);
   const [permissionRevision, setPermissionRevision] = useState(0);
+  const [contextRevision, setContextRevision] = useState(0);
   const [permissionSession, setPermissionSession] = useState<PermissionSessionUi>({
     status: "loading",
     mode: "default",
   });
   const [permissionModeUpdating, setPermissionModeUpdating] = useState(false);
+  const [contextSession, setContextSession] = useState<ContextSessionUi>({
+    status: "loading",
+  });
+  const [compressionState, setCompressionState] =
+    useState<ContextCompressionUiState>({ status: "idle" });
   const activeRequestRef = useRef<AbortController | undefined>(undefined);
   const sessionRef = useRef(session);
   const permissionSessionRef = useRef(permissionSession);
+  const contextSessionRef = useRef(contextSession);
   sessionRef.current = session;
   permissionSessionRef.current = permissionSession;
+  contextSessionRef.current = contextSession;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -178,10 +197,58 @@ export function ChatWorkspace() {
     return () => controller.abort();
   }, [catalogRevision]);
 
+  useEffect(() => {
+    if (
+      catalogState !== "ready" ||
+      !session.selectedProvider ||
+      !session.selectedWorkspaceId
+    ) return;
+
+    const controller = new AbortController();
+    async function createContextSession(): Promise<void> {
+      setContextSession({ status: "loading" });
+      try {
+        const response = await fetch("/api/context-sessions", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            provider: session.selectedProvider,
+            workspaceId: session.selectedWorkspaceId,
+          }),
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        const value: unknown = await response.json();
+        if (!response.ok) {
+          throw new Error(
+            parseWebApiError(value)?.error ?? "无法创建上下文会话。",
+          );
+        }
+        const created = parseContextSessionResponse(value);
+        setContextSession({ status: "ready", ...created });
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setContextSession({
+          status: "error",
+          error: safeErrorMessage(error, "无法创建上下文会话。"),
+        });
+      }
+    }
+    void createContextSession();
+    return () => controller.abort();
+  }, [
+    catalogState,
+    contextRevision,
+    session.selectedProvider,
+    session.selectedWorkspaceId,
+  ]);
+
   useEffect(() => () => {
     activeRequestRef.current?.abort();
     const current = permissionSessionRef.current;
     if (current.status === "ready") closePermissionSession(current.id);
+    const context = contextSessionRef.current;
+    if (context.status === "ready") closeContextSession(context.sessionId);
   }, []);
 
   const currentProvider = providers.find(
@@ -202,10 +269,12 @@ export function ChatWorkspace() {
   const controlsDisabled =
     catalogState !== "ready" ||
     permissionSession.status !== "ready" ||
+    contextSession.status !== "ready" ||
     (isStreaming && !isAwaitingPermission);
   const notice =
     catalogError ??
     (permissionSession.status === "error" ? permissionSession.error : undefined) ??
+    (contextSession.status === "error" ? contextSession.error : undefined) ??
     session.notice;
 
   function selectWorkspace(workspaceId: string): void {
@@ -213,7 +282,7 @@ export function ChatWorkspace() {
     if (!workspaces.some((workspace) => workspace.id === workspaceId && workspace.available)) {
       return;
     }
-    resetPermissionContext({ workspaceId });
+    resetServerContext({ workspaceId });
   }
 
   function selectProvider(provider: string): void {
@@ -221,19 +290,24 @@ export function ChatWorkspace() {
     if (!providers.some((candidate) => candidate.name === provider && candidate.available)) {
       return;
     }
-    resetPermissionContext({ provider });
+    resetServerContext({ provider });
   }
 
-  function resetPermissionContext(selections: {
+  function resetServerContext(selections: {
     readonly workspaceId?: string;
     readonly provider?: string;
   } = {}): void {
     activeRequestRef.current?.abort();
     const current = permissionSessionRef.current;
     if (current.status === "ready") closePermissionSession(current.id);
+    const context = contextSessionRef.current;
+    if (context.status === "ready") closeContextSession(context.sessionId);
     setPermissionSession((value) => ({ status: "loading", mode: value.mode }));
+    setContextSession({ status: "loading" });
+    setCompressionState({ status: "idle" });
     dispatch({ type: "context-reset", ...selections });
     setPermissionRevision((value) => value + 1);
+    setContextRevision((value) => value + 1);
   }
 
   async function selectPermissionMode(mode: PermissionMode): Promise<void> {
@@ -300,6 +374,7 @@ export function ChatWorkspace() {
       !snapshot.selectedProvider ||
       !snapshot.selectedWorkspaceId ||
       permissionSessionRef.current.status !== "ready" ||
+      contextSessionRef.current.status !== "ready" ||
       snapshot.requestState !== "idle" ||
       activeRequestRef.current ||
       (requiredPlanMessageId !== undefined &&
@@ -314,7 +389,10 @@ export function ChatWorkspace() {
     const permissionSessionId = permissionSessionRef.current.status === "ready"
       ? permissionSessionRef.current.id
       : undefined;
-    if (!permissionSessionId) return;
+    const contextSessionId = contextSessionRef.current.status === "ready"
+      ? contextSessionRef.current.sessionId
+      : undefined;
+    if (!permissionSessionId || !contextSessionId) return;
     activeRequestRef.current = controller;
     dispatch({
       type: "request-started",
@@ -334,9 +412,10 @@ export function ChatWorkspace() {
           provider: snapshot.selectedProvider,
           workspaceId: snapshot.selectedWorkspaceId,
           permissionSessionId,
+          contextSessionId,
           mode: requestMode,
           modeTurn,
-          messages: [...snapshot.history, userMessage],
+          input,
         } satisfies WebChatRequest),
         signal: controller.signal,
       });
@@ -355,7 +434,12 @@ export function ChatWorkspace() {
 
       for await (const event of parseWebChatEvents(readWebStream(response.body))) {
         if (event.type === "text-delta") {
-          dispatch({ type: "text-delta", assistantId, text: event.text });
+          dispatch({
+            type: "text-delta",
+            assistantId,
+            iteration: event.iteration,
+            text: event.text,
+          });
         } else if (event.type === "progress") {
           dispatch({ type: "progress", assistantId, event });
         } else if (event.type === "tool-call") {
@@ -389,7 +473,7 @@ export function ChatWorkspace() {
     } catch (error) {
       const cancelled = controller.signal.aborted;
       const detail = cancelled
-        ? "回复已停止，本轮不会加入后续上下文。"
+        ? "回复已停止，已生成的进度会保留在后续上下文中。"
         : safeErrorMessage(error, "模型请求失败，请重试。");
       dispatch({
         type: "request-transport-failed",
@@ -403,6 +487,11 @@ export function ChatWorkspace() {
       ) {
         setCatalogState("config-error");
         setCatalogError(detail);
+      } else if (
+        error instanceof WebRequestError &&
+        error.code === "context-session"
+      ) {
+        setContextSession({ status: "error", error: detail });
       }
     } finally {
       if (activeRequestRef.current === controller) {
@@ -440,6 +529,46 @@ export function ChatWorkspace() {
         requestId,
         error: safeErrorMessage(error, "无法提交授权决定，请重试。"),
       });
+    }
+  }
+
+  async function compressContext(): Promise<void> {
+    const current = contextSessionRef.current;
+    if (
+      current.status !== "ready" ||
+      sessionRef.current.requestState !== "idle" ||
+      compressionState.status === "compressing"
+    ) return;
+
+    setCompressionState({ status: "compressing" });
+    try {
+      const response = await fetch(
+        `/api/context-sessions/${current.sessionId}/compress`,
+        { method: "POST" },
+      );
+      const value: unknown = await response.json();
+      if (!response.ok) {
+        throw new WebRequestError(
+          parseWebApiError(value)?.error ?? "无法压缩上下文。",
+          parseWebApiError(value)?.code,
+        );
+      }
+      setCompressionState(parseContextCompressionResponse(value));
+    } catch (error) {
+      setCompressionState({ status: "idle" });
+      dispatch({
+        type: "notice-set",
+        notice: safeErrorMessage(error, "无法压缩上下文。"),
+      });
+      if (
+        error instanceof WebRequestError &&
+        error.code === "context-session"
+      ) {
+        setContextSession({
+          status: "error",
+          error: safeErrorMessage(error, "上下文会话已失效。"),
+        });
+      }
     }
   }
 
@@ -518,7 +647,7 @@ export function ChatWorkspace() {
           <div><span>当前模式</span><strong>{modeLabel(session.mode)}</strong></div>
           <div><span>工具范围</span><strong>{session.mode === "plan" ? "只读三项" : "完整 Workspace"}</strong></div>
           <div><span>权限模式</span><strong>{permissionModeLabel(permissionSession.mode)}</strong></div>
-          <div><span>存储</span><strong>仅当前页面</strong></div>
+          <div><span>上下文</span><strong>{contextSessionLabel(contextSession)}</strong></div>
         </div>
 
         <div className="sidebarFooter">
@@ -537,6 +666,15 @@ export function ChatWorkspace() {
             <h2>对话工作区</h2>
           </div>
           <div className="headerActions">
+            <ContextCompressionControl
+              state={compressionState}
+              disabled={
+                contextSession.status !== "ready" ||
+                isStreaming ||
+                isAwaitingPermission
+              }
+              onCompress={() => void compressContext()}
+            />
             <span className={`modeBadge modeBadge--${session.mode}`}>
               {modeLabel(session.mode)}
             </span>
@@ -546,7 +684,7 @@ export function ChatWorkspace() {
             <button
               className="clearButton"
               type="button"
-              onClick={() => resetPermissionContext()}
+              onClick={() => resetServerContext()}
               disabled={!isAwaitingPermission && (isStreaming || (session.messages.length === 0 && session.mode === "do"))}
             >
               <TrashIcon />
@@ -563,6 +701,11 @@ export function ChatWorkspace() {
               {catalogState === "config-error" && (
                 <button type="button" onClick={() => setCatalogRevision((value) => value + 1)}>
                   重新加载
+                </button>
+              )}
+              {contextSession.status === "error" && (
+                <button type="button" onClick={() => resetServerContext()}>
+                  清空并重建
                 </button>
               )}
             </div>
@@ -582,7 +725,11 @@ export function ChatWorkspace() {
         <ChatComposer
           value={session.draft}
           mode={session.mode}
-          disabled={catalogState !== "ready" || permissionSession.status !== "ready"}
+          disabled={
+            catalogState !== "ready" ||
+            permissionSession.status !== "ready" ||
+            contextSession.status !== "ready"
+          }
           isStreaming={isStreaming}
           isStopping={session.requestState === "stopping"}
           onModeChange={(mode) => selectMode(mode)}
@@ -620,8 +767,21 @@ function permissionModeLabel(mode: PermissionMode): string {
   return "默认";
 }
 
+function contextSessionLabel(session: ContextSessionUi): string {
+  if (session.status === "loading") return "连接中";
+  if (session.status === "error") return "不可用";
+  return "本地会话";
+}
+
 function closePermissionSession(sessionId: string): void {
   void fetch(`/api/permission-sessions/${sessionId}`, {
+    method: "DELETE",
+    keepalive: true,
+  }).catch(() => undefined);
+}
+
+function closeContextSession(sessionId: string): void {
+  void fetch(`/api/context-sessions/${sessionId}`, {
     method: "DELETE",
     keepalive: true,
   }).catch(() => undefined);

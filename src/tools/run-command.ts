@@ -17,7 +17,7 @@ export function createRunCommandTool(sandbox: CommandSandbox) {
   return defineTool({
     name: "run_command",
     description:
-      "在严格隔离的授权 Workspace 内执行确有必要的 shell 命令。不得用本工具替代 read_file、find_files、search_code、write_file 或 edit_file；仅在专用工具无法合理完成任务时使用。",
+      "在严格文件隔离的授权 Workspace 内执行确有必要的 shell 命令，可联网安装依赖或访问开发服务。不得用本工具替代 read_file、find_files、search_code、write_file 或 edit_file；仅在专用工具无法合理完成任务时使用。",
     inputSchema: objectSchema({
       command: stringSchema({ minLength: 1, maxLength: 8 * 1024 }),
       cwd: optionalSchema(stringSchema({

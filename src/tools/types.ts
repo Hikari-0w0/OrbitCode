@@ -11,7 +11,8 @@ export type ToolName =
   | "edit_file"
   | "run_command"
   | "find_files"
-  | "search_code";
+  | "search_code"
+  | "read_context";
 
 export type SchemaIssue = {
   readonly path: string;
@@ -37,6 +38,7 @@ export type ToolErrorKind =
   | "permission-config"
   | "user-denied"
   | "approval-invalid"
+  | "context-reference"
   | "protected-path"
   | "conflict"
   | "unsupported-content"
@@ -148,6 +150,10 @@ export type ToolPermissionTarget =
       readonly kind: "command";
       readonly command: string;
       readonly cwd?: string;
+    }
+  | {
+      readonly kind: "context";
+      readonly reference: string;
     };
 
 export type ToolPermissionDescriptor<TInput> = {

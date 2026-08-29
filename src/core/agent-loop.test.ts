@@ -3,6 +3,12 @@ import test from "node:test";
 
 import { AgentLoop } from "@/core/agent-loop";
 import type { AgentEvent } from "@/core/agent-events";
+import { ContextManager } from "@/core/context/context-manager";
+import type {
+  ContextChunk,
+  ContextStore,
+  StoredContextReference,
+} from "@/core/context/types";
 import { AgentConfigurationError, ConversationStateError } from "@/core/errors";
 import {
   ProviderError,
@@ -235,6 +241,83 @@ test("连续工具迭代把原调用和有序结果写回模型", async () => {
   assert.equal(stopReason(result), "final-response");
 });
 
+test("Context Manager 在成功轮次间保留完整工具 transcript", async () => {
+  const provider = new ScriptedProvider([
+    [
+      { type: "reasoning-delta", text: "需要先读取文件。" },
+      { type: "tool-call", call: call("read", "read_file", "a") },
+      { type: "done", finishReason: "tool-call" },
+    ],
+    [
+      { type: "text-delta", text: "第一轮完成" },
+      { type: "done", finishReason: "stop" },
+    ],
+    [
+      { type: "text-delta", text: "第二轮完成" },
+      { type: "done", finishReason: "stop" },
+    ],
+  ]);
+  const contextManager = new ContextManager({
+    sessionId: "agent-context",
+    config: {
+      windowTokens: 100_000,
+      singleToolResultTokens: 8_000,
+      toolResultGroupTokens: 12_000,
+      recentMessagesTokens: 10_000,
+      automaticReserveTokens: 13_000,
+      manualReserveTokens: 3_000,
+      previewChars: 2_000,
+    },
+    store: new NoopContextStore(),
+    provider,
+  });
+  const agent = new AgentLoop(
+    provider,
+    (mode) => createModeToolPolicy(registry(), mode),
+    requireWorkspace(),
+    {
+      maxIterations: 4,
+      promptEnvironment: {
+        workspace: { id: "test", name: "Test Workspace" },
+        platform: "darwin",
+        currentDate: "2026-08-28",
+        timeZone: "Asia/Shanghai",
+        pathSemantics: "workspace-relative-posix",
+      },
+      contextManager,
+    },
+  );
+
+  await collect(agent.streamTurn({
+    input: "读取",
+    mode: "do",
+    modeTurn: 1,
+    signal: new AbortController().signal,
+  }));
+  await collect(agent.streamTurn({
+    input: "继续",
+    mode: "do",
+    modeTurn: 2,
+    signal: new AbortController().signal,
+  }));
+
+  assert.ok(provider.requests[2]?.messages.some((message) => message.role === "tool"));
+  const priorCall = provider.requests[2]?.messages.find(
+    (message) => message.role === "assistant" && "toolCalls" in message,
+  );
+  assert.ok(priorCall && "toolCalls" in priorCall);
+  if (priorCall && "toolCalls" in priorCall) {
+    assert.equal(priorCall.toolCalls[0]?.argumentsJson, JSON.stringify({ label: "a" }));
+    assert.equal(priorCall.reasoningContent, "需要先读取文件。");
+  }
+  assert.deepEqual(agent.getHistory(), [
+    { role: "user", content: "读取" },
+    { role: "assistant", content: "第一轮完成" },
+    { role: "user", content: "继续" },
+    { role: "assistant", content: "第二轮完成" },
+  ]);
+});
+
 test("用户拒绝权限后 Agent Loop 收到结构化工具结果并继续模型迭代", async () => {
   const provider = new ScriptedProvider([
     [
@@ -339,6 +422,76 @@ test("最后允许迭代仍请求工具时不执行并停止", async () => {
   assert.equal(result.some((event) => event.type === "tool-started"), false);
   assert.equal(stopReason(result), "max-iterations");
   assert.deepEqual(agent.getHistory(), []);
+});
+
+test("达到最大迭代后保留中断轮次供下一次请求继续", async () => {
+  const provider = new ScriptedProvider([
+    [
+      { type: "text-delta", text: "还需要读取文件。" },
+      { type: "tool-call", call: call("late", "read_file", "late") },
+      { type: "done", finishReason: "tool-call" },
+    ],
+    [
+      { type: "text-delta", text: "已根据上次中断位置继续。" },
+      { type: "done", finishReason: "stop" },
+    ],
+  ]);
+  const contextManager = new ContextManager({
+    sessionId: "interrupted-context",
+    config: {
+      windowTokens: 100_000,
+      singleToolResultTokens: 8_000,
+      toolResultGroupTokens: 12_000,
+      recentMessagesTokens: 10_000,
+      automaticReserveTokens: 13_000,
+      manualReserveTokens: 3_000,
+      previewChars: 2_000,
+    },
+    store: new NoopContextStore(),
+    provider,
+  });
+  const agent = new AgentLoop(
+    provider,
+    (mode) => createModeToolPolicy(registry(), mode),
+    requireWorkspace(),
+    {
+      maxIterations: 1,
+      promptEnvironment: {
+        workspace: { id: "test", name: "Test Workspace" },
+        platform: "darwin",
+        currentDate: "2026-08-29",
+        timeZone: "Asia/Shanghai",
+        pathSemantics: "workspace-relative-posix",
+      },
+      contextManager,
+    },
+  );
+
+  const stopped = await collect(agent.streamTurn({
+    input: "继续实现功能",
+    mode: "do",
+    modeTurn: 1,
+    signal: new AbortController().signal,
+  }));
+  const resumed = await collect(agent.streamTurn({
+    input: "继续",
+    mode: "do",
+    modeTurn: 2,
+    signal: new AbortController().signal,
+  }));
+
+  assert.equal(stopReason(stopped), "max-iterations");
+  assert.equal(stopReason(resumed), "final-response");
+  const resumedRequest = JSON.stringify(provider.requests[1]?.messages);
+  assert.match(resumedRequest, /继续实现功能/u);
+  assert.match(resumedRequest, /还需要读取文件/u);
+  assert.match(resumedRequest, /orbitcode_interruption/u);
+  assert.match(resumedRequest, /max-iterations/u);
+  assert.match(resumedRequest, /read_file/u);
+  const cancelledTool = provider.requests[1]?.messages.find(
+    (message) => message.role === "tool",
+  );
+  assert.match(cancelledTool?.content ?? "", /"kind":"cancelled"/u);
 });
 
 test("连续两个全未知工具迭代停止，合法调用会重置计数", async () => {
@@ -478,9 +631,11 @@ test("模型阶段取消产生唯一 cancelled 并可继续下一轮", async () 
   const provider = new ScriptedProvider([
     async function* (signal) {
       yield { type: "text-delta", text: "部分" };
-      await new Promise<void>((resolve) => {
-        signal.addEventListener("abort", () => resolve(), { once: true });
-      });
+      if (!signal.aborted) {
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+      }
       throw new ProviderError("cancelled", "已取消");
     },
     [
@@ -488,17 +643,58 @@ test("模型阶段取消产生唯一 cancelled 并可继续下一轮", async () 
       { type: "done", finishReason: "stop" },
     ],
   ]);
-  const agent = createAgent(provider, registry(), 3);
+  const contextManager = new ContextManager({
+    sessionId: "cancelled-context",
+    config: {
+      windowTokens: 100_000,
+      singleToolResultTokens: 8_000,
+      toolResultGroupTokens: 12_000,
+      recentMessagesTokens: 10_000,
+      automaticReserveTokens: 13_000,
+      manualReserveTokens: 3_000,
+      previewChars: 2_000,
+    },
+    store: new NoopContextStore(),
+    provider,
+  });
+  const agent = new AgentLoop(
+    provider,
+    (mode) => createModeToolPolicy(registry(), mode),
+    requireWorkspace(),
+    {
+      maxIterations: 3,
+      promptEnvironment: {
+        workspace: { id: "test", name: "Test Workspace" },
+        platform: "darwin",
+        currentDate: "2026-08-29",
+        timeZone: "Asia/Shanghai",
+        pathSemantics: "workspace-relative-posix",
+      },
+      contextManager,
+    },
+  );
   const controller = new AbortController();
-  const pending = collect(agent.streamTurn({
+  const iterator = agent.streamTurn({
     input: "取消",
     mode: "do",
     modeTurn: 1,
     signal: controller.signal,
-  }));
-  await Promise.resolve();
-  controller.abort();
-  const cancelled = await pending;
+  })[Symbol.asyncIterator]();
+  const cancelled: AgentEvent[] = [];
+  for (;;) {
+    const next = await iterator.next();
+    if (next.done) break;
+    cancelled.push(next.value);
+    if (next.value.type === "text-delta") {
+      controller.abort();
+      break;
+    }
+  }
+  for (;;) {
+    const next = await iterator.next();
+    if (next.done) break;
+    cancelled.push(next.value);
+  }
   const recovered = await collect(agent.streamTurn({
     input: "继续",
     mode: "do",
@@ -509,6 +705,11 @@ test("模型阶段取消产生唯一 cancelled 并可继续下一轮", async () 
   assert.equal(cancelled.filter((event) => event.type === "stopped").length, 1);
   assert.equal(stopReason(cancelled), "cancelled");
   assert.equal(stopReason(recovered), "final-response");
+  const resumedRequest = JSON.stringify(provider.requests[1]?.messages);
+  assert.match(resumedRequest, /取消/u);
+  assert.match(resumedRequest, /部分/u);
+  assert.match(resumedRequest, /orbitcode_interruption/u);
+  assert.match(resumedRequest, /cancelled/u);
 });
 
 test("拒绝非法配置、空白输入和并发轮次", async () => {
@@ -637,6 +838,18 @@ function call(id: string, name: string, label: string) {
 function requireWorkspace(): WorkspaceBoundary {
   if (!workspace) throw new Error("测试工作区尚未初始化。");
   return workspace;
+}
+
+class NoopContextStore implements ContextStore {
+  async write(input: { readonly content: string }): Promise<StoredContextReference> {
+    return {
+      reference: "context://v1/00000000-0000-4000-8000-000000000001",
+      byteLength: input.content.length,
+    };
+  }
+  async read(): Promise<ContextChunk> { throw new Error("unused"); }
+  async deleteReference(): Promise<void> {}
+  async deleteSession(): Promise<void> {}
 }
 
 async function* events(

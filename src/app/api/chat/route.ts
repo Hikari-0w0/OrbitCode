@@ -1,6 +1,5 @@
 import { AgentLoop } from "@/core/agent-loop";
 import { ConfigurationError } from "@/models/config";
-import { createChatProvider } from "@/models/provider-factory";
 import { createDefaultToolRegistry } from "@/tools/default-registry";
 import { MacOsSeatbeltCommandSandbox } from "@/tools/macos-seatbelt-sandbox";
 import { createModeToolPolicy } from "@/tools/mode-policy";
@@ -28,6 +27,8 @@ import {
 import { createPromptEnvironment } from "@/web/prompt-environment";
 import { permissionSessionManager } from "@/web/permission-session-store";
 import { PermissionSessionError } from "@/web/permission-session-manager";
+import { contextSessionManager } from "@/web/context-session-store";
+import { ContextSessionError } from "@/web/context-session-manager";
 import { assertSameOrigin, WebRequestSecurityError } from "@/web/request-security";
 
 export const dynamic = "force-dynamic";
@@ -38,17 +39,16 @@ export async function POST(request: Request): Promise<Response> {
   let activeTurn:
     | { readonly sessionId: string; readonly turnId: string }
     | undefined;
+  let activeContext:
+    | { readonly sessionId: string; readonly operationId: string }
+    | undefined;
   try {
     assertSameOrigin(request);
     assertRequestSize(request);
     const body = await readJsonBody(request);
     const chatRequest = parseWebChatRequest(body);
     const context = await loadWebProviderContext();
-    const config = resolveWebProvider(context, chatRequest.provider);
-    const currentMessage = chatRequest.messages.at(-1);
-    if (!currentMessage || currentMessage.role !== "user") {
-      throw new WebChatContractError("对话请求必须以用户消息结束。");
-    }
+    resolveWebProvider(context, chatRequest.provider);
     const workspaceCatalog = await loadWorkspaceCatalog();
     const workspace = await resolveWorkspaceBoundary(
       workspaceCatalog,
@@ -63,13 +63,25 @@ export async function POST(request: Request): Promise<Response> {
         "选择的 Workspace 未经服务端授权。",
       );
     }
-    const registry = createDefaultToolRegistry(commandSandbox);
+    const binding = {
+      workspace: { id: workspaceEntry.id, name: workspaceEntry.name },
+      providerId: chatRequest.provider,
+    } as const;
+    const contextTurn = contextSessionManager.beginAgentTurn(
+      chatRequest.contextSessionId,
+      binding,
+    );
+    activeContext = {
+      sessionId: chatRequest.contextSessionId,
+      operationId: contextTurn.id,
+    };
+    const registry = createDefaultToolRegistry(
+      commandSandbox,
+      contextTurn.readContext,
+    );
     const turn = permissionSessionManager.beginTurn(
       chatRequest.permissionSessionId,
-      {
-        workspace: { id: workspaceEntry.id, name: workspaceEntry.name },
-        providerId: chatRequest.provider,
-      },
+      binding,
     );
     activeTurn = {
       sessionId: chatRequest.permissionSessionId,
@@ -77,7 +89,7 @@ export async function POST(request: Request): Promise<Response> {
     };
     const toolTargets = registry.permissionTargets();
     const agent = new AgentLoop(
-      createChatProvider(config),
+      contextTurn.provider,
       (mode) => createModeToolPolicy(registry, mode),
       workspace,
       {
@@ -104,19 +116,24 @@ export async function POST(request: Request): Promise<Response> {
             });
           },
         }),
+        contextManager: contextTurn.context,
       },
-      chatRequest.messages.slice(0, -1),
     );
     return streamAgentResponse({
       request,
       agent,
-      input: currentMessage.content,
+      input: chatRequest.input,
       mode: chatRequest.mode,
       modeTurn: chatRequest.modeTurn,
-      onFinished: () => finishPermissionTurn(activeTurn),
+      operationSignal: contextTurn.signal,
+      onFinished: () => {
+        finishPermissionTurn(activeTurn);
+        finishContextOperation(activeContext);
+      },
     });
   } catch (error) {
     finishPermissionTurn(activeTurn);
+    finishContextOperation(activeContext);
     return startupErrorResponse(error);
   }
 }
@@ -188,6 +205,12 @@ function startupErrorResponse(error: unknown): Response {
       : 409;
     message = error.message;
     code = "permission-session";
+  } else if (error instanceof ContextSessionError) {
+    status = error.kind === "unknown-session" || error.kind === "session-closed"
+      ? 404
+      : 409;
+    message = error.message;
+    code = "context-session";
   } else if (error instanceof WebRequestSecurityError) {
     status = error.kind === "forbidden-origin" ? 403 : 400;
     message = error.message;
@@ -200,6 +223,19 @@ function startupErrorResponse(error: unknown): Response {
     status,
     headers: { "cache-control": "no-store" },
   });
+}
+
+function finishContextOperation(
+  active:
+    | { readonly sessionId: string; readonly operationId: string }
+    | undefined,
+): void {
+  if (!active) return;
+  try {
+    contextSessionManager.finishOperation(active.sessionId, active.operationId);
+  } catch (error) {
+    if (!(error instanceof ContextSessionError)) throw error;
+  }
 }
 
 function finishPermissionTurn(

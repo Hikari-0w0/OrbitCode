@@ -101,6 +101,47 @@ test("仅成功 Plan 回复成为最新可执行候选", () => {
   assert.equal(doCompleted.executablePlanMessageId, undefined);
 });
 
+test("模型文字与工具调用按事件顺序保留，完成时不覆盖中间文字", () => {
+  let state = startRequest({ ...populatedState(), requestState: "idle" }, "do");
+  state = chatSessionReducer(state, {
+    type: "text-delta",
+    assistantId: "assistant-new",
+    iteration: 1,
+    text: "先读取。",
+  });
+  state = chatSessionReducer(state, {
+    type: "tool-call",
+    assistantId: "assistant-new",
+    event: {
+      type: "tool-call",
+      iteration: 1,
+      sequence: 0,
+      call: { id: "read-1", name: "read_file", argumentsJson: "{}" },
+    },
+  });
+  state = chatSessionReducer(state, {
+    type: "text-delta",
+    assistantId: "assistant-new",
+    iteration: 2,
+    text: "读取完成。",
+  });
+  state = chatSessionReducer(state, {
+    type: "request-completed",
+    assistantId: "assistant-new",
+    userMessage: { role: "user", content: "新计划" },
+    finalMessage: { role: "assistant", content: "读取完成。" },
+    mode: "do",
+  });
+
+  const message = state.messages.find((item) => item.id === "assistant-new");
+  assert.equal(message?.content, "先读取。读取完成。");
+  assert.deepEqual(message?.parts, [
+    { type: "text", iteration: 1, content: "先读取。" },
+    { type: "tool", iteration: 1, callId: "read-1" },
+    { type: "text", iteration: 2, content: "读取完成。" },
+  ]);
+});
+
 test("失败、取消和非最终停止不污染历史或 Plan 候选", () => {
   const started = startRequest({ ...populatedState(), requestState: "idle" }, "plan");
   const stopped = chatSessionReducer(started, {

@@ -35,7 +35,36 @@ test("Seatbelt 允许工作区命令并阻断外部、敏感与环境逃逸", as
     assert.equal(allowed.stderr, "err");
     assert.equal(allowed.exitCode, 7);
 
-    const networkServer = createServer();
+    for (const command of [
+      `cat '${path.join(outside, "outside.txt")}'`,
+      `cat '${path.relative(root, path.join(outside, "outside.txt"))}'`,
+      "cat /private/etc/hosts",
+      "cat .env",
+      "test -n \"${ORBITCODE_SANDBOX_SENTINEL:-}\"",
+      `sh -c \"cat '${path.join(outside, "outside.txt")}'\"`,
+      `node -e \"require('node:fs').readFileSync('${path.join(outside, "outside.txt")}')\"`,
+    ]) {
+      const result = await sandbox.run(
+        { command, cwd, timeoutMs: 2_000, outputLimitBytes: 1_024 },
+        { workspace, signal: new AbortController().signal },
+      );
+      assert.notEqual(result.exitCode, 0, command);
+      assert.equal(`${result.stdout}${result.stderr}`.includes("must-not-leak"), false);
+    }
+  } finally {
+    if (previousSentinel === undefined) delete process.env.ORBITCODE_SANDBOX_SENTINEL;
+    else process.env.ORBITCODE_SANDBOX_SENTINEL = previousSentinel;
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("Seatbelt 允许命令访问网络，同时保持最小环境", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-seatbelt-network-"));
+  const networkServer = createServer((socket) => socket.end());
+  const previousSentinel = process.env.ORBITCODE_SANDBOX_SENTINEL;
+  process.env.ORBITCODE_SANDBOX_SENTINEL = "must-not-leak";
+  try {
     await new Promise<void>((resolve, reject) => {
       networkServer.once("error", reject);
       networkServer.listen(0, "127.0.0.1", () => resolve());
@@ -44,34 +73,36 @@ test("Seatbelt 允许工作区命令并阻断外部、敏感与环境逃逸", as
     if (typeof address === "string" || address === null) {
       throw new Error("测试网络服务没有可用端口。");
     }
-    try {
-      for (const command of [
-        `cat '${path.join(outside, "outside.txt")}'`,
-        `cat '${path.relative(root, path.join(outside, "outside.txt"))}'`,
-        "cat /private/etc/hosts",
-        "cat .env",
-        "test -n \"${ORBITCODE_SANDBOX_SENTINEL:-}\"",
-        `sh -c \"cat '${path.join(outside, "outside.txt")}'\"`,
-        `node -e \"require('node:fs').readFileSync('${path.join(outside, "outside.txt")}')\"`,
-        `/usr/bin/nc -G 1 127.0.0.1 ${address.port}`,
-      ]) {
-        const result = await sandbox.run(
-          { command, cwd, timeoutMs: 2_000, outputLimitBytes: 1_024 },
-          { workspace, signal: new AbortController().signal },
-        );
-        assert.notEqual(result.exitCode, 0, command);
-        assert.equal(`${result.stdout}${result.stderr}`.includes("must-not-leak"), false);
-      }
-    } finally {
-      await new Promise<void>((resolve, reject) => {
-        networkServer.close((error) => error ? reject(error) : resolve());
-      });
-    }
+    const workspace = await createWorkspaceBoundary(root);
+    const cwd = await workspace.resolveExistingDirectory();
+    const sandbox = new MacOsSeatbeltCommandSandbox();
+    const result = await sandbox.run(
+      {
+        command: `/usr/bin/nc -G 1 -z 127.0.0.1 ${address.port}`,
+        cwd,
+        timeoutMs: 5_000,
+        outputLimitBytes: 1_024,
+      },
+      { workspace, signal: new AbortController().signal },
+    );
+
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.match(`${result.stdout}${result.stderr}`, /succeeded/u);
+    const environment = await sandbox.run(
+      {
+        command: "test -z \"${ORBITCODE_SANDBOX_SENTINEL:-}\"",
+        cwd,
+        timeoutMs: 2_000,
+        outputLimitBytes: 1_024,
+      },
+      { workspace, signal: new AbortController().signal },
+    );
+    assert.equal(environment.exitCode, 0);
   } finally {
     if (previousSentinel === undefined) delete process.env.ORBITCODE_SANDBOX_SENTINEL;
     else process.env.ORBITCODE_SANDBOX_SENTINEL = previousSentinel;
+    await new Promise<void>((resolve) => networkServer.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
-    await rm(outside, { recursive: true, force: true });
   }
 });
 
@@ -141,7 +172,7 @@ test("Seatbelt 允许命令安全使用 /dev/null", async () => {
   }
 });
 
-test("Seatbelt 允许当前 Node 运行时内的 npm 启动", async () => {
+test("Seatbelt 允许当前 Node 运行时内的 npm 启动且不强制生产依赖", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "orbitcode-seatbelt-node-runtime-"));
   try {
     const workspace = await createWorkspaceBoundary(root);
@@ -149,7 +180,7 @@ test("Seatbelt 允许当前 Node 运行时内的 npm 启动", async () => {
     const sandbox = new MacOsSeatbeltCommandSandbox();
     const result = await sandbox.run(
       {
-        command: "npm --version",
+        command: "test -z \"${NODE_ENV:-}\" && test \"$(npm config get omit)\" != dev && npm --version",
         cwd,
         timeoutMs: 10_000,
         outputLimitBytes: 4_096,

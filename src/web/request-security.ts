@@ -23,7 +23,7 @@ export function assertSameOrigin(request: Request): void {
   if (origin !== requestOrigin) {
     throw new WebRequestSecurityError(
       "forbidden-origin",
-      "权限状态变更只接受同源请求。",
+      "本地服务状态变更只接受同源请求。",
     );
   }
 }

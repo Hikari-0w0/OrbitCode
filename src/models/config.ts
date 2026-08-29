@@ -2,7 +2,17 @@ import { readFile } from "node:fs/promises";
 
 import { parse } from "yaml";
 
+import {
+  DEFAULT_AUTOMATIC_RESERVE_TOKENS,
+  DEFAULT_CONTEXT_PREVIEW_CHARS,
+  DEFAULT_MANUAL_RESERVE_TOKENS,
+  DEFAULT_RECENT_MESSAGES_TOKENS,
+  DEFAULT_SINGLE_TOOL_RESULT_TOKENS,
+  DEFAULT_TOOL_RESULT_GROUP_TOKENS,
+  type ContextPolicyConfig,
+} from "@/core/context/types";
 import type { Environment } from "@/lib/environment";
+import type { ModelThinkingConfig } from "@/models/provider";
 
 const PROVIDER_FIELDS = new Set([
   "name",
@@ -10,8 +20,25 @@ const PROVIDER_FIELDS = new Set([
   "model",
   "base_url",
   "api_key",
+  "thinking",
+  "context",
+]);
+const THINKING_FIELDS = new Set(["enabled", "budget_tokens"]);
+const CONTEXT_FIELDS = new Set([
+  "window_tokens",
+  "single_tool_result_tokens",
+  "tool_result_group_tokens",
+  "recent_messages_tokens",
+  "automatic_reserve_tokens",
+  "manual_reserve_tokens",
+  "preview_chars",
 ]);
 const ENVIRONMENT_VARIABLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const MAX_CONTEXT_WINDOW_TOKENS = 10_000_000;
+const MAX_CONTEXT_THRESHOLD_TOKENS = 1_000_000;
+const MAX_CONTEXT_PREVIEW_CHARS = 64 * 1024;
+const MIN_THINKING_BUDGET_TOKENS = 128;
+const MAX_THINKING_BUDGET_TOKENS = 32_768;
 
 export type ProviderConfig = {
   readonly name: string;
@@ -19,6 +46,8 @@ export type ProviderConfig = {
   readonly model: string;
   readonly baseUrl: string;
   readonly apiKeyEnvironmentVariable: string;
+  readonly thinking?: ModelThinkingConfig;
+  readonly context: ContextPolicyConfig;
 };
 
 export type ResolvedProviderConfig = ProviderConfig & {
@@ -176,6 +205,8 @@ function validateProvider(value: unknown, index: number): ProviderConfig {
       `${location}.api_key 必须是环境变量名称，不能是密钥或模板。`,
     );
   }
+  const thinking = validateThinking(value.thinking, `${location}.thinking`);
+  const context = validateContext(value.context, `${location}.context`);
 
   return {
     name,
@@ -183,7 +214,118 @@ function validateProvider(value: unknown, index: number): ProviderConfig {
     model,
     baseUrl,
     apiKeyEnvironmentVariable,
+    ...(thinking === undefined ? {} : { thinking }),
+    context,
   };
+}
+
+function validateThinking(
+  value: unknown,
+  location: string,
+): ModelThinkingConfig | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw invalidConfig(`${location} 必须是对象。`);
+  }
+  for (const field of Object.keys(value)) {
+    if (!THINKING_FIELDS.has(field)) {
+      throw invalidConfig(`${location} 包含未知字段：${field}`);
+    }
+  }
+  if (typeof value.enabled !== "boolean") {
+    throw invalidConfig(`${location}.enabled 必须是布尔值。`);
+  }
+  if (value.budget_tokens === undefined) {
+    return { enabled: value.enabled };
+  }
+  const budgetTokens = requireSafeInteger(
+    value.budget_tokens,
+    `${location}.budget_tokens`,
+    MAX_THINKING_BUDGET_TOKENS,
+  );
+  if (budgetTokens < MIN_THINKING_BUDGET_TOKENS) {
+    throw invalidConfig(
+      `${location}.budget_tokens 必须是 ${MIN_THINKING_BUDGET_TOKENS} 到 ${MAX_THINKING_BUDGET_TOKENS} 之间的整数。`,
+    );
+  }
+  if (!value.enabled) {
+    throw invalidConfig(`${location}.enabled 为 false 时不能设置 budget_tokens。`);
+  }
+  return { enabled: true, budgetTokens };
+}
+
+function validateContext(value: unknown, location: string): ContextPolicyConfig {
+  if (!isRecord(value)) {
+    throw invalidConfig(`${location} 必须是对象。`);
+  }
+  for (const field of Object.keys(value)) {
+    if (!CONTEXT_FIELDS.has(field)) {
+      throw invalidConfig(`${location} 包含未知字段：${field}`);
+    }
+  }
+  const windowTokens = requireSafeInteger(
+    value.window_tokens,
+    `${location}.window_tokens`,
+    MAX_CONTEXT_WINDOW_TOKENS,
+  );
+  const config: ContextPolicyConfig = {
+    windowTokens,
+    singleToolResultTokens: optionalSafeInteger(
+      value.single_tool_result_tokens,
+      `${location}.single_tool_result_tokens`,
+      DEFAULT_SINGLE_TOOL_RESULT_TOKENS,
+      MAX_CONTEXT_THRESHOLD_TOKENS,
+    ),
+    toolResultGroupTokens: optionalSafeInteger(
+      value.tool_result_group_tokens,
+      `${location}.tool_result_group_tokens`,
+      DEFAULT_TOOL_RESULT_GROUP_TOKENS,
+      MAX_CONTEXT_THRESHOLD_TOKENS,
+    ),
+    recentMessagesTokens: optionalSafeInteger(
+      value.recent_messages_tokens,
+      `${location}.recent_messages_tokens`,
+      DEFAULT_RECENT_MESSAGES_TOKENS,
+      MAX_CONTEXT_THRESHOLD_TOKENS,
+    ),
+    automaticReserveTokens: optionalSafeInteger(
+      value.automatic_reserve_tokens,
+      `${location}.automatic_reserve_tokens`,
+      DEFAULT_AUTOMATIC_RESERVE_TOKENS,
+      MAX_CONTEXT_THRESHOLD_TOKENS,
+    ),
+    manualReserveTokens: optionalSafeInteger(
+      value.manual_reserve_tokens,
+      `${location}.manual_reserve_tokens`,
+      DEFAULT_MANUAL_RESERVE_TOKENS,
+      MAX_CONTEXT_THRESHOLD_TOKENS,
+    ),
+    previewChars: optionalSafeInteger(
+      value.preview_chars,
+      `${location}.preview_chars`,
+      DEFAULT_CONTEXT_PREVIEW_CHARS,
+      MAX_CONTEXT_PREVIEW_CHARS,
+    ),
+  };
+  if (config.toolResultGroupTokens < config.singleToolResultTokens) {
+    throw invalidConfig(
+      `${location}.tool_result_group_tokens 不能小于 single_tool_result_tokens。`,
+    );
+  }
+  if (config.automaticReserveTokens <= config.manualReserveTokens) {
+    throw invalidConfig(
+      `${location}.automatic_reserve_tokens 必须大于 manual_reserve_tokens。`,
+    );
+  }
+  if (
+    config.windowTokens <=
+    config.automaticReserveTokens + config.recentMessagesTokens
+  ) {
+    throw invalidConfig(
+      `${location}.window_tokens 必须大于自动安全余量与近期消息预算之和。`,
+    );
+  }
+  return config;
 }
 
 function selectProvider(
@@ -209,6 +351,33 @@ function requireNonEmptyString(value: unknown, field: string): string {
     throw invalidConfig(`${field} 必须是非空字符串。`);
   }
   return value.trim();
+}
+
+function requireSafeInteger(
+  value: unknown,
+  field: string,
+  maximum: number,
+): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value > maximum
+  ) {
+    throw invalidConfig(`${field} 必须是 1 到 ${maximum} 之间的整数。`);
+  }
+  return value;
+}
+
+function optionalSafeInteger(
+  value: unknown,
+  field: string,
+  fallback: number,
+  maximum: number,
+): number {
+  return value === undefined
+    ? fallback
+    : requireSafeInteger(value, field, maximum);
 }
 
 function requireHttpUrl(value: string, field: string): string {

@@ -17,6 +17,7 @@ const PLAN_TOOL_NAMES: ReadonlySet<ToolName> = new Set([
   "read_file",
   "find_files",
   "search_code",
+  "read_context",
 ]);
 
 export type ToolAccessDecision =
