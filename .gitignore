@@ -59,6 +59,7 @@ yarn-error.log*
 !.env.example
 /orbitcode.yaml
 /orbitcode.workspaces.yaml
+/.orbitcode/permissions.local.yaml
 *.pem
 *.key
 *.p12

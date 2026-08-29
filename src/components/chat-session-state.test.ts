@@ -145,6 +145,87 @@ test("请求期间拒绝 Workspace、Provider、Mode 和清空转换", () => {
   );
 });
 
+test("授权请求、提交失败与服务端终态只更新对应工具卡", () => {
+  let state = startRequest({ ...populatedState(), requestState: "idle" }, "do");
+  state = chatSessionReducer(state, {
+    type: "tool-call",
+    assistantId: "assistant-new",
+    event: {
+      type: "tool-call",
+      iteration: 1,
+      sequence: 0,
+      call: { id: "call-1", name: "write_file", argumentsJson: "{}" },
+    },
+  });
+  state = chatSessionReducer(state, {
+    type: "permission-requested",
+    assistantId: "assistant-new",
+    event: {
+      type: "permission-requested",
+      iteration: 1,
+      sequence: 0,
+      callId: "call-1",
+      name: "write_file",
+      prompt: {
+        requestId: "request-1",
+        toolCallId: "call-1",
+        toolName: "write_file",
+        workspace: { id: "alpha", name: "Alpha" },
+        summary: { operation: "写入", path: "src/main.ts" },
+        risk: { level: "medium", message: "写入需要确认。" },
+        source: "mode",
+        persistentLayer: "local",
+        expiresAt: "2026-08-29T00:00:00.000Z",
+      },
+    },
+  });
+  assert.equal(tool(state)?.state, "awaiting-approval");
+  assert.equal(tool(state)?.permission?.state, "awaiting");
+
+  state = chatSessionReducer(state, {
+    type: "permission-submitting",
+    requestId: "request-1",
+  });
+  assert.equal(tool(state)?.permission?.state, "submitting");
+  state = chatSessionReducer(state, {
+    type: "permission-submit-failed",
+    requestId: "request-1",
+    error: "网络失败",
+  });
+  assert.equal(tool(state)?.permission?.state, "awaiting");
+  assert.equal(tool(state)?.permission?.error, "网络失败");
+
+  state = chatSessionReducer(state, {
+    type: "permission-resolved",
+    assistantId: "assistant-new",
+    event: {
+      type: "permission-resolved",
+      iteration: 1,
+      sequence: 0,
+      callId: "call-1",
+      name: "write_file",
+      requestId: "request-1",
+      status: "allowed",
+      scope: "session",
+    },
+  });
+  assert.equal(tool(state)?.state, "queued");
+  assert.equal(tool(state)?.permission?.state, "allowed");
+  assert.equal(tool(state)?.permission?.scope, "session");
+});
+
+test("等待授权时强制切换上下文会立即清空会话", () => {
+  const streaming = startRequest({ ...populatedState(), requestState: "idle" }, "do");
+  const reset = chatSessionReducer(streaming, {
+    type: "context-reset",
+    workspaceId: "beta",
+  });
+  assert.equal(reset.requestState, "idle");
+  assert.equal(reset.selectedWorkspaceId, "beta");
+  assert.deepEqual(reset.messages, []);
+  assert.deepEqual(reset.history, []);
+});
+
 function populatedState(): ChatSessionState {
   return {
     ...INITIAL_CHAT_SESSION_STATE,
@@ -174,4 +255,10 @@ function startRequest(state: ChatSessionState, mode: "plan" | "do") {
     assistantId: "assistant-new",
     userMessage: { role: "user", content: "新计划" },
   });
+}
+
+function tool(state: ChatSessionState) {
+  return state.messages
+    .find((message) => message.id === "assistant-new")
+    ?.toolExecutions?.[0];
 }

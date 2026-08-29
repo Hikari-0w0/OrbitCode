@@ -19,6 +19,14 @@ export const editFileTool = defineTool({
     new_text: stringSchema({ maxLength: MAX_TEXT_FILE_BYTES }),
   }),
   mutability: "workspace-write",
+  permission: {
+    targetKind: "path",
+    resolve: (input) => ({
+      kind: "path",
+      requestedPath: input.path,
+      resolution: "existing-file",
+    }),
+  },
   async execute(input, context) {
     try {
       const snapshot = await context.workspace.readTextFile(input.path, {

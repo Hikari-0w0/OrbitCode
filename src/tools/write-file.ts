@@ -18,6 +18,15 @@ export const writeFileTool = defineTool({
     content: stringSchema({ maxLength: MAX_TEXT_FILE_BYTES }),
   }),
   mutability: "workspace-write",
+  permission: {
+    targetKind: "path",
+    resolve: (input) => ({
+      kind: "path",
+      requestedPath: input.path,
+      resolution: "write-target",
+      byteLength: Buffer.byteLength(input.content, "utf8"),
+    }),
+  },
   async execute(input, context) {
     const byteLength = Buffer.byteLength(input.content, "utf8");
     if (byteLength > MAX_TEXT_FILE_BYTES) {

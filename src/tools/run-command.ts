@@ -28,6 +28,14 @@ export function createRunCommandTool(sandbox: CommandSandbox) {
       timeout_ms: optionalSchema(integerSchema({ minimum: 100, maximum: 120_000 })),
     }),
     mutability: "command",
+    permission: {
+      targetKind: "command",
+      resolve: (input) => ({
+        kind: "command",
+        command: input.command,
+        cwd: input.cwd,
+      }),
+    },
     async execute(input, context) {
       let cwd;
       try {

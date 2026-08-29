@@ -32,6 +32,11 @@ export type ToolErrorKind =
   | "unknown-tool"
   | "not-found"
   | "permission-denied"
+  | "dangerous-operation"
+  | "workspace-boundary"
+  | "permission-config"
+  | "user-denied"
+  | "approval-invalid"
   | "protected-path"
   | "conflict"
   | "unsupported-content"
@@ -127,11 +132,35 @@ export type ToolExecutionContext = {
   readonly deadlineMs: number;
 };
 
+export type ToolPathResolution =
+  | "existing-file"
+  | "existing-directory"
+  | "write-target";
+
+export type ToolPermissionTarget =
+  | {
+      readonly kind: "path";
+      readonly requestedPath: string;
+      readonly resolution: ToolPathResolution;
+      readonly byteLength?: number;
+    }
+  | {
+      readonly kind: "command";
+      readonly command: string;
+      readonly cwd?: string;
+    };
+
+export type ToolPermissionDescriptor<TInput> = {
+  readonly targetKind: ToolPermissionTarget["kind"];
+  resolve(input: TInput): ToolPermissionTarget;
+};
+
 export interface Tool<TInput, TOutput extends JsonValue = JsonValue> {
   readonly name: ToolName;
   readonly description: string;
   readonly inputSchema: ToolInputSchema<TInput>;
   readonly mutability: ToolMutability;
+  readonly permission: ToolPermissionDescriptor<TInput>;
   execute(
     input: TInput,
     context: ToolExecutionContext,

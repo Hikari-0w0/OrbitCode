@@ -1,5 +1,9 @@
 import type { AgentMode } from "@/core/agent-events";
-import { ToolRegistry } from "@/tools/registry";
+import {
+  ToolRegistry,
+  type PreparedToolCall,
+  type ToolPreparationResult,
+} from "@/tools/registry";
 import {
   toolFailure,
   type ModelToolDefinition,
@@ -23,6 +27,11 @@ export type ToolAccessDecision =
 export interface ToolAccess {
   definitions(): readonly ModelToolDefinition[];
   classify(name: string): ToolAccessDecision;
+  prepare(name: string, rawArguments: unknown): ToolPreparationResult;
+  executePrepared(
+    call: PreparedToolCall,
+    context: ToolExecutionContext,
+  ): Promise<ToolExecutionResult>;
   execute(
     name: string,
     rawArguments: unknown,
@@ -55,20 +64,39 @@ export class ModeToolPolicy implements ToolAccess {
     rawArguments: unknown,
     context: ToolExecutionContext,
   ): Promise<ToolExecutionResult> {
+    const prepared = this.prepare(name, rawArguments);
+    return prepared.kind === "failure"
+      ? Promise.resolve(prepared.result)
+      : this.executePrepared(prepared.call, context);
+  }
+
+  prepare(name: string, rawArguments: unknown): ToolPreparationResult {
     const decision = this.classify(name);
-    if (decision.kind === "unknown") {
-      return this.registry.execute(name, rawArguments, context);
-    }
     if (decision.kind === "denied") {
-      return Promise.resolve(
-        toolFailure(
+      return {
+        kind: "failure",
+        result: toolFailure(
           "permission-denied",
           `当前 ${this.mode === "plan" ? "Plan" : "Do"} 模式不允许执行工具：${name}`,
           { retryable: true },
         ),
+      };
+    }
+    return this.registry.prepare(name, rawArguments);
+  }
+
+  executePrepared(
+    call: PreparedToolCall,
+    context: ToolExecutionContext,
+  ): Promise<ToolExecutionResult> {
+    if (!this.isAllowed(call.name)) {
+      return Promise.resolve(
+        toolFailure("permission-denied", "当前 Agent 模式不允许执行该工具。", {
+          retryable: true,
+        }),
       );
     }
-    return this.registry.execute(name, rawArguments, context);
+    return call.execute(context);
   }
 
   private isAllowed(name: ToolName): boolean {

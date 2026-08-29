@@ -2,12 +2,33 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { PermissionRequestCard } from "@/components/permission-request-card";
+import type { PermissionUserDecision } from "@/core/permissions/approval";
 import type { WebChatEvent } from "@/web/chat-contract";
 
 type ProgressEvent = Extract<WebChatEvent, { type: "progress" }>;
 type TokenUsageEvent = Extract<WebChatEvent, { type: "token-usage" }>;
 type StoppedEvent = Extract<WebChatEvent, { type: "stopped" }>;
 type ToolResultEvent = Extract<WebChatEvent, { type: "tool-result" }>;
+type PermissionPrompt = Extract<
+  WebChatEvent,
+  { type: "permission-requested" }
+>["prompt"];
+
+export type VisiblePermissionRequest = {
+  readonly prompt: PermissionPrompt;
+  readonly state:
+    | "awaiting"
+    | "submitting"
+    | "submitted"
+    | "allowed"
+    | "denied"
+    | "expired"
+    | "cancelled"
+    | "invalid";
+  readonly scope?: "once" | "session" | "permanent";
+  readonly error?: string;
+};
 
 export type VisibleToolExecution = {
   readonly iteration: number;
@@ -17,6 +38,7 @@ export type VisibleToolExecution = {
   readonly argumentsJson: string;
   readonly state:
     | "queued"
+    | "awaiting-approval"
     | "running"
     | "succeeded"
     | "failed"
@@ -24,6 +46,7 @@ export type VisibleToolExecution = {
     | "cancelled"
     | "skipped";
   readonly result?: ToolResultEvent["result"];
+  readonly permission?: VisiblePermissionRequest;
 };
 
 export type VisibleMessage = {
@@ -45,6 +68,10 @@ type MessageListProps = {
   readonly executablePlanMessageId?: string;
   readonly planActionDisabled: boolean;
   readonly onExecutePlan: (messageId: string) => void;
+  readonly onPermissionDecision?: (
+    requestId: string,
+    decision: PermissionUserDecision,
+  ) => void;
 };
 
 const suggestions = [
@@ -59,6 +86,7 @@ export function MessageList({
   executablePlanMessageId,
   planActionDisabled,
   onExecutePlan,
+  onPermissionDecision = () => undefined,
 }: MessageListProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const followsLatestRef = useRef(true);
@@ -118,6 +146,7 @@ export function MessageList({
                         <ToolExecutionCard
                           key={`${execution.iteration}:${execution.callId}`}
                           execution={execution}
+                          onPermissionDecision={onPermissionDecision}
                         />
                       ))}
                     </div>
@@ -243,18 +272,27 @@ function EmptyConversation({ onSuggestion }: { readonly onSuggestion: (value: st
   );
 }
 
-function ToolExecutionCard({ execution }: { readonly execution: VisibleToolExecution }) {
+function ToolExecutionCard({
+  execution,
+  onPermissionDecision,
+}: {
+  readonly execution: VisibleToolExecution;
+  readonly onPermissionDecision: (
+    requestId: string,
+    decision: PermissionUserDecision,
+  ) => void;
+}) {
   const result = execution.result;
   const detail = result?.ok
     ? JSON.stringify(result.output, null, 2)
     : result
-      ? `错误：\n${result.error.message}\n\n调用参数：\n${execution.argumentsJson}`
-      : execution.argumentsJson;
+      ? `错误：\n${result.error.message}`
+      : "参数已在服务端完成校验，原始内容不在页面展示。";
   const summary = result
     ? result.ok
       ? "查看执行结果"
-      : "查看错误详情与调用参数"
-    : "查看调用参数";
+      : "查看安全错误详情"
+    : "查看安全调用说明";
 
   return (
     <section className={`toolCard toolCard--${execution.state}`}>
@@ -267,12 +305,19 @@ function ToolExecutionCard({ execution }: { readonly execution: VisibleToolExecu
         <summary>{summary}</summary>
         <pre>{detail}</pre>
       </details>
+      {execution.permission && (
+        <PermissionRequestCard
+          request={execution.permission}
+          onDecision={onPermissionDecision}
+        />
+      )}
     </section>
   );
 }
 
 function toolStateLabel(state: VisibleToolExecution["state"]): string {
   if (state === "queued") return "等待执行";
+  if (state === "awaiting-approval") return "等待授权";
   if (state === "running") return "执行中";
   if (state === "succeeded") return "已完成";
   if (state === "timed-out") return "已超时";

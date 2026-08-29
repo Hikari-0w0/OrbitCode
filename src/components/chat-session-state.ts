@@ -1,4 +1,8 @@
-import type { VisibleMessage, VisibleToolExecution } from "@/components/message-list";
+import type {
+  VisibleMessage,
+  VisiblePermissionRequest,
+  VisibleToolExecution,
+} from "@/components/message-list";
 import type { AgentMode } from "@/core/agent-events";
 import type { PlainConversationMessage } from "@/models/provider";
 import type { WebChatEvent } from "@/web/chat-contract";
@@ -7,6 +11,8 @@ type ProgressEvent = Extract<WebChatEvent, { type: "progress" }>;
 type ToolCallEvent = Extract<WebChatEvent, { type: "tool-call" }>;
 type ToolStartedEvent = Extract<WebChatEvent, { type: "tool-started" }>;
 type ToolResultEvent = Extract<WebChatEvent, { type: "tool-result" }>;
+type PermissionRequestedEvent = Extract<WebChatEvent, { type: "permission-requested" }>;
+type PermissionResolvedEvent = Extract<WebChatEvent, { type: "permission-resolved" }>;
 type TokenUsageEvent = Extract<WebChatEvent, { type: "token-usage" }>;
 type StoppedEvent = Extract<WebChatEvent, { type: "stopped" }>;
 
@@ -38,6 +44,11 @@ export type ChatSessionAction =
       readonly notice?: string;
     }
   | { readonly type: "conversation-cleared" }
+  | {
+      readonly type: "context-reset";
+      readonly workspaceId?: string;
+      readonly provider?: string;
+    }
   | { readonly type: "draft-changed"; readonly draft: string }
   | { readonly type: "notice-set"; readonly notice?: string }
   | {
@@ -52,6 +63,11 @@ export type ChatSessionAction =
   | { readonly type: "progress"; readonly assistantId: string; readonly event: ProgressEvent }
   | { readonly type: "tool-call"; readonly assistantId: string; readonly event: ToolCallEvent }
   | { readonly type: "tool-started"; readonly assistantId: string; readonly event: ToolStartedEvent }
+  | { readonly type: "permission-requested"; readonly assistantId: string; readonly event: PermissionRequestedEvent }
+  | { readonly type: "permission-resolved"; readonly assistantId: string; readonly event: PermissionResolvedEvent }
+  | { readonly type: "permission-submitting"; readonly requestId: string }
+  | { readonly type: "permission-submitted"; readonly requestId: string }
+  | { readonly type: "permission-submit-failed"; readonly requestId: string; readonly error: string }
   | { readonly type: "tool-result"; readonly assistantId: string; readonly event: ToolResultEvent }
   | { readonly type: "token-usage"; readonly assistantId: string; readonly event: TokenUsageEvent }
   | {
@@ -129,6 +145,12 @@ export function chatSessionReducer(
     if (state.requestState !== "idle") return state;
     return resetConversation(state);
   }
+  if (action.type === "context-reset") {
+    return resetConversation(state, {
+      selectedWorkspaceId: action.workspaceId ?? state.selectedWorkspaceId,
+      selectedProvider: action.provider ?? state.selectedProvider,
+    });
+  }
   if (action.type === "draft-changed") {
     if (state.requestState !== "idle") return state;
     return { ...state, draft: action.draft };
@@ -199,6 +221,42 @@ export function chatSessionReducer(
         "running",
       ),
     }));
+  }
+  if (action.type === "permission-requested") {
+    return updateMessage(state, action.assistantId, (message) => ({
+      ...message,
+      toolExecutions: applyPermissionRequest(
+        message.toolExecutions ?? [],
+        action.event,
+      ),
+    }));
+  }
+  if (action.type === "permission-resolved") {
+    return updateMessage(state, action.assistantId, (message) => ({
+      ...message,
+      toolExecutions: applyPermissionResolution(
+        message.toolExecutions ?? [],
+        action.event,
+      ),
+    }));
+  }
+  if (action.type === "permission-submitting") {
+    return updatePermissionRequest(state, action.requestId, {
+      state: "submitting",
+      error: undefined,
+    });
+  }
+  if (action.type === "permission-submitted") {
+    return updatePermissionRequest(state, action.requestId, {
+      state: "submitted",
+      error: undefined,
+    });
+  }
+  if (action.type === "permission-submit-failed") {
+    return updatePermissionRequest(state, action.requestId, {
+      state: "awaiting",
+      error: action.error,
+    });
   }
   if (action.type === "tool-result") {
     return updateMessage(state, action.assistantId, (message) => ({
@@ -345,7 +403,67 @@ function applyToolResult(
     argumentsJson: existing?.argumentsJson ?? "{}",
     state: toolExecutionState(event.result),
     result: event.result,
+    permission: existing?.permission,
   });
+}
+
+function applyPermissionRequest(
+  current: readonly VisibleToolExecution[],
+  event: PermissionRequestedEvent,
+): readonly VisibleToolExecution[] {
+  const existing = current.find(
+    (execution) =>
+      execution.iteration === event.iteration && execution.callId === event.callId,
+  );
+  return upsertToolExecution(current, {
+    iteration: event.iteration,
+    sequence: event.sequence,
+    callId: event.callId,
+    name: event.name,
+    argumentsJson: existing?.argumentsJson ?? "{}",
+    state: "awaiting-approval",
+    permission: { prompt: event.prompt, state: "awaiting" },
+  });
+}
+
+function applyPermissionResolution(
+  current: readonly VisibleToolExecution[],
+  event: PermissionResolvedEvent,
+): readonly VisibleToolExecution[] {
+  return current.map((execution) => {
+    if (execution.permission?.prompt.requestId !== event.requestId) return execution;
+    return {
+      ...execution,
+      state: event.status === "allowed" ? "queued" : execution.state,
+      permission: {
+        ...execution.permission,
+        state: event.status,
+        scope: event.scope,
+        error: undefined,
+      },
+    };
+  });
+}
+
+function updatePermissionRequest(
+  state: ChatSessionState,
+  requestId: string,
+  update: Pick<VisiblePermissionRequest, "state" | "error">,
+): ChatSessionState {
+  return {
+    ...state,
+    messages: state.messages.map((message) => ({
+      ...message,
+      toolExecutions: message.toolExecutions?.map((execution) =>
+        execution.permission?.prompt.requestId === requestId
+          ? {
+              ...execution,
+              permission: { ...execution.permission, ...update },
+            }
+          : execution,
+      ),
+    })),
+  };
 }
 
 function settleInterruptedTools(
@@ -354,6 +472,15 @@ function settleInterruptedTools(
   return current.map((execution) => {
     if (execution.state === "running") return { ...execution, state: "cancelled" };
     if (execution.state === "queued") return { ...execution, state: "skipped" };
+    if (execution.state === "awaiting-approval") {
+      return {
+        ...execution,
+        state: "skipped",
+        permission: execution.permission
+          ? { ...execution.permission, state: "cancelled" }
+          : undefined,
+      };
+    }
     return execution;
   });
 }

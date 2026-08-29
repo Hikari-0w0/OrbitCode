@@ -17,6 +17,14 @@ export const readFileTool = defineTool({
     }),
   }),
   mutability: "read-only",
+  permission: {
+    targetKind: "path",
+    resolve: (input) => ({
+      kind: "path",
+      requestedPath: input.path,
+      resolution: "existing-file",
+    }),
+  },
   async execute(input, context) {
     try {
       const snapshot = await context.workspace.readTextFile(input.path, {

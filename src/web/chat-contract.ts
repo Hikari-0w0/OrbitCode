@@ -4,6 +4,11 @@ import type {
   AgentStopReason,
   TokenUsage,
 } from "@/core/agent-events";
+import type {
+  PermissionPrompt,
+  PermissionUserDecision,
+} from "@/core/permissions/approval";
+import type { PermissionMode } from "@/core/permissions/types";
 import { MAX_MODE_TURN } from "@/core/system-prompt/session-instructions";
 import type {
   ModelToolCall,
@@ -27,13 +32,34 @@ export const MAX_WEB_CHAT_MESSAGE_LENGTH = 20_000;
 export const MAX_WEB_WORKSPACES = 32;
 export const MAX_WEB_WORKSPACE_ID_LENGTH = 64;
 export const MAX_WEB_WORKSPACE_NAME_LENGTH = 80;
+export const MAX_PERMISSION_SESSION_ID_LENGTH = 128;
+export const MAX_PERMISSION_REQUEST_ID_LENGTH = 128;
 
 export type WebChatRequest = {
   readonly provider: string;
   readonly workspaceId: string;
+  readonly permissionSessionId: string;
   readonly mode: AgentMode;
   readonly modeTurn: number;
   readonly messages: readonly PlainConversationMessage[];
+};
+
+export type PermissionSessionResponse = {
+  readonly sessionId: string;
+  readonly mode: PermissionMode;
+};
+
+export type PermissionSessionUpdateRequest = {
+  readonly mode: PermissionMode;
+};
+
+export type PermissionDecisionRequest = {
+  readonly requestId: string;
+  readonly decision: PermissionUserDecision;
+};
+
+export type PermissionDecisionResponse = {
+  readonly accepted: true;
 };
 
 export type WebChatEvent = AgentEvent;
@@ -65,7 +91,11 @@ export type WebApiError = {
   readonly code?:
     | "workspace-config"
     | "workspace-unknown"
-    | "workspace-unavailable";
+    | "workspace-unavailable"
+    | "permission-session"
+    | "permission-request"
+    | "invalid-request"
+    | "forbidden";
 };
 
 export class WebChatContractError extends Error {
@@ -81,6 +111,7 @@ export function parseWebChatRequest(value: unknown): WebChatRequest {
     !hasExactFields(value, [
       "provider",
       "workspaceId",
+      "permissionSessionId",
       "mode",
       "modeTurn",
       "messages",
@@ -101,6 +132,9 @@ export function parseWebChatRequest(value: unknown): WebChatRequest {
     !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value.workspaceId)
   ) {
     throw new WebChatContractError("Workspace ID 无效。");
+  }
+  if (!isSafePermissionId(value.permissionSessionId, MAX_PERMISSION_SESSION_ID_LENGTH)) {
+    throw new WebChatContractError("权限会话 ID 无效。");
   }
   if (!isAgentMode(value.mode)) {
     throw new WebChatContractError("Agent 模式无效。");
@@ -134,10 +168,65 @@ export function parseWebChatRequest(value: unknown): WebChatRequest {
   return {
     provider: value.provider.trim(),
     workspaceId: value.workspaceId,
+    permissionSessionId: value.permissionSessionId,
     mode: value.mode,
     modeTurn: value.modeTurn,
     messages,
   };
+}
+
+export function parsePermissionSessionResponse(
+  value: unknown,
+): PermissionSessionResponse {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, ["sessionId", "mode"]) ||
+    !isSafePermissionId(value.sessionId, MAX_PERMISSION_SESSION_ID_LENGTH) ||
+    !isPermissionMode(value.mode)
+  ) {
+    throw new WebChatContractError("服务端返回了无效的权限会话。");
+  }
+  return { sessionId: value.sessionId, mode: value.mode };
+}
+
+export function parsePermissionSessionUpdateRequest(
+  value: unknown,
+): PermissionSessionUpdateRequest {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, ["mode"]) ||
+    !isPermissionMode(value.mode)
+  ) {
+    throw new WebChatContractError("权限模式更新请求无效。");
+  }
+  return { mode: value.mode };
+}
+
+export function parsePermissionDecisionRequest(
+  value: unknown,
+): PermissionDecisionRequest {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, ["requestId", "decision"]) ||
+    !isSafePermissionId(value.requestId, MAX_PERMISSION_REQUEST_ID_LENGTH) ||
+    !isPermissionUserDecision(value.decision)
+  ) {
+    throw new WebChatContractError("授权决定请求无效。");
+  }
+  return { requestId: value.requestId, decision: value.decision };
+}
+
+export function parsePermissionDecisionResponse(
+  value: unknown,
+): PermissionDecisionResponse {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, ["accepted"]) ||
+    value.accepted !== true
+  ) {
+    throw new WebChatContractError("服务端返回了无效的授权决定结果。");
+  }
+  return { accepted: true };
 }
 
 export function encodeWebChatEvent(event: WebChatEvent): Uint8Array {
@@ -232,7 +321,11 @@ export function parseWebApiError(value: unknown): WebApiError | undefined {
     (value.code === undefined ||
       value.code === "workspace-config" ||
       value.code === "workspace-unknown" ||
-      value.code === "workspace-unavailable")
+      value.code === "workspace-unavailable" ||
+      value.code === "permission-session" ||
+      value.code === "permission-request" ||
+      value.code === "invalid-request" ||
+      value.code === "forbidden")
   ) {
     return value.code === undefined
       ? { error: value.error }
@@ -306,11 +399,118 @@ function parseWebChatEvent(value: unknown): WebChatEvent {
   if (value.type === "progress") return parseProgressEvent(value);
   if (value.type === "text-delta") return parseTextEvent(value);
   if (value.type === "tool-call") return parseToolCallEvent(value);
+  if (value.type === "permission-requested") return parsePermissionRequestedEvent(value);
+  if (value.type === "permission-resolved") return parsePermissionResolvedEvent(value);
   if (value.type === "tool-started") return parseToolStartedEvent(value);
   if (value.type === "tool-result") return parseToolResultEvent(value);
   if (value.type === "token-usage") return parseTokenUsageEvent(value);
   if (value.type === "stopped") return parseStoppedEvent(value);
   throw invalidEvent();
+}
+
+function parsePermissionRequestedEvent(
+  value: Record<string, unknown>,
+): WebChatEvent {
+  if (
+    !hasExactFields(value, [
+      "type",
+      "iteration",
+      "callId",
+      "name",
+      "sequence",
+      "prompt",
+    ]) ||
+    !isPositiveInteger(value.iteration, 32) ||
+    !isSafeCallId(value.callId) ||
+    !isSafeToolName(value.name) ||
+    !isNonNegativeInteger(value.sequence, 15)
+  ) {
+    throw invalidEvent();
+  }
+  const prompt = parsePermissionPrompt(value.prompt);
+  if (prompt.toolCallId !== value.callId || prompt.toolName !== value.name) {
+    throw invalidEvent();
+  }
+  return {
+    type: "permission-requested",
+    iteration: value.iteration,
+    callId: value.callId,
+    name: value.name,
+    sequence: value.sequence,
+    prompt,
+  };
+}
+
+function parsePermissionResolvedEvent(
+  value: Record<string, unknown>,
+): WebChatEvent {
+  const allowedFields = value.scope === undefined
+    ? ["type", "iteration", "callId", "name", "sequence", "requestId", "status"]
+    : ["type", "iteration", "callId", "name", "sequence", "requestId", "status", "scope"];
+  if (
+    !hasExactFields(value, allowedFields) ||
+    !isPositiveInteger(value.iteration, 32) ||
+    !isSafeCallId(value.callId) ||
+    !isSafeToolName(value.name) ||
+    !isNonNegativeInteger(value.sequence, 15) ||
+    !isSafePermissionId(value.requestId, MAX_PERMISSION_REQUEST_ID_LENGTH) ||
+    !isPermissionResolutionStatus(value.status) ||
+    (value.scope !== undefined && !isPermissionScope(value.scope)) ||
+    (value.status !== "allowed" && value.scope !== undefined)
+  ) {
+    throw invalidEvent();
+  }
+  return {
+    type: "permission-resolved",
+    iteration: value.iteration,
+    callId: value.callId,
+    name: value.name,
+    sequence: value.sequence,
+    requestId: value.requestId,
+    status: value.status,
+    scope: value.scope,
+  };
+}
+
+function parsePermissionPrompt(value: unknown): PermissionPrompt {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, [
+      "requestId",
+      "toolCallId",
+      "toolName",
+      "workspace",
+      "summary",
+      "risk",
+      "source",
+      "persistentLayer",
+      "expiresAt",
+    ]) ||
+    !isSafePermissionId(value.requestId, MAX_PERMISSION_REQUEST_ID_LENGTH) ||
+    !isSafeCallId(value.toolCallId) ||
+    !isSafeToolName(value.toolName) ||
+    !isSafeWorkspaceSummary(value.workspace) ||
+    !isPermissionPromptSummary(value.summary) ||
+    !isPermissionRisk(value.risk) ||
+    (value.source !== "rules" && value.source !== "mode") ||
+    value.persistentLayer !== "local" ||
+    typeof value.expiresAt !== "string" ||
+    value.expiresAt.length > 64 ||
+    !Number.isFinite(Date.parse(value.expiresAt))
+  ) {
+    throw invalidEvent();
+  }
+  return {
+    requestId: value.requestId,
+    toolCallId: value.toolCallId,
+    toolName: value.toolName,
+    workspace: value.workspace,
+    summary: value.summary,
+    risk: value.risk,
+    source: value.source,
+    persistentLayer: "local",
+    expiresAt: value.expiresAt,
+  };
 }
 
 function parseProgressEvent(value: Record<string, unknown>): WebChatEvent {
@@ -735,6 +935,11 @@ const TOOL_ERROR_KINDS = new Set<ToolErrorKind>([
   "unknown-tool",
   "not-found",
   "permission-denied",
+  "dangerous-operation",
+  "workspace-boundary",
+  "permission-config",
+  "user-denied",
+  "approval-invalid",
   "protected-path",
   "conflict",
   "unsupported-content",
@@ -748,6 +953,91 @@ const TOOL_ERROR_KINDS = new Set<ToolErrorKind>([
 
 function isToolErrorKind(value: unknown): value is ToolErrorKind {
   return typeof value === "string" && TOOL_ERROR_KINDS.has(value as ToolErrorKind);
+}
+
+function isPermissionMode(value: unknown): value is PermissionMode {
+  return value === "strict" || value === "default" || value === "permissive";
+}
+
+function isPermissionUserDecision(
+  value: unknown,
+): value is PermissionUserDecision {
+  return (
+    value === "allow-once" ||
+    value === "allow-session" ||
+    value === "allow-permanent" ||
+    value === "deny"
+  );
+}
+
+function isPermissionResolutionStatus(
+  value: unknown,
+): value is "allowed" | "denied" | "expired" | "cancelled" | "invalid" {
+  return (
+    value === "allowed" ||
+    value === "denied" ||
+    value === "expired" ||
+    value === "cancelled" ||
+    value === "invalid"
+  );
+}
+
+function isPermissionScope(
+  value: unknown,
+): value is "once" | "session" | "permanent" {
+  return value === "once" || value === "session" || value === "permanent";
+}
+
+function isSafePermissionId(value: unknown, maximum: number): value is string {
+  return (
+    typeof value === "string" &&
+    value.length <= maximum &&
+    /^[A-Za-z0-9._:-]+$/.test(value)
+  );
+}
+
+function isSafeWorkspaceSummary(
+  value: unknown,
+): value is { readonly id: string; readonly name: string } {
+  return (
+    isRecord(value) &&
+    hasExactFields(value, ["id", "name"]) &&
+    typeof value.id === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value.id) &&
+    typeof value.name === "string" &&
+    value.name.trim().length > 0 &&
+    value.name.length <= MAX_WEB_WORKSPACE_NAME_LENGTH
+  );
+}
+
+function isPermissionPromptSummary(
+  value: unknown,
+): value is Readonly<Record<string, string | number | boolean | null>> {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length <= 16 &&
+    Object.entries(value).every(
+      ([key, item]) =>
+        /^[A-Za-z0-9_-]{1,64}$/.test(key) &&
+        (item === null ||
+          typeof item === "boolean" ||
+          (typeof item === "number" && Number.isFinite(item)) ||
+          (typeof item === "string" && item.length <= 1_024)),
+    )
+  );
+}
+
+function isPermissionRisk(
+  value: unknown,
+): value is PermissionPrompt["risk"] {
+  return (
+    isRecord(value) &&
+    hasExactFields(value, ["level", "message"]) &&
+    (value.level === "low" || value.level === "medium" || value.level === "high") &&
+    typeof value.message === "string" &&
+    value.message.length > 0 &&
+    value.message.length <= 1_000
+  );
 }
 
 function isPositiveInteger(value: unknown, maximum = Number.MAX_SAFE_INTEGER): value is number {

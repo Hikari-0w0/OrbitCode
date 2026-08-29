@@ -1,0 +1,12 @@
+# 将需要共享的规则复制到 Workspace 的 .orbitcode/permissions.yaml。
+# 仅供本机使用的规则应写入 .orbitcode/permissions.local.yaml。
+rules:
+  # 不含未转义 * 或 ? 的模式按完整目标精确匹配。
+  "read_file(README.md)": allow
+
+  # 路径 Glob 中 * 匹配一个路径段内的字符，** 匹配任意数量的路径段。
+  "write_file(src/**)": ask
+
+  # 命令 Glob 按完整命令匹配，* 可以跨空格匹配任意字符。
+  "run_command(git *)": ask
+  "run_command(git push *)": deny

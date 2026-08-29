@@ -8,6 +8,7 @@ export function streamAgentResponse(options: {
   readonly input: string;
   readonly mode: AgentMode;
   readonly modeTurn: number;
+  readonly onFinished?: () => void;
 }): Response {
   const abortController = new AbortController();
   let consumerClosed = false;
@@ -43,6 +44,7 @@ export function streamAgentResponse(options: {
         }
       } finally {
         options.request.signal.removeEventListener("abort", abort);
+        options.onFinished?.();
         if (!consumerClosed) controller.close();
       }
     },

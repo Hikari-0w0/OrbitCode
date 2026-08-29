@@ -8,11 +8,16 @@ import {
   INITIAL_CHAT_SESSION_STATE,
 } from "@/components/chat-session-state";
 import { MessageList } from "@/components/message-list";
+import { PermissionModeControl } from "@/components/permission-mode-control";
 import { WorkspaceSelector } from "@/components/workspace-selector";
 import type { AgentMode } from "@/core/agent-events";
+import type { PermissionUserDecision } from "@/core/permissions/approval";
+import type { PermissionMode } from "@/core/permissions/types";
 import type { PlainConversationMessage } from "@/models/provider";
 import {
   parseProviderCatalogResponse,
+  parsePermissionDecisionResponse,
+  parsePermissionSessionResponse,
   parseWebApiError,
   parseWebChatEvents,
   parseWorkspaceCatalogResponse,
@@ -27,6 +32,10 @@ const PLAN_EXECUTION_PROMPT = "请按照上述计划开始执行。";
 
 type CatalogState = "loading" | "ready" | "config-error";
 type UiStatus = "loading" | "ready" | "streaming" | "stopping" | "config-error";
+type PermissionSessionUi =
+  | { readonly status: "loading"; readonly mode: PermissionMode }
+  | { readonly status: "ready"; readonly id: string; readonly mode: PermissionMode }
+  | { readonly status: "error"; readonly mode: PermissionMode; readonly error: string };
 
 export function ChatWorkspace() {
   const [session, dispatch] = useReducer(
@@ -38,9 +47,49 @@ export function ChatWorkspace() {
   const [catalogState, setCatalogState] = useState<CatalogState>("loading");
   const [catalogError, setCatalogError] = useState<string>();
   const [catalogRevision, setCatalogRevision] = useState(0);
+  const [permissionRevision, setPermissionRevision] = useState(0);
+  const [permissionSession, setPermissionSession] = useState<PermissionSessionUi>({
+    status: "loading",
+    mode: "default",
+  });
+  const [permissionModeUpdating, setPermissionModeUpdating] = useState(false);
   const activeRequestRef = useRef<AbortController | undefined>(undefined);
   const sessionRef = useRef(session);
+  const permissionSessionRef = useRef(permissionSession);
   sessionRef.current = session;
+  permissionSessionRef.current = permissionSession;
+
+  useEffect(() => {
+    const controller = new AbortController();
+    async function createSession(): Promise<void> {
+      try {
+        const response = await fetch("/api/permission-sessions", {
+          method: "POST",
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        const value: unknown = await response.json();
+        if (!response.ok) {
+          throw new Error(parseWebApiError(value)?.error ?? "无法创建权限会话。");
+        }
+        const created = parsePermissionSessionResponse(value);
+        setPermissionSession({
+          status: "ready",
+          id: created.sessionId,
+          mode: created.mode,
+        });
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setPermissionSession({
+          status: "error",
+          mode: "default",
+          error: safeErrorMessage(error, "无法创建权限会话。"),
+        });
+      }
+    }
+    void createSession();
+    return () => controller.abort();
+  }, [permissionRevision]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -129,27 +178,42 @@ export function ChatWorkspace() {
     return () => controller.abort();
   }, [catalogRevision]);
 
-  useEffect(() => () => activeRequestRef.current?.abort(), []);
+  useEffect(() => () => {
+    activeRequestRef.current?.abort();
+    const current = permissionSessionRef.current;
+    if (current.status === "ready") closePermissionSession(current.id);
+  }, []);
 
   const currentProvider = providers.find(
     (provider) => provider.name === session.selectedProvider,
   );
   const isStreaming =
     session.requestState === "streaming" || session.requestState === "stopping";
+  const isAwaitingPermission = session.messages.some((message) =>
+    message.toolExecutions?.some(
+      (execution) => execution.state === "awaiting-approval",
+    ),
+  );
   const status: UiStatus = isStreaming
     ? session.requestState
     : catalogState === "ready"
       ? "ready"
       : catalogState;
-  const controlsDisabled = catalogState !== "ready" || isStreaming;
-  const notice = catalogError ?? session.notice;
+  const controlsDisabled =
+    catalogState !== "ready" ||
+    permissionSession.status !== "ready" ||
+    (isStreaming && !isAwaitingPermission);
+  const notice =
+    catalogError ??
+    (permissionSession.status === "error" ? permissionSession.error : undefined) ??
+    session.notice;
 
   function selectWorkspace(workspaceId: string): void {
     if (controlsDisabled) return;
     if (!workspaces.some((workspace) => workspace.id === workspaceId && workspace.available)) {
       return;
     }
-    dispatch({ type: "workspace-selected", workspaceId });
+    resetPermissionContext({ workspaceId });
   }
 
   function selectProvider(provider: string): void {
@@ -157,7 +221,49 @@ export function ChatWorkspace() {
     if (!providers.some((candidate) => candidate.name === provider && candidate.available)) {
       return;
     }
-    dispatch({ type: "provider-selected", provider });
+    resetPermissionContext({ provider });
+  }
+
+  function resetPermissionContext(selections: {
+    readonly workspaceId?: string;
+    readonly provider?: string;
+  } = {}): void {
+    activeRequestRef.current?.abort();
+    const current = permissionSessionRef.current;
+    if (current.status === "ready") closePermissionSession(current.id);
+    setPermissionSession((value) => ({ status: "loading", mode: value.mode }));
+    dispatch({ type: "context-reset", ...selections });
+    setPermissionRevision((value) => value + 1);
+  }
+
+  async function selectPermissionMode(mode: PermissionMode): Promise<void> {
+    const current = permissionSessionRef.current;
+    if (current.status !== "ready" || permissionModeUpdating || current.mode === mode) {
+      return;
+    }
+    setPermissionModeUpdating(true);
+    try {
+      const response = await fetch(`/api/permission-sessions/${current.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      const value: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(parseWebApiError(value)?.error ?? "无法更新权限模式。");
+      }
+      const updated = parsePermissionSessionResponse(value);
+      if (permissionSessionRef.current.status === "ready" && permissionSessionRef.current.id === updated.sessionId) {
+        setPermissionSession({ status: "ready", id: updated.sessionId, mode: updated.mode });
+      }
+    } catch (error) {
+      dispatch({
+        type: "notice-set",
+        notice: safeErrorMessage(error, "无法更新权限模式。"),
+      });
+    } finally {
+      setPermissionModeUpdating(false);
+    }
   }
 
   function selectMode(mode: AgentMode, clearDraft = false): void {
@@ -193,6 +299,7 @@ export function ChatWorkspace() {
       input.length === 0 ||
       !snapshot.selectedProvider ||
       !snapshot.selectedWorkspaceId ||
+      permissionSessionRef.current.status !== "ready" ||
       snapshot.requestState !== "idle" ||
       activeRequestRef.current ||
       (requiredPlanMessageId !== undefined &&
@@ -204,6 +311,10 @@ export function ChatWorkspace() {
     const userId = crypto.randomUUID();
     const assistantId = crypto.randomUUID();
     const controller = new AbortController();
+    const permissionSessionId = permissionSessionRef.current.status === "ready"
+      ? permissionSessionRef.current.id
+      : undefined;
+    if (!permissionSessionId) return;
     activeRequestRef.current = controller;
     dispatch({
       type: "request-started",
@@ -222,6 +333,7 @@ export function ChatWorkspace() {
         body: JSON.stringify({
           provider: snapshot.selectedProvider,
           workspaceId: snapshot.selectedWorkspaceId,
+          permissionSessionId,
           mode: requestMode,
           modeTurn,
           messages: [...snapshot.history, userMessage],
@@ -250,6 +362,10 @@ export function ChatWorkspace() {
           dispatch({ type: "tool-call", assistantId, event });
         } else if (event.type === "tool-started") {
           dispatch({ type: "tool-started", assistantId, event });
+        } else if (event.type === "permission-requested") {
+          dispatch({ type: "permission-requested", assistantId, event });
+        } else if (event.type === "permission-resolved") {
+          dispatch({ type: "permission-resolved", assistantId, event });
         } else if (event.type === "tool-result") {
           dispatch({ type: "tool-result", assistantId, event });
         } else if (event.type === "token-usage") {
@@ -293,6 +409,37 @@ export function ChatWorkspace() {
         activeRequestRef.current = undefined;
       }
       dispatch({ type: "request-settled" });
+    }
+  }
+
+  async function submitPermissionDecision(
+    requestId: string,
+    decision: PermissionUserDecision,
+  ): Promise<void> {
+    const current = permissionSessionRef.current;
+    if (current.status !== "ready") return;
+    dispatch({ type: "permission-submitting", requestId });
+    try {
+      const response = await fetch(
+        `/api/permission-sessions/${current.id}/decisions`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ requestId, decision }),
+        },
+      );
+      const value: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(parseWebApiError(value)?.error ?? "无法提交授权决定。");
+      }
+      parsePermissionDecisionResponse(value);
+      dispatch({ type: "permission-submitted", requestId });
+    } catch (error) {
+      dispatch({
+        type: "permission-submit-failed",
+        requestId,
+        error: safeErrorMessage(error, "无法提交授权决定，请重试。"),
+      });
     }
   }
 
@@ -360,9 +507,17 @@ export function ChatWorkspace() {
           )}
         </div>
 
+        <PermissionModeControl
+          mode={permissionSession.mode}
+          disabled={permissionSession.status !== "ready"}
+          updating={permissionModeUpdating}
+          onChange={(mode) => void selectPermissionMode(mode)}
+        />
+
         <div className="sessionInfo">
           <div><span>当前模式</span><strong>{modeLabel(session.mode)}</strong></div>
           <div><span>工具范围</span><strong>{session.mode === "plan" ? "只读三项" : "完整 Workspace"}</strong></div>
+          <div><span>权限模式</span><strong>{permissionModeLabel(permissionSession.mode)}</strong></div>
           <div><span>存储</span><strong>仅当前页面</strong></div>
         </div>
 
@@ -391,8 +546,8 @@ export function ChatWorkspace() {
             <button
               className="clearButton"
               type="button"
-              onClick={() => dispatch({ type: "conversation-cleared" })}
-              disabled={isStreaming || (session.messages.length === 0 && session.mode === "do")}
+              onClick={() => resetPermissionContext()}
+              disabled={!isAwaitingPermission && (isStreaming || (session.messages.length === 0 && session.mode === "do"))}
             >
               <TrashIcon />
               清空
@@ -420,11 +575,14 @@ export function ChatWorkspace() {
           executablePlanMessageId={session.executablePlanMessageId}
           planActionDisabled={controlsDisabled}
           onExecutePlan={executePlan}
+          onPermissionDecision={(requestId, decision) =>
+            void submitPermissionDecision(requestId, decision)
+          }
         />
         <ChatComposer
           value={session.draft}
           mode={session.mode}
-          disabled={catalogState !== "ready"}
+          disabled={catalogState !== "ready" || permissionSession.status !== "ready"}
           isStreaming={isStreaming}
           isStopping={session.requestState === "stopping"}
           onModeChange={(mode) => selectMode(mode)}
@@ -454,6 +612,19 @@ function statusLabel(status: UiStatus): string {
 
 function modeLabel(mode: AgentMode): string {
   return mode === "plan" ? "PLAN MODE" : "DO MODE";
+}
+
+function permissionModeLabel(mode: PermissionMode): string {
+  if (mode === "strict") return "严格";
+  if (mode === "permissive") return "放行";
+  return "默认";
+}
+
+function closePermissionSession(sessionId: string): void {
+  void fetch(`/api/permission-sessions/${sessionId}`, {
+    method: "DELETE",
+    keepalive: true,
+  }).catch(() => undefined);
 }
 
 function safeErrorMessage(error: unknown, fallback: string): string {

@@ -1,5 +1,15 @@
+import type { PermissionPrompt } from "@/core/permissions/approval";
 import type { ModelToolCall } from "@/models/provider";
-import type { ToolAccess, ToolAccessDecision } from "@/tools/mode-policy";
+import type {
+  PermissionAuthorization,
+  PermissionExecutable,
+  PermissionGateway,
+} from "@/tools/permission-gateway";
+import type { ToolAccess } from "@/tools/mode-policy";
+import type {
+  PreparedToolCall,
+  ToolPreparationResult,
+} from "@/tools/registry";
 import {
   toolFailure,
   type ToolExecutionResult,
@@ -17,7 +27,28 @@ export type ToolCallResult = {
   readonly result: ToolExecutionResult;
 };
 
+export type PermissionResolutionStatus =
+  | "allowed"
+  | "denied"
+  | "expired"
+  | "cancelled"
+  | "invalid";
+
 export type ToolScheduleEvent =
+  | {
+      readonly type: "permission-requested";
+      readonly call: ModelToolCall;
+      readonly sequence: number;
+      readonly prompt: PermissionPrompt;
+    }
+  | {
+      readonly type: "permission-resolved";
+      readonly call: ModelToolCall;
+      readonly sequence: number;
+      readonly requestId: string;
+      readonly status: PermissionResolutionStatus;
+      readonly scope?: "once" | "session" | "permanent";
+    }
   | {
       readonly type: "started";
       readonly call: ModelToolCall;
@@ -32,19 +63,28 @@ export type ToolScheduleEvent =
 type PreparedCall = {
   readonly call: ModelToolCall;
   readonly sequence: number;
-  readonly decision: ToolAccessDecision;
-  readonly arguments:
-    | { readonly ok: true; readonly value: unknown }
-    | { readonly ok: false; readonly result: ToolExecutionResult };
+  readonly preparation: ToolPreparationResult;
 };
 
-export async function* scheduleToolCalls(options: {
+type AuthorizedCall = {
+  readonly call: ModelToolCall;
+  readonly sequence: number;
+  readonly prepared: PreparedToolCall;
+  readonly permission?: PermissionExecutable;
+};
+
+type SchedulerOptions = {
   readonly calls: readonly ModelToolCall[];
   readonly access: ToolAccess;
   readonly workspace: WorkspaceBoundary;
   readonly signal: AbortSignal;
+  readonly permissionGateway?: PermissionGateway;
   readonly readOnlyConcurrency?: number;
-}): AsyncIterable<ToolScheduleEvent> {
+};
+
+export async function* scheduleToolCalls(
+  options: SchedulerOptions,
+): AsyncIterable<ToolScheduleEvent> {
   const concurrency = options.readOnlyConcurrency ?? MAX_READ_ONLY_CONCURRENCY;
   if (
     !Number.isInteger(concurrency) ||
@@ -58,79 +98,119 @@ export async function* scheduleToolCalls(options: {
     prepareCall(call, sequence, options.access),
   );
   const completed: ToolCallResult[] = [];
-  let cursor = 0;
+  const readBatch: AuthorizedCall[] = [];
 
-  while (cursor < prepared.length && !options.signal.aborted) {
-    const current = prepared[cursor];
-    if (isRunnableReadOnly(current)) {
-      const contiguous: PreparedCall[] = [];
-      while (
-        cursor < prepared.length &&
-        isRunnableReadOnly(prepared[cursor])
-      ) {
-        contiguous.push(prepared[cursor]);
-        cursor += 1;
-      }
-      for (let offset = 0; offset < contiguous.length; offset += concurrency) {
-        if (options.signal.aborted) break;
-        const group = contiguous.slice(offset, offset + concurrency);
-        for await (const event of executeConcurrentReadOnly(group, options)) {
-          if (event.type === "result") completed.push(event);
-          yield event;
-        }
-      }
-      continue;
+  for (const current of prepared) {
+    if (options.signal.aborted) break;
+    if (
+      current.preparation.kind === "failure" ||
+      current.preparation.call.mutability !== "read-only"
+    ) {
+      yield* flushReadBatch(readBatch, completed, options, concurrency);
     }
 
-    cursor += 1;
-    if (current.arguments.ok === false) {
-      const result = toCallResult(current, current.arguments.result);
+    if (current.preparation.kind === "failure") {
+      const result = toCallResult(current, current.preparation.result);
       completed.push(result);
       yield { type: "result", ...result };
       continue;
     }
-    if (current.decision.kind !== "allowed") {
-      const result = toCallResult(
-        current,
-        await options.access.execute(
-          current.call.name,
-          current.arguments.value,
-          executionContext(options, "read-only"),
-        ),
+
+    let authorization: PermissionAuthorization | undefined;
+    if (options.permissionGateway) {
+      authorization = await options.permissionGateway.authorize(
+        current.preparation.call,
+        current.call.id,
+        options.signal,
       );
+    }
+    if (authorization?.kind === "awaiting") {
+      yield* flushReadBatch(readBatch, completed, options, concurrency);
+      yield {
+        type: "permission-requested",
+        call: current.call,
+        sequence: current.sequence,
+        prompt: authorization.prompt,
+      };
+      const requestId = authorization.prompt.requestId;
+      const resolvedAuthorization = await authorization.resolve();
+      if (resolvedAuthorization.kind === "awaiting") {
+        throw new Error("授权代理返回了嵌套等待项。");
+      }
+      authorization = resolvedAuthorization;
+      yield {
+        type: "permission-resolved",
+        call: current.call,
+        sequence: current.sequence,
+        requestId,
+        status: resolutionStatus(authorization),
+        scope: authorization.kind === "allowed"
+          ? authorization.approvalScope
+          : undefined,
+      };
+    }
+    if (authorization?.kind === "denied") {
+      yield* flushReadBatch(readBatch, completed, options, concurrency);
+      const result = toCallResult(current, authorization.result);
       completed.push(result);
       yield { type: "result", ...result };
       continue;
     }
 
-    const execution = safeExecute(current, options);
-    yield {
-      type: "started",
+    const authorized: AuthorizedCall = {
       call: current.call,
       sequence: current.sequence,
+      prepared: current.preparation.call,
+      permission: authorization?.kind === "allowed" ? authorization : undefined,
     };
-    const result = toCallResult(current, await execution);
-    completed.push(result);
-    yield { type: "result", ...result };
+    if (authorized.prepared.mutability === "read-only") {
+      readBatch.push(authorized);
+      if (readBatch.length >= concurrency) {
+        yield* flushReadBatch(readBatch, completed, options, concurrency);
+      }
+    } else {
+      yield* executeAuthorizedBatch([authorized], completed, options);
+    }
   }
 
+  if (!options.signal.aborted) {
+    yield* flushReadBatch(readBatch, completed, options, concurrency);
+  } else {
+    readBatch.length = 0;
+  }
   yield {
     type: "batch-completed",
     orderedResults: completed.sort((left, right) => left.sequence - right.sequence),
   };
 }
 
-async function* executeConcurrentReadOnly(
-  calls: readonly PreparedCall[],
-  options: {
-    readonly access: ToolAccess;
-    readonly workspace: WorkspaceBoundary;
-    readonly signal: AbortSignal;
-  },
-): AsyncIterable<Extract<ToolScheduleEvent, { type: "started" | "result" }>> {
+async function* flushReadBatch(
+  batch: AuthorizedCall[],
+  completed: ToolCallResult[],
+  options: SchedulerOptions,
+  concurrency: number,
+): AsyncIterable<ToolScheduleEvent> {
+  while (batch.length > 0 && !options.signal.aborted) {
+    const group = batch.splice(0, concurrency);
+    yield* executeAuthorizedBatch(group, completed, options);
+  }
+}
+
+async function* executeAuthorizedBatch(
+  calls: readonly AuthorizedCall[],
+  completed: ToolCallResult[],
+  options: SchedulerOptions,
+): AsyncIterable<ToolScheduleEvent> {
   const pending = new Map<number, Promise<ToolCallResult>>();
   for (const call of calls) {
     if (options.signal.aborted) break;
+    const revalidationFailure = await call.permission?.revalidate(options.signal);
+    if (revalidationFailure) {
+      const result = toCallResult(call, revalidationFailure);
+      completed.push(result);
+      yield { type: "result", ...result };
+      continue;
+    }
     const execution = safeExecute(call, options).then((result) =>
       toCallResult(call, result),
     );
@@ -141,6 +221,7 @@ async function* executeConcurrentReadOnly(
   while (pending.size > 0) {
     const result = await Promise.race(pending.values());
     pending.delete(result.sequence);
+    completed.push(result);
     yield { type: "result", ...result };
   }
 }
@@ -150,74 +231,54 @@ function prepareCall(
   sequence: number,
   access: ToolAccess,
 ): PreparedCall {
-  const decision = access.classify(call.name);
-  if (decision.kind !== "allowed") {
+  const accessDecision = access.classify(call.name);
+  if (accessDecision.kind !== "allowed") {
     return {
       call,
       sequence,
-      decision,
-      arguments: { ok: true, value: undefined },
+      preparation: access.prepare(call.name, undefined),
     };
   }
+  let rawArguments: unknown;
   try {
-    return {
-      call,
-      sequence,
-      decision,
-      arguments: { ok: true, value: JSON.parse(call.argumentsJson) as unknown },
-    };
+    rawArguments = JSON.parse(call.argumentsJson) as unknown;
   } catch {
     return {
       call,
       sequence,
-      decision,
-      arguments: {
-        ok: false,
+      preparation: {
+        kind: "failure",
         result: toolFailure("invalid-arguments", "工具参数不是有效 JSON。", {
           retryable: true,
         }),
       },
     };
   }
-}
-
-function isRunnableReadOnly(call: PreparedCall): boolean {
-  return (
-    call.arguments.ok &&
-    call.decision.kind === "allowed" &&
-    call.decision.mutability === "read-only"
-  );
+  return {
+    call,
+    sequence,
+    preparation: access.prepare(call.name, rawArguments),
+  };
 }
 
 async function safeExecute(
-  call: PreparedCall,
-  options: {
-    readonly access: ToolAccess;
-    readonly workspace: WorkspaceBoundary;
-    readonly signal: AbortSignal;
-  },
+  call: AuthorizedCall,
+  options: SchedulerOptions,
 ): Promise<ToolExecutionResult> {
-  if (call.arguments.ok === false || call.decision.kind !== "allowed") {
-    throw new Error("调度器尝试执行未准备完成的工具调用。");
-  }
   try {
-    return await options.access.execute(
-      call.call.name,
-      call.arguments.value,
-      executionContext(options, call.decision.mutability),
+    return await options.access.executePrepared(
+      call.prepared,
+      executionContext(options, call.prepared.mutability),
     );
   } catch {
     return toolFailure("execution-failed", "工具执行发生未知错误。", {
-      sideEffect: call.decision.mutability === "read-only" ? "none" : "possible",
+      sideEffect: call.prepared.mutability === "read-only" ? "none" : "possible",
     });
   }
 }
 
 function executionContext(
-  options: {
-    readonly workspace: WorkspaceBoundary;
-    readonly signal: AbortSignal;
-  },
+  options: Pick<SchedulerOptions, "workspace" | "signal">,
   mutability: ToolMutability,
 ) {
   return {
@@ -230,7 +291,7 @@ function executionContext(
 }
 
 function toCallResult(
-  call: PreparedCall,
+  call: Pick<PreparedCall, "call" | "sequence">,
   result: ToolExecutionResult,
 ): ToolCallResult {
   return {
@@ -238,4 +299,11 @@ function toCallResult(
     sequence: call.sequence,
     result,
   };
+}
+
+function resolutionStatus(
+  authorization: Exclude<PermissionAuthorization, { readonly kind: "awaiting" }>,
+): PermissionResolutionStatus {
+  if (authorization.kind === "allowed") return "allowed";
+  return authorization.approvalStatus ?? "invalid";
 }

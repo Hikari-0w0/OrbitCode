@@ -15,7 +15,7 @@ import test from "node:test";
 
 import { createWorkspaceBoundary, WorkspaceError } from "@/tools/workspace";
 
-test("工作区读取 UTF-8 并拒绝越界、敏感路径、目录和符号链接", async () => {
+test("工作区解析内部符号链接并拒绝越界、敏感路径和外部链接", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "orbitcode-workspace-"));
   const outside = await mkdtemp(path.join(tmpdir(), "orbitcode-outside-"));
   try {
@@ -26,11 +26,15 @@ test("工作区读取 UTF-8 并拒绝越界、敏感路径、目录和符号链�
     await writeFile(path.join(root, ".env"), "SECRET=sentinel\n", "utf8");
     await writeFile(path.join(outside, "outside.txt"), "outside", "utf8");
     await symlink(path.join(outside, "outside.txt"), path.join(root, "link.txt"));
+    await symlink(path.join(root, "src", "main.ts"), path.join(root, "internal.txt"));
     const workspace = await createWorkspaceBoundary(root);
 
     const snapshot = await workspace.readTextFile("src/main.ts", { maxBytes: 100 });
     assert.equal(snapshot.content, "你好\n");
     assert.equal(snapshot.path.relativePath, "src/main.ts");
+    const internal = await workspace.readTextFile("internal.txt", { maxBytes: 100 });
+    assert.equal(internal.content, "你好\n");
+    assert.equal(internal.path.relativePath, "src/main.ts");
     for (const target of ["../outside.txt", path.join(outside, "outside.txt"), ".env", "src", "link.txt"]) {
       await assert.rejects(workspace.readTextFile(target, { maxBytes: 100 }), WorkspaceError);
     }
@@ -48,6 +52,31 @@ test("工作区读取 UTF-8 并拒绝越界、敏感路径、目录和符号链�
   } finally {
     await rm(root, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("权限配置通过原路径或内部符号链接访问都被保护", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-permission-protected-"));
+  try {
+    await mkdir(path.join(root, ".orbitcode"));
+    await writeFile(path.join(root, ".orbitcode", "permissions.yaml"), "rules: {}\n");
+    await symlink(
+      path.join(root, ".orbitcode", "permissions.yaml"),
+      path.join(root, "permission-link.yaml"),
+    );
+    const workspace = await createWorkspaceBoundary(root);
+    for (const target of [
+      ".orbitcode/permissions.yaml",
+      "permission-link.yaml",
+    ]) {
+      await assert.rejects(
+        workspace.readTextFile(target, { maxBytes: 100 }),
+        (error: unknown) =>
+          error instanceof WorkspaceError && error.kind === "protected-path",
+      );
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

@@ -24,6 +24,14 @@ export const findFilesTool = defineTool({
     })),
   }),
   mutability: "read-only",
+  permission: {
+    targetKind: "path",
+    resolve: (input) => ({
+      kind: "path",
+      requestedPath: input.path ?? ".",
+      resolution: "existing-directory",
+    }),
+  },
   async execute(input, context) {
     let matcher;
     try {
