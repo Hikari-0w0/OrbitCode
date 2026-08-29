@@ -25,6 +25,7 @@ import type {
   PromptEnvironment,
 } from "@/core/system-prompt/types";
 import type { ToolAccess } from "@/tools/mode-policy";
+import type { PermissionGateway } from "@/tools/permission-gateway";
 import type {
   SideEffectState,
   WorkspaceBoundary,
@@ -49,6 +50,9 @@ export class AgentLoop implements AgentSession {
   private readonly maxIterations: number;
   private readonly promptEnvironment: PromptEnvironment;
   private readonly optionalPromptContext?: OptionalPromptContext;
+  private readonly permissionGatewayForMode?: (
+    mode: AgentMode,
+  ) => PermissionGateway;
 
   constructor(
     private readonly provider: ChatProvider,
@@ -58,6 +62,9 @@ export class AgentLoop implements AgentSession {
       readonly maxIterations: number;
       readonly promptEnvironment: PromptEnvironment;
       readonly optionalPromptContext?: OptionalPromptContext;
+      readonly permissionGatewayForMode?: (
+        mode: AgentMode,
+      ) => PermissionGateway;
     },
     initialHistory: readonly PlainConversationMessage[] = [],
   ) {
@@ -65,6 +72,7 @@ export class AgentLoop implements AgentSession {
     this.maxIterations = options.maxIterations;
     this.promptEnvironment = options.promptEnvironment;
     this.optionalPromptContext = options.optionalPromptContext;
+    this.permissionGatewayForMode = options.permissionGatewayForMode;
     this.history = initialHistory.map((message) => ({ ...message }));
   }
 
@@ -101,6 +109,7 @@ export class AgentLoop implements AgentSession {
       userMessage,
     ];
     const access = this.toolAccessForMode(options.mode);
+    const permissionGateway = this.permissionGatewayForMode?.(options.mode);
     let completedIterations = 0;
     let consecutiveUnknownIterations = 0;
     let sideEffect: SideEffectState = "none";
@@ -185,7 +194,12 @@ export class AgentLoop implements AgentSession {
         }
 
         for (const [sequence, call] of calls.entries()) {
-          yield { type: "tool-call", iteration, call, sequence };
+          yield {
+            type: "tool-call",
+            iteration,
+            call: safeToolCallForDisplay(call),
+            sequence,
+          };
         }
         if (iteration === this.maxIterations) {
           yield stopped(
@@ -218,6 +232,7 @@ export class AgentLoop implements AgentSession {
           access,
           workspace: this.workspace,
           signal: options.signal,
+          permissionGateway,
         })) {
           if (event.type === "started") {
             yield {
@@ -226,6 +241,26 @@ export class AgentLoop implements AgentSession {
               callId: event.call.id,
               name: event.call.name,
               sequence: event.sequence,
+            };
+          } else if (event.type === "permission-requested") {
+            yield {
+              type: "permission-requested",
+              iteration,
+              callId: event.call.id,
+              name: event.call.name,
+              sequence: event.sequence,
+              prompt: event.prompt,
+            };
+          } else if (event.type === "permission-resolved") {
+            yield {
+              type: "permission-resolved",
+              iteration,
+              callId: event.call.id,
+              name: event.call.name,
+              sequence: event.sequence,
+              requestId: event.requestId,
+              status: event.status,
+              scope: event.scope,
             };
           } else if (event.type === "result") {
             sideEffect = higherSideEffect(sideEffect, event.result.sideEffect);
@@ -246,7 +281,7 @@ export class AgentLoop implements AgentSession {
               completedTools,
               totalTools: calls.length,
             };
-          } else {
+          } else if (event.type === "batch-completed") {
             orderedResults = event.orderedResults;
           }
         }
@@ -274,7 +309,7 @@ export class AgentLoop implements AgentSession {
         transcript.push({
           role: "assistant",
           content: content.length > 0 ? content : null,
-          toolCalls: calls,
+          toolCalls: calls.map(safeToolCallForDisplay),
         });
         for (const item of orderedResults) {
           transcript.push({
@@ -363,6 +398,15 @@ export class AgentLoop implements AgentSession {
       );
     }
   }
+}
+
+function safeToolCallForDisplay(call: ModelToolCall): ModelToolCall {
+  return {
+    id: call.id,
+    name: call.name,
+    // 完整参数仅留在服务端准备调用中，避免写入正文或命令凭据进入 DOM/SSE。
+    argumentsJson: "{}",
+  };
 }
 
 export function assertMaxAgentIterations(value: number): void {

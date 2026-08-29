@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -6,10 +8,12 @@ import {
   type ToolScheduleEvent,
 } from "@/core/tool-scheduler";
 import { createModeToolPolicy } from "@/tools/mode-policy";
+import { PermissionGateway } from "@/tools/permission-gateway";
 import { defineTool, successfulToolResult, ToolRegistry } from "@/tools/registry";
 import { integerSchema, objectSchema, stringSchema } from "@/tools/schema";
 import type { ToolMutability, ToolName, WorkspaceBoundary } from "@/tools/types";
 import { createWorkspaceBoundary } from "@/tools/workspace";
+import { PermissionSessionManager } from "@/web/permission-session-manager";
 
 type Interval = {
   readonly label: string;
@@ -127,6 +131,7 @@ test("只读并发不超过八个且单个失败不影响同批收敛", async ()
         delayMs: integerSchema({ minimum: 0, maximum: 1_000 }),
       }),
       mutability: "read-only",
+      permission: testSchedulerPermission(),
       async execute(input, context) {
         active += 1;
         peak = Math.max(peak, active);
@@ -170,6 +175,137 @@ test("只读并发不超过八个且单个失败不影响同批收敛", async ()
   }
 });
 
+test("多个 ask 按 sequence 逐项等待，只有获准调用在 started 后执行", async () => {
+  const root = await import("node:fs/promises").then(({ mkdtemp }) =>
+    mkdtemp(path.join(tmpdir(), "orbitcode-scheduler-permission-")),
+  );
+  const manager = new PermissionSessionManager();
+  let executions = 0;
+  try {
+    const permissionWorkspace = await createWorkspaceBoundary(root);
+    const registry = permissionWriteRegistry(() => executions++);
+    const session = manager.createSession();
+    const turn = manager.beginTurn(session.id, {
+      workspace: { id: "test", name: "Test" },
+      providerId: "test-provider",
+    });
+    const iterator = scheduleToolCalls({
+      calls: [permissionCall("first", "first.txt"), permissionCall("second", "second.txt")],
+      access: createModeToolPolicy(registry, "do"),
+      workspace: permissionWorkspace,
+      signal: new AbortController().signal,
+      permissionGateway: new PermissionGateway({
+        agentMode: "do",
+        permissionMode: "default",
+        workspace: permissionWorkspace,
+        broker: turn.broker,
+        loadRules: async () => [],
+      }),
+    })[Symbol.asyncIterator]();
+
+    const firstRequest = await iterator.next();
+    assert.equal(firstRequest.value?.type, "permission-requested");
+    assert.equal(executions, 0);
+    if (firstRequest.value?.type !== "permission-requested") return;
+    manager.resolveDecision(
+      session.id,
+      firstRequest.value.prompt.requestId,
+      "allow-once",
+    );
+
+    const middle: ToolScheduleEvent[] = [];
+    let secondRequest: Extract<ToolScheduleEvent, { type: "permission-requested" }> | undefined;
+    while (!secondRequest) {
+      const next = await iterator.next();
+      assert.equal(next.done, false);
+      if (next.value?.type === "permission-requested") secondRequest = next.value;
+      else if (next.value) middle.push(next.value);
+    }
+    assert.equal(executions, 1);
+    assert.deepEqual(middle.map((event) => event.type), [
+      "permission-resolved",
+      "started",
+      "result",
+    ]);
+    manager.resolveDecision(session.id, secondRequest.prompt.requestId, "deny");
+
+    const remaining: ToolScheduleEvent[] = [];
+    for (;;) {
+      const next = await iterator.next();
+      if (next.done) break;
+      remaining.push(next.value);
+    }
+    assert.equal(executions, 1);
+    assert.deepEqual(remaining.map((event) => event.type), [
+      "permission-resolved",
+      "result",
+      "batch-completed",
+    ]);
+    const denied = remaining.find((event) => event.type === "result");
+    assert.equal(
+      denied?.type === "result" && !denied.result.ok
+        ? denied.result.error.kind
+        : undefined,
+      "user-denied",
+    );
+  } finally {
+    await import("node:fs/promises").then(({ rm }) =>
+      rm(root, { recursive: true, force: true }),
+    );
+  }
+});
+
+test("等待授权时取消不会发出 started 或执行工具", async () => {
+  const root = await import("node:fs/promises").then(({ mkdtemp }) =>
+    mkdtemp(path.join(tmpdir(), "orbitcode-scheduler-cancel-")),
+  );
+  const manager = new PermissionSessionManager();
+  let executions = 0;
+  try {
+    const permissionWorkspace = await createWorkspaceBoundary(root);
+    const registry = permissionWriteRegistry(() => executions++);
+    const session = manager.createSession();
+    const turn = manager.beginTurn(session.id, {
+      workspace: { id: "test", name: "Test" },
+      providerId: "test-provider",
+    });
+    const controller = new AbortController();
+    const iterator = scheduleToolCalls({
+      calls: [permissionCall("cancel", "cancel.txt")],
+      access: createModeToolPolicy(registry, "do"),
+      workspace: permissionWorkspace,
+      signal: controller.signal,
+      permissionGateway: new PermissionGateway({
+        agentMode: "do",
+        permissionMode: "default",
+        workspace: permissionWorkspace,
+        broker: turn.broker,
+        loadRules: async () => [],
+      }),
+    })[Symbol.asyncIterator]();
+    assert.equal((await iterator.next()).value?.type, "permission-requested");
+    controller.abort();
+    const remaining: ToolScheduleEvent[] = [];
+    for (;;) {
+      const next = await iterator.next();
+      if (next.done) break;
+      remaining.push(next.value);
+    }
+    assert.equal(remaining.some((event) => event.type === "started"), false);
+    assert.equal(executions, 0);
+    assert.equal(
+      remaining.some(
+        (event) => event.type === "permission-resolved" && event.status === "cancelled",
+      ),
+      true,
+    );
+  } finally {
+    await import("node:fs/promises").then(({ rm }) =>
+      rm(root, { recursive: true, force: true }),
+    );
+  }
+});
+
 function registryWithIntervals(intervals: Interval[]): ToolRegistry {
   return new ToolRegistry([
     intervalTool("read_file", "read-only", intervals),
@@ -178,6 +314,37 @@ function registryWithIntervals(intervals: Interval[]): ToolRegistry {
     intervalTool("write_file", "workspace-write", intervals),
     intervalTool("run_command", "command", intervals),
   ]);
+}
+
+function permissionWriteRegistry(onExecute: () => void): ToolRegistry {
+  return new ToolRegistry([
+    defineTool({
+      name: "write_file",
+      description: "权限调度测试工具",
+      inputSchema: objectSchema({ path: stringSchema({ minLength: 1 }) }),
+      mutability: "workspace-write",
+      permission: {
+        targetKind: "path",
+        resolve: (input) => ({
+          kind: "path",
+          requestedPath: input.path,
+          resolution: "write-target",
+        }),
+      },
+      async execute() {
+        onExecute();
+        return successfulToolResult({ written: true }, "applied");
+      },
+    }),
+  ]);
+}
+
+function permissionCall(id: string, targetPath: string) {
+  return {
+    id,
+    name: "write_file" as const,
+    argumentsJson: JSON.stringify({ path: targetPath }),
+  };
 }
 
 function intervalTool(
@@ -193,6 +360,7 @@ function intervalTool(
       delayMs: integerSchema({ minimum: 0, maximum: 1_000 }),
     }),
     mutability,
+    permission: testSchedulerPermission(),
     async execute(input, context) {
       const interval: Interval = {
         label: input.label,
@@ -208,6 +376,19 @@ function intervalTool(
       );
     },
   });
+}
+
+function testSchedulerPermission() {
+  return {
+    targetKind: "path" as const,
+    resolve(input: { readonly label: string; readonly delayMs: number }) {
+      return {
+        kind: "path" as const,
+        requestedPath: input.label,
+        resolution: "existing-file" as const,
+      };
+    },
+  };
 }
 
 function call(id: string, name: ToolName, delayMs: number) {

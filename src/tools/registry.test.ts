@@ -113,6 +113,19 @@ test("非法参数和未知工具不会触发副作用", async () => {
   assert.equal(executions, 0);
 });
 
+test("准备调用绑定规范参数指纹并冻结执行契约", () => {
+  const registry = new ToolRegistry([fakeTool()]);
+  const first = registry.prepare("read_file", { path: "src/main.ts" });
+  const second = registry.prepare("read_file", { path: "src/main.ts" });
+  assert.equal(first.kind, "ready");
+  assert.equal(second.kind, "ready");
+  if (first.kind !== "ready" || second.kind !== "ready") return;
+  assert.equal(first.call.fingerprint, second.call.fingerprint);
+  assert.equal(first.call.fingerprint.length, 64);
+  assert.equal(Object.isFrozen(first.call), true);
+  assert.equal(Object.isFrozen(first.call.permissionTarget), true);
+});
+
 test("执行异常、超时和调用方取消被结构化收敛", async () => {
   const throwing = new ToolRegistry([
     fakeTool(() => {
@@ -141,6 +154,14 @@ function fakeTool(onExecute: () => unknown = () => undefined) {
     description: "测试工具",
     inputSchema: objectSchema({ path: stringSchema({ minLength: 1 }) }),
     mutability: "read-only",
+    permission: {
+      targetKind: "path",
+      resolve: (input) => ({
+        kind: "path",
+        requestedPath: input.path,
+        resolution: "existing-file",
+      }),
+    },
     async execute(input) {
       await onExecute();
       return successfulToolResult({ path: input.path });

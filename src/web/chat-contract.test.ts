@@ -6,6 +6,10 @@ import {
   MAX_WEB_CHAT_MESSAGE_LENGTH,
   MAX_WEB_CHAT_MESSAGES,
   parseProviderCatalogResponse,
+  parsePermissionDecisionRequest,
+  parsePermissionDecisionResponse,
+  parsePermissionSessionResponse,
+  parsePermissionSessionUpdateRequest,
   parseWorkspaceCatalogResponse,
   parseWebChatEvents,
   parseWebChatRequest,
@@ -17,6 +21,7 @@ test("接受严格的多轮请求并保留消息顺序", () => {
   const result = parseWebChatRequest({
     provider: " primary ",
     workspaceId: "project-a",
+    permissionSessionId: "session-1",
     mode: "plan",
     modeTurn: 5,
     messages: [
@@ -28,6 +33,7 @@ test("接受严格的多轮请求并保留消息顺序", () => {
 
   assert.equal(result.provider, "primary");
   assert.equal(result.workspaceId, "project-a");
+  assert.equal(result.permissionSessionId, "session-1");
   assert.equal(result.mode, "plan");
   assert.equal(result.modeTurn, 5);
   assert.deepEqual(result.messages, [
@@ -76,6 +82,7 @@ test("拒绝超长内容和过多历史", () => {
       parseWebChatRequest({
         provider: "primary",
         workspaceId: "project",
+        permissionSessionId: "session-1",
         mode: "do",
         modeTurn: 1,
         messages: [
@@ -90,7 +97,7 @@ test("拒绝超长内容和过多历史", () => {
     content: String(index),
   }));
   assert.throws(
-    () => parseWebChatRequest({ provider: "primary", workspaceId: "project", mode: "do", modeTurn: 1, messages }),
+    () => parseWebChatRequest({ provider: "primary", workspaceId: "project", permissionSessionId: "session-1", mode: "do", modeTurn: 1, messages }),
     /数量/,
   );
 });
@@ -136,6 +143,36 @@ test("模式连续轮次必须是有界正整数", () => {
   }
 });
 
+test("严格解析权限会话、模式更新与只含枚举的授权决定", () => {
+  assert.deepEqual(
+    parsePermissionSessionResponse({ sessionId: "session-1", mode: "default" }),
+    { sessionId: "session-1", mode: "default" },
+  );
+  assert.deepEqual(parsePermissionSessionUpdateRequest({ mode: "strict" }), {
+    mode: "strict",
+  });
+  assert.deepEqual(
+    parsePermissionDecisionRequest({ requestId: "request-1", decision: "allow-once" }),
+    { requestId: "request-1", decision: "allow-once" },
+  );
+  assert.deepEqual(parsePermissionDecisionResponse({ accepted: true }), {
+    accepted: true,
+  });
+  for (const invalid of [
+    { mode: "unrestricted" },
+    { requestId: "request-1", decision: "allow", parameters: {} },
+    { requestId: "bad id", decision: "deny" },
+  ]) {
+    assert.throws(
+      () =>
+        "mode" in invalid
+          ? parsePermissionSessionUpdateRequest(invalid)
+          : parsePermissionDecisionRequest(invalid),
+      WebChatContractError,
+    );
+  }
+});
+
 test("Web SSE 事件按网络分块往返解析", async () => {
   const expected: readonly WebChatEvent[] = [
     { type: "progress", iteration: 1, maxIterations: 8, phase: "model" },
@@ -156,6 +193,34 @@ test("Web SSE 事件按网络分块往返解析", async () => {
       callId: "call_1",
       name: "read_file",
       sequence: 0,
+    },
+    {
+      type: "permission-requested",
+      iteration: 1,
+      callId: "call_approval",
+      name: "write_file",
+      sequence: 1,
+      prompt: {
+        requestId: "request-1",
+        toolCallId: "call_approval",
+        toolName: "write_file",
+        workspace: { id: "project", name: "Project" },
+        summary: { operation: "写入", path: "src/main.ts" },
+        risk: { level: "medium", message: "写入需要确认。" },
+        source: "mode",
+        persistentLayer: "local",
+        expiresAt: "2026-08-29T00:00:00.000Z",
+      },
+    },
+    {
+      type: "permission-resolved",
+      iteration: 1,
+      callId: "call_approval",
+      name: "write_file",
+      sequence: 1,
+      requestId: "request-1",
+      status: "allowed",
+      scope: "once",
     },
     {
       type: "tool-result",

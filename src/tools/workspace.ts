@@ -113,20 +113,31 @@ class LocalWorkspaceBoundary implements WorkspaceBoundary {
     const parent = await this.resolveExistingDirectory(
       parentRelative === "." ? "." : parentRelative,
     );
-    const absolutePath = path.join(parent.absolutePath, path.posix.basename(normalized));
-    const existing = await lstat(absolutePath).catch((error: unknown) => {
+    const requestedAbsolutePath = path.join(
+      parent.absolutePath,
+      path.posix.basename(normalized),
+    );
+    const requestedState = await lstat(requestedAbsolutePath).catch((error: unknown) => {
       if (isNodeError(error, "ENOENT")) return undefined;
       throw mapFileError(error, "无法检查写入目标。");
     });
-    if (existing?.isSymbolicLink()) {
-      throw new WorkspaceError("invalid-path", "不允许操作符号链接。");
+    let absolutePath = requestedAbsolutePath;
+    let existing = requestedState;
+    if (requestedState !== undefined) {
+      absolutePath = await realpath(requestedAbsolutePath).catch((error: unknown) => {
+        throw mapFileError(error, "无法解析写入目标。", "invalid-path");
+      });
+      assertWithinRoot(this.root, absolutePath, "写入目标超出授权工作目录。");
+      existing = await safeLstat(absolutePath);
     }
     if (existing && !existing.isFile()) {
       throw new WorkspaceError("not-file", "写入目标不是普通文件。");
     }
+    const relativePath = workspaceRelativePath(this.root, absolutePath);
+    assertAllowed(relativePath);
     return {
       absolutePath,
-      relativePath: normalized,
+      relativePath,
       existed: existing !== undefined,
       identity: existing ? identityOf(existing) : undefined,
     };
@@ -219,22 +230,14 @@ class LocalWorkspaceBoundary implements WorkspaceBoundary {
   private async resolveExisting(input: string): Promise<ResolvedWorkspacePath> {
     const normalized = normalizeRelativePath(input);
     assertAllowed(normalized);
-    const segments = normalized.split("/");
-    let cursor = this.root;
-    for (const segment of segments) {
-      cursor = path.join(cursor, segment);
-      const value = await safeLstat(cursor);
-      if (value.isSymbolicLink()) {
-        throw new WorkspaceError("invalid-path", "不允许操作符号链接。");
-      }
-    }
-    const canonical = await realpath(cursor).catch((error: unknown) => {
+    const requestedAbsolutePath = path.join(this.root, ...normalized.split("/"));
+    const canonical = await realpath(requestedAbsolutePath).catch((error: unknown) => {
       throw mapFileError(error, "无法解析目标路径。");
     });
-    if (!isWithinRoot(this.root, canonical)) {
-      throw new WorkspaceError("invalid-path", "目标路径超出授权工作目录。");
-    }
-    return { absolutePath: canonical, relativePath: normalized, existed: true };
+    assertWithinRoot(this.root, canonical, "目标路径超出授权工作目录。");
+    const relativePath = workspaceRelativePath(this.root, canonical);
+    assertAllowed(relativePath);
+    return { absolutePath: canonical, relativePath, existed: true };
   }
 
   private async commit(
@@ -315,6 +318,18 @@ function isWithinRoot(root: string, target: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+function assertWithinRoot(root: string, target: string, message: string): void {
+  if (!isWithinRoot(root, target)) {
+    throw new WorkspaceError("invalid-path", message);
+  }
+}
+
+function workspaceRelativePath(root: string, target: string): string {
+  const relative = path.relative(root, target);
+  if (relative === "") return ".";
+  return relative.split(path.sep).join("/");
+}
+
 function identityOf(value: {
   readonly dev: number;
   readonly ino: number;
@@ -346,13 +361,17 @@ async function safeLstat(target: string) {
   }
 }
 
-function mapFileError(error: unknown, fallback: string): WorkspaceError {
+function mapFileError(
+  error: unknown,
+  fallback: string,
+  fallbackKind: WorkspaceError["kind"] = "execution-failed",
+): WorkspaceError {
   if (error instanceof WorkspaceError) return error;
   if (isNodeError(error, "ENOENT")) return new WorkspaceError("not-found", "目标不存在。", error);
   if (isNodeError(error, "EACCES") || isNodeError(error, "EPERM")) {
     return new WorkspaceError("permission-denied", "没有权限访问目标。", error);
   }
-  return new WorkspaceError("execution-failed", fallback, error);
+  return new WorkspaceError(fallbackKind, fallback, error);
 }
 
 function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {

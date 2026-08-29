@@ -1,3 +1,5 @@
+import type { PermissionPrompt } from "@/core/permissions/approval";
+import type { PermissionResolutionStatus } from "@/core/tool-scheduler";
 import type {
   AssistantMessage,
   ModelToolCall,
@@ -53,6 +55,24 @@ export type AgentEvent =
       readonly callId: string;
       readonly name: string;
       readonly sequence: number;
+    }
+  | {
+      readonly type: "permission-requested";
+      readonly iteration: number;
+      readonly callId: string;
+      readonly name: string;
+      readonly sequence: number;
+      readonly prompt: PermissionPrompt;
+    }
+  | {
+      readonly type: "permission-resolved";
+      readonly iteration: number;
+      readonly callId: string;
+      readonly name: string;
+      readonly sequence: number;
+      readonly requestId: string;
+      readonly status: PermissionResolutionStatus;
+      readonly scope?: "once" | "session" | "permanent";
     }
   | {
       readonly type: "tool-result";

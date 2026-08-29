@@ -9,8 +9,13 @@ const PROTECTED_NAMES = new Set([
   "auth.json",
 ]);
 const PROTECTED_EXTENSIONS = new Set([".pem", ".key", ".p12", ".pfx"]);
+const PROTECTED_RELATIVE_PATHS = new Set([
+  ".orbitcode/permissions.yaml",
+  ".orbitcode/permissions.local.yaml",
+]);
 
 export function isProtectedPath(relativePath: string): boolean {
+  if (PROTECTED_RELATIVE_PATHS.has(relativePath)) return true;
   const segments = relativePath.split("/").filter(Boolean);
   return segments.some((segment) => isProtectedName(segment));
 }

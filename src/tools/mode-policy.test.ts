@@ -85,6 +85,14 @@ function fakeTool(
     description: "测试工具",
     inputSchema: objectSchema({ path: stringSchema({ minLength: 1 }) }),
     mutability,
+    permission: {
+      targetKind: "path",
+      resolve: (input) => ({
+        kind: "path",
+        requestedPath: input.path,
+        resolution: "existing-file",
+      }),
+    },
     async execute() {
       onExecute();
       return successfulToolResult({ ok: true });

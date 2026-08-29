@@ -11,10 +11,12 @@ import {
   type ModelStreamEvent,
 } from "@/models/provider";
 import { createModeToolPolicy } from "@/tools/mode-policy";
+import { PermissionGateway } from "@/tools/permission-gateway";
 import { defineTool, successfulToolResult, ToolRegistry } from "@/tools/registry";
 import { objectSchema, stringSchema } from "@/tools/schema";
 import type { WorkspaceBoundary } from "@/tools/types";
 import { createWorkspaceBoundary } from "@/tools/workspace";
+import { PermissionSessionManager } from "@/web/permission-session-manager";
 
 class ScriptedProvider implements ChatProvider {
   readonly requests: Array<{
@@ -218,7 +220,7 @@ test("连续工具迭代把原调用和有序结果写回模型", async () => {
   assert.deepEqual(requestMessages.at(-2), {
     role: "assistant",
     content: "先读取。",
-    toolCalls: [call("read", "read_file", "a")],
+    toolCalls: [{ id: "read", name: "read_file", argumentsJson: "{}" }],
   });
   const toolMessage = requestMessages.at(-1);
   assert.equal(toolMessage?.role, "tool");
@@ -231,6 +233,91 @@ test("连续工具迭代把原调用和有序结果写回模型", async () => {
     1,
   );
   assert.equal(stopReason(result), "final-response");
+});
+
+test("用户拒绝权限后 Agent Loop 收到结构化工具结果并继续模型迭代", async () => {
+  const provider = new ScriptedProvider([
+    [
+      { type: "tool-call", call: call("write-denied", "write_file", "package.json") },
+      { type: "done", finishReason: "tool-call" },
+    ],
+    [
+      { type: "text-delta", text: "未修改文件，已改用说明方案。" },
+      { type: "done", finishReason: "stop" },
+    ],
+  ]);
+  let executions = 0;
+  const toolRegistry = registry(() => executions++);
+  const manager = new PermissionSessionManager();
+  const session = manager.createSession();
+  const turn = manager.beginTurn(session.id, {
+    workspace: { id: "test", name: "Test Workspace" },
+    providerId: "test-provider",
+  });
+  const permissionGateway = new PermissionGateway({
+    agentMode: "do",
+    permissionMode: "default",
+    workspace: requireWorkspace(),
+    broker: turn.broker,
+    loadRules: async () => [],
+  });
+  const agent = new AgentLoop(
+    provider,
+    (mode) => createModeToolPolicy(toolRegistry, mode),
+    requireWorkspace(),
+    {
+      maxIterations: 3,
+      promptEnvironment: {
+        workspace: { id: "test", name: "Test Workspace" },
+        platform: "darwin",
+        currentDate: "2026-08-28",
+        timeZone: "Asia/Shanghai",
+        pathSemantics: "workspace-relative-posix",
+      },
+      permissionGatewayForMode: () => permissionGateway,
+    },
+  );
+  const iterator = agent.streamTurn({
+    input: "尝试修改",
+    mode: "do",
+    modeTurn: 1,
+    signal: new AbortController().signal,
+  })[Symbol.asyncIterator]();
+  const observed: AgentEvent[] = [];
+  for (;;) {
+    const next = await iterator.next();
+    assert.equal(next.done, false);
+    if (!next.value) continue;
+    observed.push(next.value);
+    if (next.value.type === "permission-requested") {
+      manager.resolveDecision(session.id, next.value.prompt.requestId, "deny");
+      break;
+    }
+  }
+  for (;;) {
+    const next = await iterator.next();
+    if (next.done) break;
+    observed.push(next.value);
+  }
+
+  assert.equal(executions, 0);
+  assert.equal(observed.some((event) => event.type === "tool-started"), false);
+  assert.equal(
+    observed.some(
+      (event) =>
+        event.type === "tool-result" &&
+        !event.result.ok &&
+        event.result.error.kind === "user-denied",
+    ),
+    true,
+  );
+  assert.equal(observed.at(-1)?.type, "stopped");
+  assert.equal(provider.requests.length, 2);
+  assert.match(
+    provider.requests[1].messages.at(-1)?.content ?? "",
+    /user-denied/u,
+  );
+  manager.closeSession(session.id);
 });
 
 test("最后允许迭代仍请求工具时不执行并停止", async () => {
@@ -507,6 +594,7 @@ function registry(onWrite: () => void = () => undefined): ToolRegistry {
       description: "只读测试工具",
       inputSchema: objectSchema({ label: stringSchema({ minLength: 1 }) }),
       mutability: "read-only" as const,
+      permission: testPathPermission("label"),
       async execute(input) {
         return successfulToolResult({ label: input.label });
       },
@@ -520,12 +608,26 @@ function registry(onWrite: () => void = () => undefined): ToolRegistry {
       description: "写入测试工具",
       inputSchema: objectSchema({ label: stringSchema({ minLength: 1 }) }),
       mutability: "workspace-write",
+      permission: testPathPermission("label"),
       async execute(input) {
         onWrite();
         return successfulToolResult({ label: input.label }, "applied");
       },
     }),
   ]);
+}
+
+function testPathPermission(field: "label") {
+  return {
+    targetKind: "path" as const,
+    resolve(input: { readonly label: string }) {
+      return {
+        kind: "path" as const,
+        requestedPath: input[field],
+        resolution: "existing-file" as const,
+      };
+    },
+  };
 }
 
 function call(id: string, name: string, label: string) {
