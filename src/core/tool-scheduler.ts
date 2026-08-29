@@ -117,7 +117,10 @@ export async function* scheduleToolCalls(
     }
 
     let authorization: PermissionAuthorization | undefined;
-    if (options.permissionGateway) {
+    if (
+      options.permissionGateway &&
+      current.preparation.call.permissionTarget.kind !== "context"
+    ) {
       authorization = await options.permissionGateway.authorize(
         current.preparation.call,
         current.call.id,

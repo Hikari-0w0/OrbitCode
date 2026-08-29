@@ -79,6 +79,8 @@ export class InMemoryConversationSession implements ConversationSession {
           );
         }
 
+        if (event.type === "reasoning-delta") continue;
+
         if (event.type === "done") {
           if (event.finishReason !== "stop") {
             throw new ProviderError("protocol", "纯文本会话收到了工具完成响应。");

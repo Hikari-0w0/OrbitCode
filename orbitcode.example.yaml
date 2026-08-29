@@ -4,3 +4,12 @@ providers:
     model: example-model
     base_url: https://example.invalid/v1
     api_key: MODEL_API_KEY
+    context:
+      # 请按实际模型填写上下文窗口；128000 只是示例值。
+      window_tokens: 128000
+      single_tool_result_tokens: 8000
+      tool_result_group_tokens: 12000
+      recent_messages_tokens: 10000
+      automatic_reserve_tokens: 13000
+      manual_reserve_tokens: 3000
+      preview_chars: 2000

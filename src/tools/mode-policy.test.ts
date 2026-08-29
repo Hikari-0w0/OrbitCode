@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createModeToolPolicy } from "@/tools/mode-policy";
+import { createReadContextTool } from "@/tools/read-context";
 import { defineTool, successfulToolResult, ToolRegistry } from "@/tools/registry";
 import { objectSchema, stringSchema } from "@/tools/schema";
 import { createWorkspaceBoundary } from "@/tools/workspace";
@@ -10,6 +11,31 @@ import type { WorkspaceBoundary } from "@/tools/types";
 let workspace: WorkspaceBoundary | undefined;
 test.before(async () => {
   workspace = await createWorkspaceBoundary(process.cwd());
+});
+
+test("绑定 Context Session 后 Plan 与 Do 都公开 read_context", () => {
+  const registry = new ToolRegistry([
+    fakeTool("read_file", "read-only"),
+    fakeTool("find_files", "read-only"),
+    fakeTool("search_code", "read-only"),
+    fakeTool("write_file", "workspace-write"),
+    createReadContextTool(async () => ({
+      content: "chunk",
+      offset: 0,
+      nextOffset: 5,
+      totalCharacters: 5,
+      hasMore: false,
+    })),
+  ]);
+  assert.deepEqual(
+    createModeToolPolicy(registry, "plan").definitions().map(
+      (definition) => definition.function.name,
+    ),
+    ["read_file", "find_files", "search_code", "read_context"],
+  );
+  assert.ok(createModeToolPolicy(registry, "do").definitions().some(
+    (definition) => definition.function.name === "read_context",
+  ));
 });
 
 test("Plan 只公开三个只读工具，Do 恢复全部工具", () => {

@@ -1,5 +1,6 @@
 import type {
   VisibleMessage,
+  VisibleMessagePart,
   VisiblePermissionRequest,
   VisibleToolExecution,
 } from "@/components/message-list";
@@ -59,7 +60,12 @@ export type ChatSessionAction =
       readonly assistantId: string;
       readonly userMessage: PlainConversationMessage;
     }
-  | { readonly type: "text-delta"; readonly assistantId: string; readonly text: string }
+  | {
+      readonly type: "text-delta";
+      readonly assistantId: string;
+      readonly iteration: number;
+      readonly text: string;
+    }
   | { readonly type: "progress"; readonly assistantId: string; readonly event: ProgressEvent }
   | { readonly type: "tool-call"; readonly assistantId: string; readonly event: ToolCallEvent }
   | { readonly type: "tool-started"; readonly assistantId: string; readonly event: ToolStartedEvent }
@@ -181,6 +187,7 @@ export function chatSessionReducer(
           role: "assistant",
           content: "",
           state: "streaming",
+          parts: [],
           toolExecutions: [],
         },
       ],
@@ -190,6 +197,11 @@ export function chatSessionReducer(
     return updateMessage(state, action.assistantId, (message) => ({
       ...message,
       content: `${message.content}${action.text}`,
+      parts: appendTextPart(
+        message.parts ?? [],
+        action.iteration,
+        action.text,
+      ),
     }));
   }
   if (action.type === "progress") {
@@ -209,6 +221,11 @@ export function chatSessionReducer(
         argumentsJson: action.event.call.argumentsJson,
         state: "queued",
       }),
+      parts: appendToolPart(
+        message.parts ?? [],
+        action.event.iteration,
+        action.event.call.id,
+      ),
     }));
   }
   if (action.type === "tool-started") {
@@ -277,7 +294,9 @@ export function chatSessionReducer(
   if (action.type === "request-completed") {
     const next = updateMessage(state, action.assistantId, (message) => ({
       ...message,
-      content: action.finalMessage.content,
+      content: message.content.length > 0
+        ? message.content
+        : action.finalMessage.content,
       state: "complete",
       stopReason: "final-response",
       progress: undefined,
@@ -325,6 +344,37 @@ export function chatSessionReducer(
       : state;
   }
   return { ...state, requestState: "idle" };
+}
+
+function appendTextPart(
+  parts: readonly VisibleMessagePart[],
+  iteration: number,
+  text: string,
+): readonly VisibleMessagePart[] {
+  const last = parts.at(-1);
+  if (last?.type === "text" && last.iteration === iteration) {
+    return [
+      ...parts.slice(0, -1),
+      { ...last, content: `${last.content}${text}` },
+    ];
+  }
+  return [...parts, { type: "text", iteration, content: text }];
+}
+
+function appendToolPart(
+  parts: readonly VisibleMessagePart[],
+  iteration: number,
+  callId: string,
+): readonly VisibleMessagePart[] {
+  if (
+    parts.some(
+      (part) =>
+        part.type === "tool" &&
+        part.iteration === iteration &&
+        part.callId === callId,
+    )
+  ) return parts;
+  return [...parts, { type: "tool", iteration, callId }];
 }
 
 function resetConversation(
@@ -506,6 +556,9 @@ function stopReasonLabel(reason: StoppedEvent["reason"]): string {
   if (reason === "max-iterations") return "已达到最大迭代次数";
   if (reason === "cancelled") return "用户已取消运行";
   if (reason === "repeated-unknown-tool") return "模型连续请求未知工具";
+  if (reason === "context-error") return "上下文压缩失败";
+  if (reason === "context-capacity") return "上下文容量不足";
+  if (reason === "context-circuit-open") return "上下文自动压缩已熔断";
   if (reason === "model-error") return "模型响应流发生错误";
   return "Agent 内部发生错误";
 }

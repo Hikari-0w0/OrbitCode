@@ -1,5 +1,10 @@
 import type { ModelToolDefinition } from "@/tools/types";
 
+export type ModelThinkingConfig = {
+  readonly enabled: boolean;
+  readonly budgetTokens?: number;
+};
+
 export type PlainConversationMessage =
   | { readonly role: "user"; readonly content: string }
   | { readonly role: "assistant"; readonly content: string };
@@ -21,6 +26,7 @@ export type ConversationMessage =
   | {
       readonly role: "assistant";
       readonly content: string | null;
+      readonly reasoningContent?: string;
       readonly toolCalls: readonly ModelToolCall[];
     }
   | {
@@ -47,6 +53,7 @@ export type ModelTokenUsage = {
 };
 
 export type ModelStreamEvent =
+  | { readonly type: "reasoning-delta"; readonly text: string }
   | { readonly type: "text-delta"; readonly text: string }
   | { readonly type: "tool-call"; readonly call: ModelToolCall }
   | { readonly type: "usage"; readonly usage: ModelTokenUsage }

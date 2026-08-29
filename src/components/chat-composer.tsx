@@ -3,7 +3,7 @@
 import type { KeyboardEvent } from "react";
 
 import {
-  MAX_WEB_CHAT_MESSAGE_LENGTH,
+  MAX_WEB_CHAT_INPUT_LENGTH,
   type WebChatRequest,
 } from "@/web/chat-contract";
 
@@ -53,7 +53,7 @@ export function ChatComposer({
           id="chat-input"
           value={value}
           rows={3}
-          maxLength={MAX_WEB_CHAT_MESSAGE_LENGTH}
+          maxLength={MAX_WEB_CHAT_INPUT_LENGTH}
           placeholder={
             disabled
               ? "模型配置不可用"

@@ -35,6 +35,9 @@ export async function resolvePermissionSubject(
       canonicalCwd: cwd.relativePath,
     };
   }
+  if (target.kind === "context") {
+    throw new WorkspaceError("invalid-path", "内部上下文引用不能作为 Workspace 权限目标。");
+  }
 
   const resolved = await resolvePathTarget(target, workspace);
   return {

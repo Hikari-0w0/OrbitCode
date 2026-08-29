@@ -87,6 +87,102 @@ test("发送正确请求并按网络分块实时产出文本", async () => {
   }
 });
 
+test("显式关闭兼容接口的思考模式", async () => {
+  const server = await startOpenAIMockServer(() => ({ chunks: [{ data: DONE_EVENT }] }));
+  try {
+    const provider = new OpenAICompatibleProvider({
+      model: "test-model",
+      baseUrl: server.baseUrl,
+      apiKey: "test-secret",
+      thinking: { enabled: false },
+    });
+
+    await collect(provider.stream([{ role: "user", content: "快速处理" }], {
+      signal: new AbortController().signal,
+      toolChoice: "none",
+    }));
+
+    const body = server.requests[0]?.body as Record<string, unknown>;
+    assert.equal(body.enable_thinking, false);
+  } finally {
+    await server.close();
+  }
+});
+
+test("开启思考时发送有界推理预算", async () => {
+  const server = await startOpenAIMockServer(() => ({ chunks: [{ data: DONE_EVENT }] }));
+  try {
+    const provider = new OpenAICompatibleProvider({
+      model: "test-model",
+      baseUrl: server.baseUrl,
+      apiKey: "test-secret",
+      thinking: { enabled: true, budgetTokens: 1024 },
+    });
+
+    await collect(provider.stream([{ role: "user", content: "分析" }], {
+      signal: new AbortController().signal,
+      toolChoice: "none",
+    }));
+
+    const body = server.requests[0]?.body as Record<string, unknown>;
+    assert.equal(body.enable_thinking, true);
+    assert.equal(body.thinking_budget, 1024);
+  } finally {
+    await server.close();
+  }
+});
+
+test("DeepSeek 工具轮次的推理内容可内部接收并原样回传", async () => {
+  const server = await startOpenAIMockServer(() => ({
+    chunks: [{
+      data:
+        'data: {"choices":[{"delta":{"reasoning_content":"继续核实"}}]}\n\n' +
+        textDelta("完成") +
+        DONE_EVENT,
+    }],
+  }));
+  try {
+    const provider = new OpenAICompatibleProvider({
+      model: "test-model",
+      baseUrl: server.baseUrl,
+      apiKey: "test-secret",
+    });
+    const result = await collect(provider.stream([
+      {
+        role: "assistant",
+        content: "准备读取",
+        reasoningContent: "需要先核实文件。",
+        toolCalls: [
+          { id: "call-1", name: "read_file", argumentsJson: '{"path":"a"}' },
+        ],
+      },
+      { role: "tool", toolCallId: "call-1", content: '{"ok":true}' },
+    ], {
+      signal: new AbortController().signal,
+      toolChoice: "none",
+    }));
+
+    assert.deepEqual(result, [
+      { type: "reasoning-delta", text: "继续核实" },
+      { type: "text-delta", text: "完成" },
+      { type: "done", finishReason: "stop" },
+    ]);
+    const body = server.requests[0]?.body as { messages: unknown[] };
+    assert.deepEqual(body.messages[0], {
+      role: "assistant",
+      content: "准备读取",
+      reasoning_content: "需要先核实文件。",
+      tool_calls: [{
+        id: "call-1",
+        type: "function",
+        function: { name: "read_file", arguments: '{"path":"a"}' },
+      }],
+    });
+  } finally {
+    await server.close();
+  }
+});
+
 test("忽略合法元数据并支持一个块中的多个事件", async () => {
   const server = await startOpenAIMockServer(() => ({
     chunks: [
@@ -948,6 +1044,7 @@ test("将 SiliconFlow 每个增量携带的累计 Token 用量归一为最终值
         }],
       })),
       [
+        { type: "reasoning-delta", text: "分析" },
         {
           type: "tool-call",
           call: {

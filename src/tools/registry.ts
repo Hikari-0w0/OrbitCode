@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import type { PermissionTargetKind } from "@/core/permissions/types";
 import {
   emptyResultMeta,
   toolFailure,
@@ -76,12 +77,15 @@ export class ToolRegistry {
     }));
   }
 
-  permissionTargets(): ReadonlyMap<string, ToolPermissionTarget["kind"]> {
+  permissionTargets(): ReadonlyMap<string, PermissionTargetKind> {
     return new Map(
-      [...this.tools.values()].map((tool) => [
-        tool.name,
-        tool.permissionTargetKind,
-      ]),
+      [...this.tools.values()]
+        .filter(
+          (tool): tool is RegisteredTool & {
+            readonly permissionTargetKind: PermissionTargetKind;
+          } => tool.permissionTargetKind !== "context",
+        )
+        .map((tool) => [tool.name, tool.permissionTargetKind]),
     );
   }
 

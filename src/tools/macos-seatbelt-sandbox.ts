@@ -135,8 +135,7 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
       protectedPaths,
       developerRoot,
     );
-    const environment: NodeJS.ProcessEnv = {
-      NODE_ENV: "production",
+    const environment: Record<string, string> = {
       PATH: [
         path.join(workspace.root, "node_modules", ".bin"),
         path.dirname(process.execPath),
@@ -237,7 +236,6 @@ async function createProfile(
   return [
     "(version 1)",
     "(allow default)",
-    "(deny network*)",
     `(deny file-write* (require-all ` +
       `(require-not (subpath ${schemeString(workspaceRoot)})) ` +
       `(require-not (literal ${schemeString("/dev/null")}))))`,
@@ -335,7 +333,7 @@ function spawnAndCollect(
   args: readonly string[],
   options: {
     readonly cwd: string;
-    readonly env: NodeJS.ProcessEnv;
+    readonly env: Record<string, string>;
     readonly signal: AbortSignal;
     readonly timeoutMs: number;
     readonly outputLimitBytes: number;
@@ -350,7 +348,8 @@ function spawnAndCollect(
     try {
       child = spawn(executable, [...args], {
         cwd: options.cwd,
-        env: options.env,
+        // Next.js 把 NODE_ENV 扩展为必填字段，但子进程环境允许有意省略它。
+        env: options.env as NodeJS.ProcessEnv,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
       });

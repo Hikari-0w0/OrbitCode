@@ -25,6 +25,15 @@ providers:
     model: your-model
     base_url: https://api.openai.com/v1
     api_key: MODEL_API_KEY
+    context:
+      # 必须按模型实际能力填写；128000 只是示例。
+      window_tokens: 128000
+      single_tool_result_tokens: 8000
+      tool_result_group_tokens: 12000
+      recent_messages_tokens: 10000
+      automatic_reserve_tokens: 13000
+      manual_reserve_tokens: 3000
+      preview_chars: 2000
 ```
 
 `.env` 和 `orbitcode.yaml` 均不会被 Git 跟踪。OrbitCode 启动时自动加载当前工作目录的 `.env`，但不会覆盖进程中已经导出的同名变量。
@@ -82,10 +91,12 @@ workspaces:
 - ReAct 风格的多迭代 Agent Loop，以及一次响应中的多个工具调用
 - 读取、写入和唯一原文替换文件
 - 按受限 Glob 查找文件，以及按字面量搜索代码
-- 在 macOS Seatbelt 严格沙箱中执行命令
+- 在 macOS Seatbelt 文件沙箱中执行命令，并支持联网安装项目依赖
 - 只读工具分批并发，写文件、修改文件和命令工具按原调用边界串行执行
 - 展示模型文本、迭代进度、工具排队/执行/结果、累计 Token 用量与最终停止原因
-- 当前页面生命周期内的多轮上下文
+- 当前页面生命周期内由服务端 Context Session 管理的多轮上下文
+- 大工具结果本地卸载、`read_context` 按引用重读与结构化历史摘要
+- 手动上下文压缩、压缩前后 Token 估算、失败状态与三次失败熔断
 - 多 Provider 选择（切换时清空当前历史）
 - 多个服务端授权的本地 Workspace 选择（切换时隔离并重置会话）
 - 停止生成、失败后继续和清空会话
@@ -96,7 +107,20 @@ workspaces:
 
 刷新页面会清空对话历史。本阶段不包含数据库或会话持久化。
 
-每次用户请求会启动一个独立 Agent Loop。每轮先调用模型，若模型请求工具，OrbitCode 会在服务端执行并把 assistant `tool_calls` 与对应 tool 结果写回内部 transcript，再进入下一轮模型请求。只有模型生成非空最终文本时，本轮用户消息和最终助手文本才会加入公开多轮历史；取消、错误和安全停止轮次不会污染下一次请求。
+每个页面会创建独立的服务端 Context Session。浏览器只提交本轮用户输入和不透明会话 ID，不提交或决定模型历史；服务端保存完整的用户、助手、工具调用和工具结果 transcript。每轮先调用模型，若模型请求工具，OrbitCode 会执行并把 assistant `tool_calls` 与对应 tool 结果写回内部 transcript，再进入下一轮模型请求。模型生成最终文本以及用户取消、错误、达到最大迭代次数等中断情况都会提交本轮上下文；中断轮次会保留已有的助手文本和工具记录，并写入结构化中断标记，供下一轮模型理解此前发生的情况。
+
+### 上下文管理
+
+上下文使用“轻量预防 + 重量兜底”两层策略，并优先压缩体积最大的工具结果：
+
+- 每次普通模型调用前，超过 `single_tool_result_tokens` 的单个工具结果会保存到仓库外的 `~/.orbitcode/context-v1`。模型历史只保留有界预览、原始体积和 `context://v1/...` 引用；完整内容不会进入 Git。
+- 同一次工具调用批次超过 `tool_result_group_tokens` 时，结果按估算体积从大到小继续卸载。模型可在 Plan 或 Do 模式使用只读 `read_context` 分块取回当前会话的引用；它不能读取文件路径、其他会话引用，也不改变 Workspace 权限。
+- 整体历史达到 `window_tokens - automatic_reserve_tokens` 时，OrbitCode 使用同一 OpenAI 兼容 Provider 生成固定七节摘要。摘要调用由核心强制使用 `toolChoice: none` 且不提供工具；较早用户消息保持原文，近期约 `recent_messages_tokens` 且至少 5 条原始消息逐字保留。
+- 自动压缩默认预留 13K Token；页面“压缩上下文”使用默认 3K 余量以获得更高压缩率。成功后页面显示压缩前后估算及估算来源；失败显示安全原因。摘要连续失败三次会停止自动重试，用户仍可手动压缩，成功后解除熔断。
+
+`window_tokens` 是每个 Provider 的必填配置，OrbitCode 不会根据模型名称猜测。其他上下文字段可省略并使用 `orbitcode.example.yaml` 中的默认值；所有阈值均按 Provider 独立解析。Token 估算不使用精确 tokenizer：有普通模型 API usage 时，以最近一次 prompt usage 为锚点，只近似计算后续增量；没有 usage 时标注为字符近似。
+
+重量压缩后的摘要只恢复任务脉络，不被视为代码事实。模型需要具体文件内容时必须重新调用 `read_file`，需要已卸载工具输出时必须调用 `read_context`，不能从摘要猜测实现细节。切换 Provider、切换 Workspace、清空或关闭页面会关闭 Context Session，并使旧引用失效。
 
 Agent Loop 默认最多执行 8 次模型迭代，硬上限为 32。可在服务端环境中覆盖默认值：
 
@@ -104,7 +128,7 @@ Agent Loop 默认最多执行 8 次模型迭代，硬上限为 32。可在服务
 ORBITCODE_MAX_AGENT_ITERATIONS=8
 ```
 
-停止原因分为六类：模型生成最终回复、达到最大迭代次数、用户取消、连续两轮只调用未知工具、模型响应流错误和 Agent 内部错误。`stopped` 是事件流中的唯一终止事件，页面会保留未完成轮次的部分文本与工具记录供检查。
+停止原因还包括上下文压缩失败、上下文容量不足和自动压缩熔断。`stopped` 始终是事件流中的唯一终止事件，页面会保留未完成轮次的部分文本与工具记录供检查。
 
 OpenAI 兼容服务若报告 Token Usage，页面会显示本次及累计的输入、输出和总 Token；若任一迭代未报告 Usage，累计值会明确显示为“模型未报告”，不会用估算值冒充精确值。
 
@@ -116,7 +140,7 @@ Plan 模式中的需求澄清使用普通多轮对话。最新一条成功 Plan 
 
 只有严格独立的 `/plan` 和 `/do` 会切换模式，`/plan 请分析这个任务` 会作为普通用户消息发送。切换 Provider、清空会话或刷新页面都会恢复 Do Mode。
 
-文件和命令工具只接受当前选定 Workspace 内的相对路径，拒绝路径穿越、符号链接和敏感配置文件。`run_command` 还会过滤环境变量并在 OS 级沙箱内禁用网络和 Workspace 外的用户数据访问；当前平台无法通过沙箱能力探测时，命令工具直接返回不可用，不会降级为普通子进程。
+文件和命令工具只接受当前选定 Workspace 内的相对路径，拒绝路径穿越、符号链接和敏感配置文件。`run_command` 可以联网，因此 Agent 能直接执行 `npm install` 等开发命令；命令仍需通过当前权限模式或人工确认，并会过滤服务端环境变量、阻止访问 Workspace 外的用户数据。当前平台无法通过沙箱能力探测时，命令工具直接返回不可用，不会降级为普通子进程。
 
 ### 五层工具权限
 
@@ -156,7 +180,7 @@ cp orbitcode.permissions.example.yaml .orbitcode/permissions.yaml
 
 停止生成、清空、切换 Workspace 或 Provider、关闭权限会话，以及等待超时都会终止尚未完成的授权；迟到或跨会话决定无效。项目级与本地级权限文件本身受文件工具和命令沙箱保护。本仓库已忽略自身的 `.orbitcode/permissions.local.yaml`；在其他 Workspace 使用本地规则时，需要由该项目自行加入忽略规则，OrbitCode 不会修改外部项目的 `.gitignore`。
 
-本阶段不实现网络请求权限规则、资源配额、审计日志、CLI 工具权限或公网身份认证。Web API 仍只适合本机使用，不要把开发服务器绑定或暴露到不受信任的网络。
+本阶段不实现按域名细分的网络规则、资源配额、审计日志、CLI 工具权限或公网身份认证。联网能力跟随整个 `run_command` 的权限决定，不会单独弹出第二次网络授权。Web API 仍只适合本机使用，不要把开发服务器绑定或暴露到不受信任的网络。
 
 ## 可用命令
 
@@ -177,6 +201,6 @@ npm run check     # 依次执行 lint、类型检查和生产构建
 
 ## 后续阶段
 
-- 网络请求权限、资源配额与审计日志
-- 上下文压缩与长期会话持久化
+- 独立 HTTP 工具、按域名网络规则、资源配额与审计日志
+- 跨进程的长期会话持久化
 - 将入口无关的 Agent 核心接入 CLI

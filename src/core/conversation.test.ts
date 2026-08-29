@@ -56,6 +56,7 @@ test("完成两轮后按顺序提交完整历史", async () => {
   const provider = new ScriptedProvider(
     () =>
       events(
+        { type: "reasoning-delta", text: "内部推理" },
         { type: "text-delta", text: "你" },
         { type: "text-delta", text: "好" },
         { type: "done", finishReason: "stop" },

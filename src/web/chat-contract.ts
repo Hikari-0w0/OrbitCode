@@ -11,8 +11,12 @@ import type {
 import type { PermissionMode } from "@/core/permissions/types";
 import { MAX_MODE_TURN } from "@/core/system-prompt/session-instructions";
 import type {
+  CompressionReport,
+  ContextFailure,
+  TokenEstimate,
+} from "@/core/context/types";
+import type {
   ModelToolCall,
-  PlainConversationMessage,
   PromptCacheUsage,
 } from "@/models/provider";
 import { parseServerSentEvents, SseError } from "@/models/sse";
@@ -27,22 +31,36 @@ import type {
 } from "@/tools/types";
 
 export const MAX_WEB_CHAT_BODY_BYTES = 256 * 1024;
-export const MAX_WEB_CHAT_MESSAGES = 50;
-export const MAX_WEB_CHAT_MESSAGE_LENGTH = 20_000;
+export const MAX_WEB_CHAT_INPUT_LENGTH = 20_000;
 export const MAX_WEB_WORKSPACES = 32;
 export const MAX_WEB_WORKSPACE_ID_LENGTH = 64;
 export const MAX_WEB_WORKSPACE_NAME_LENGTH = 80;
 export const MAX_PERMISSION_SESSION_ID_LENGTH = 128;
 export const MAX_PERMISSION_REQUEST_ID_LENGTH = 128;
+export const MAX_CONTEXT_SESSION_ID_LENGTH = 128;
 
 export type WebChatRequest = {
   readonly provider: string;
   readonly workspaceId: string;
   readonly permissionSessionId: string;
+  readonly contextSessionId: string;
   readonly mode: AgentMode;
   readonly modeTurn: number;
-  readonly messages: readonly PlainConversationMessage[];
+  readonly input: string;
 };
+
+export type ContextSessionCreateRequest = {
+  readonly provider: string;
+  readonly workspaceId: string;
+};
+
+export type ContextSessionResponse = {
+  readonly sessionId: string;
+  readonly provider: string;
+  readonly workspaceId: string;
+};
+
+export type ContextCompressionResponse = CompressionReport;
 
 export type PermissionSessionResponse = {
   readonly sessionId: string;
@@ -94,6 +112,8 @@ export type WebApiError = {
     | "workspace-unavailable"
     | "permission-session"
     | "permission-request"
+    | "context-session"
+    | "context-compression"
     | "invalid-request"
     | "forbidden";
 };
@@ -112,9 +132,10 @@ export function parseWebChatRequest(value: unknown): WebChatRequest {
       "provider",
       "workspaceId",
       "permissionSessionId",
+      "contextSessionId",
       "mode",
       "modeTurn",
-      "messages",
+      "input",
     ])
   ) {
     throw new WebChatContractError("对话请求格式无效。");
@@ -136,6 +157,9 @@ export function parseWebChatRequest(value: unknown): WebChatRequest {
   if (!isSafePermissionId(value.permissionSessionId, MAX_PERMISSION_SESSION_ID_LENGTH)) {
     throw new WebChatContractError("权限会话 ID 无效。");
   }
+  if (!isSafePermissionId(value.contextSessionId, MAX_CONTEXT_SESSION_ID_LENGTH)) {
+    throw new WebChatContractError("上下文会话 ID 无效。");
+  }
   if (!isAgentMode(value.mode)) {
     throw new WebChatContractError("Agent 模式无效。");
   }
@@ -143,36 +167,124 @@ export function parseWebChatRequest(value: unknown): WebChatRequest {
     throw new WebChatContractError("模式连续轮次无效。");
   }
   if (
-    !Array.isArray(value.messages) ||
-    value.messages.length === 0 ||
-    value.messages.length > MAX_WEB_CHAT_MESSAGES
+    typeof value.input !== "string" ||
+    value.input.trim().length === 0 ||
+    value.input.length > MAX_WEB_CHAT_INPUT_LENGTH
   ) {
     throw new WebChatContractError(
-      `对话消息数量必须在 1 到 ${MAX_WEB_CHAT_MESSAGES} 之间。`,
+      `用户输入必须是长度不超过 ${MAX_WEB_CHAT_INPUT_LENGTH} 的非空字符串。`,
     );
-  }
-
-  const messages = value.messages.map((message, index) =>
-    parseMessage(message, index),
-  );
-  for (const [index, message] of messages.entries()) {
-    const expectedRole = index % 2 === 0 ? "user" : "assistant";
-    if (message.role !== expectedRole) {
-      throw new WebChatContractError("对话消息角色顺序无效。");
-    }
-  }
-  if (messages.at(-1)?.role !== "user") {
-    throw new WebChatContractError("对话请求必须以用户消息结束。");
   }
 
   return {
     provider: value.provider.trim(),
     workspaceId: value.workspaceId,
     permissionSessionId: value.permissionSessionId,
+    contextSessionId: value.contextSessionId,
     mode: value.mode,
     modeTurn: value.modeTurn,
-    messages,
+    input: value.input,
   };
+}
+
+export function parseContextSessionCreateRequest(
+  value: unknown,
+): ContextSessionCreateRequest {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, ["provider", "workspaceId"]) ||
+    typeof value.provider !== "string" ||
+    value.provider.trim().length === 0 ||
+    value.provider.length > 128 ||
+    typeof value.workspaceId !== "string" ||
+    value.workspaceId.length === 0 ||
+    value.workspaceId.length > MAX_WEB_WORKSPACE_ID_LENGTH ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value.workspaceId)
+  ) {
+    throw new WebChatContractError("上下文会话创建请求无效。");
+  }
+  return { provider: value.provider.trim(), workspaceId: value.workspaceId };
+}
+
+export function parseContextSessionResponse(
+  value: unknown,
+): ContextSessionResponse {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, ["sessionId", "provider", "workspaceId"]) ||
+    !isSafePermissionId(value.sessionId, MAX_CONTEXT_SESSION_ID_LENGTH) ||
+    typeof value.provider !== "string" ||
+    value.provider.length === 0 ||
+    value.provider.length > 128 ||
+    typeof value.workspaceId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value.workspaceId)
+  ) {
+    throw new WebChatContractError("服务端返回了无效的上下文会话。");
+  }
+  return {
+    sessionId: value.sessionId,
+    provider: value.provider,
+    workspaceId: value.workspaceId,
+  };
+}
+
+export function parseContextCompressionResponse(
+  value: unknown,
+): ContextCompressionResponse {
+  if (!isRecord(value) || value.trigger !== "manual") {
+    throw new WebChatContractError("服务端返回了无效的上下文压缩结果。");
+  }
+  const before = parseTokenEstimate(value.before);
+  if (
+    value.status === "succeeded" &&
+    hasExactFields(value, ["status", "trigger", "before", "after"])
+  ) {
+    return {
+      status: "succeeded",
+      trigger: "manual",
+      before,
+      after: parseTokenEstimate(value.after),
+    };
+  }
+  if (
+    value.status === "failed" &&
+    hasExactFields(value, [
+      "status",
+      "trigger",
+      "before",
+      "failure",
+      "consecutiveSummaryFailures",
+    ]) &&
+    isNonNegativeInteger(value.consecutiveSummaryFailures, 2)
+  ) {
+    return {
+      status: "failed",
+      trigger: "manual",
+      before,
+      failure: parseContextFailure(value.failure),
+      consecutiveSummaryFailures: value.consecutiveSummaryFailures,
+    };
+  }
+  if (
+    value.status === "circuit-open" &&
+    hasExactFields(value, [
+      "status",
+      "trigger",
+      "before",
+      "failure",
+      "consecutiveSummaryFailures",
+    ]) &&
+    value.consecutiveSummaryFailures === 3
+  ) {
+    return {
+      status: "circuit-open",
+      trigger: "manual",
+      before,
+      failure: parseContextFailure(value.failure),
+      consecutiveSummaryFailures: 3,
+    };
+  }
+  throw new WebChatContractError("服务端返回了无效的上下文压缩结果。");
 }
 
 export function parsePermissionSessionResponse(
@@ -324,6 +436,8 @@ export function parseWebApiError(value: unknown): WebApiError | undefined {
       value.code === "workspace-unavailable" ||
       value.code === "permission-session" ||
       value.code === "permission-request" ||
+      value.code === "context-session" ||
+      value.code === "context-compression" ||
       value.code === "invalid-request" ||
       value.code === "forbidden")
   ) {
@@ -369,27 +483,6 @@ export async function* readWebStream(
   } finally {
     reader.releaseLock();
   }
-}
-
-function parseMessage(value: unknown, index: number): PlainConversationMessage {
-  if (!isRecord(value) || !hasExactFields(value, ["role", "content"])) {
-    throw new WebChatContractError(`messages[${index}] 格式无效。`);
-  }
-  if (value.role !== "user" && value.role !== "assistant") {
-    throw new WebChatContractError(`messages[${index}].role 无效。`);
-  }
-  if (
-    typeof value.content !== "string" ||
-    (value.role === "user" && value.content.trim().length === 0)
-  ) {
-    throw new WebChatContractError(`messages[${index}].content 不能为空。`);
-  }
-  if (value.content.length > MAX_WEB_CHAT_MESSAGE_LENGTH) {
-    throw new WebChatContractError(
-      `messages[${index}].content 超过 ${MAX_WEB_CHAT_MESSAGE_LENGTH} 个字符。`,
-    );
-  }
-  return { role: value.role, content: value.content };
 }
 
 function parseWebChatEvent(value: unknown): WebChatEvent {
@@ -713,6 +806,60 @@ function parseModelToolCall(value: unknown): ModelToolCall {
   return { id: value.id, name: value.name, argumentsJson: value.argumentsJson };
 }
 
+function parseTokenEstimate(value: unknown): TokenEstimate {
+  if (
+    !isRecord(value) ||
+    typeof value.tokens !== "number" ||
+    !Number.isSafeInteger(value.tokens) ||
+    value.tokens < 0
+  ) {
+    throw new WebChatContractError("服务端返回了无效的 Token 估算。");
+  }
+  if (
+    value.source === "approximation" &&
+    hasExactFields(value, ["source", "tokens"])
+  ) {
+    return { source: "approximation", tokens: value.tokens };
+  }
+  if (
+    value.source === "usage-anchor" &&
+    hasExactFields(value, [
+      "source",
+      "tokens",
+      "anchorPromptTokens",
+      "estimatedDeltaTokens",
+    ]) &&
+    isNonNegativeInteger(value.anchorPromptTokens) &&
+    typeof value.estimatedDeltaTokens === "number" &&
+    Number.isSafeInteger(value.estimatedDeltaTokens)
+  ) {
+    return {
+      source: "usage-anchor",
+      tokens: value.tokens,
+      anchorPromptTokens: value.anchorPromptTokens,
+      estimatedDeltaTokens: value.estimatedDeltaTokens,
+    };
+  }
+  throw new WebChatContractError("服务端返回了无效的 Token 估算。");
+}
+
+function parseContextFailure(value: unknown): ContextFailure {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, ["kind", "message"]) ||
+    !isContextFailureKind(value.kind) ||
+    typeof value.message !== "string" ||
+    value.message.length === 0 ||
+    value.message.length > 1_000
+  ) {
+    throw new WebChatContractError("服务端返回了无效的上下文失败信息。");
+  }
+  return {
+    kind: value.kind,
+    message: value.message,
+  };
+}
+
 function parseTokenUsage(value: unknown): TokenUsage {
   if (!isRecord(value) || typeof value.availability !== "string") {
     throw invalidEvent();
@@ -918,9 +1065,28 @@ const STOP_REASONS = new Set<AgentStopReason>([
   "max-iterations",
   "cancelled",
   "repeated-unknown-tool",
+  "context-error",
+  "context-capacity",
+  "context-circuit-open",
   "model-error",
   "agent-error",
 ]);
+
+const CONTEXT_FAILURE_KINDS: ReadonlySet<string> = new Set([
+  "summary-network",
+  "summary-protocol",
+  "summary-format",
+  "storage",
+  "capacity",
+  "concurrent",
+  "session",
+  "cancelled",
+]);
+
+function isContextFailureKind(value: unknown): value is ContextFailure["kind"] {
+  return typeof value === "string" &&
+    CONTEXT_FAILURE_KINDS.has(value);
+}
 
 function isAgentStopReason(value: unknown): value is AgentStopReason {
   return typeof value === "string" && STOP_REASONS.has(value as AgentStopReason);
@@ -940,6 +1106,7 @@ const TOOL_ERROR_KINDS = new Set<ToolErrorKind>([
   "permission-config",
   "user-denied",
   "approval-invalid",
+  "context-reference",
   "protected-path",
   "conflict",
   "unsupported-content",

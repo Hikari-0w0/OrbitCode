@@ -8,6 +8,7 @@ export function streamAgentResponse(options: {
   readonly input: string;
   readonly mode: AgentMode;
   readonly modeTurn: number;
+  readonly operationSignal?: AbortSignal;
   readonly onFinished?: () => void;
 }): Response {
   const abortController = new AbortController();
@@ -17,6 +18,7 @@ export function streamAgentResponse(options: {
     abortController.abort();
   };
   options.request.signal.addEventListener("abort", abort, { once: true });
+  options.operationSignal?.addEventListener("abort", abort, { once: true });
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -44,6 +46,7 @@ export function streamAgentResponse(options: {
         }
       } finally {
         options.request.signal.removeEventListener("abort", abort);
+        options.operationSignal?.removeEventListener("abort", abort);
         options.onFinished?.();
         if (!consumerClosed) controller.close();
       }
@@ -51,6 +54,7 @@ export function streamAgentResponse(options: {
     cancel() {
       abort();
       options.request.signal.removeEventListener("abort", abort);
+      options.operationSignal?.removeEventListener("abort", abort);
     },
   });
   return new Response(stream, {

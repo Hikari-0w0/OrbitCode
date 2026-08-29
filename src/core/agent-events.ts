@@ -14,6 +14,9 @@ export type AgentStopReason =
   | "max-iterations"
   | "cancelled"
   | "repeated-unknown-tool"
+  | "context-error"
+  | "context-capacity"
+  | "context-circuit-open"
   | "model-error"
   | "agent-error";
 

@@ -49,12 +49,25 @@ export type VisibleToolExecution = {
   readonly permission?: VisiblePermissionRequest;
 };
 
+export type VisibleMessagePart =
+  | {
+      readonly type: "text";
+      readonly iteration: number;
+      readonly content: string;
+    }
+  | {
+      readonly type: "tool";
+      readonly iteration: number;
+      readonly callId: string;
+    };
+
 export type VisibleMessage = {
   readonly id: string;
   readonly role: "user" | "assistant";
   readonly content: string;
   readonly state: "complete" | "streaming" | "cancelled" | "failed";
   readonly detail?: string;
+  readonly parts?: readonly VisibleMessagePart[];
   readonly toolExecutions?: readonly VisibleToolExecution[];
   readonly progress?: ProgressEvent;
   readonly usage?: TokenUsageEvent["usage"];
@@ -140,18 +153,27 @@ export function MessageList({
                     <MessageState state={message.state} />
                   </div>
                   {message.progress && <AgentProgress progress={message.progress} />}
-                  {message.toolExecutions && message.toolExecutions.length > 0 && (
-                    <div className="toolExecutionList" aria-label="工具执行记录">
-                      {message.toolExecutions.map((execution) => (
-                        <ToolExecutionCard
-                          key={`${execution.iteration}:${execution.callId}`}
-                          execution={execution}
-                          onPermissionDecision={onPermissionDecision}
-                        />
-                      ))}
-                    </div>
+                  {message.parts && message.parts.length > 0 ? (
+                    <MessageTimeline
+                      message={message}
+                      onPermissionDecision={onPermissionDecision}
+                    />
+                  ) : (
+                    <>
+                      {message.toolExecutions && message.toolExecutions.length > 0 && (
+                        <div className="toolExecutionList" aria-label="工具执行记录">
+                          {message.toolExecutions.map((execution) => (
+                            <ToolExecutionCard
+                              key={`${execution.iteration}:${execution.callId}`}
+                              execution={execution}
+                              onPermissionDecision={onPermissionDecision}
+                            />
+                          ))}
+                        </div>
+                      )}
+                      {message.content.length > 0 && <p className="messageText">{message.content}</p>}
+                    </>
                   )}
-                  {message.content.length > 0 && <p className="messageText">{message.content}</p>}
                   {message.state === "streaming" && (
                     <span className="streamingCursor" aria-label="正在生成" />
                   )}
@@ -195,6 +217,44 @@ export function MessageList({
           回到底部
         </button>
       )}
+    </div>
+  );
+}
+
+function MessageTimeline({
+  message,
+  onPermissionDecision,
+}: {
+  readonly message: VisibleMessage;
+  readonly onPermissionDecision: (
+    requestId: string,
+    decision: PermissionUserDecision,
+  ) => void;
+}) {
+  return (
+    <div className="messageTimeline">
+      {message.parts?.map((part, index) => {
+        if (part.type === "text") {
+          return <p key={`text:${index}`} className="messageText">{part.content}</p>;
+        }
+        const execution = message.toolExecutions?.find(
+          (item) =>
+            item.iteration === part.iteration && item.callId === part.callId,
+        );
+        if (!execution) return null;
+        return (
+          <div
+            key={`tool:${part.iteration}:${part.callId}`}
+            className="toolExecutionList"
+            aria-label="工具执行记录"
+          >
+            <ToolExecutionCard
+              execution={execution}
+              onPermissionDecision={onPermissionDecision}
+            />
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -331,6 +391,9 @@ function stopReasonLabel(reason: StoppedEvent["reason"]): string {
   if (reason === "max-iterations") return "达到最大迭代次数";
   if (reason === "cancelled") return "用户取消";
   if (reason === "repeated-unknown-tool") return "连续调用未知工具";
+  if (reason === "context-error") return "上下文压缩失败";
+  if (reason === "context-capacity") return "上下文容量不足";
+  if (reason === "context-circuit-open") return "上下文自动压缩熔断";
   if (reason === "model-error") return "模型响应流错误";
   return "Agent 内部错误";
 }

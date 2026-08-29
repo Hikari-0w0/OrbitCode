@@ -15,6 +15,8 @@ const VALID_PROVIDER = [
   "    model: example-model",
   "    base_url: https://example.invalid/v1",
   "    api_key: ORBITCODE_API_KEY",
+  "    context:",
+  "      window_tokens: 128000",
 ].join("\n");
 
 async function load(
@@ -41,12 +43,21 @@ test("加载单个合法配置并从环境解析凭据", async () => {
     model: "example-model",
     baseUrl: "https://example.invalid/v1",
     apiKeyEnvironmentVariable: "ORBITCODE_API_KEY",
+    context: {
+      windowTokens: 128000,
+      singleToolResultTokens: 8000,
+      toolResultGroupTokens: 12000,
+      recentMessagesTokens: 10000,
+      automaticReserveTokens: 13000,
+      manualReserveTokens: 3000,
+      previewChars: 2000,
+    },
     apiKey: "test-secret",
   });
 });
 
 test("可先列举无密钥配置，再按名称安全解析凭据", async () => {
-  const source = `${VALID_PROVIDER}\n  - name: secondary\n    protocol: openai\n    model: second-model\n    base_url: http://127.0.0.1:3001/v1/\n    api_key: SECONDARY_KEY`;
+  const source = `${VALID_PROVIDER}\n  - name: secondary\n    protocol: openai\n    model: second-model\n    base_url: http://127.0.0.1:3001/v1/\n    api_key: SECONDARY_KEY\n    context:\n      window_tokens: 64000`;
   const providers = await loadProviderConfigs({
     filePath: "/virtual/orbitcode.yaml",
     readTextFile: async () => source,
@@ -77,8 +88,41 @@ test("可先列举无密钥配置，再按名称安全解析凭据", async () =>
   assert.equal(resolved.apiKey, "resolved-secret");
 });
 
+test("解析显式思考模式并保留未配置 Provider 的默认行为", async () => {
+  const configured = VALID_PROVIDER.replace(
+    "    context:",
+    [
+      "    thinking:",
+      "      enabled: true",
+      "      budget_tokens: 1024",
+      "    context:",
+    ].join("\n"),
+  );
+
+  const enabled = await load(configured);
+  const omitted = await load(VALID_PROVIDER);
+
+  assert.deepEqual(enabled.thinking, { enabled: true, budgetTokens: 1024 });
+  assert.equal(omitted.thinking, undefined);
+});
+
+test("拒绝无效思考开关和越界预算", async () => {
+  const withThinking = (body: string) => VALID_PROVIDER.replace(
+    "    context:",
+    `    thinking:\n${body}\n    context:`,
+  );
+  for (const source of [
+    withThinking("      enabled: no"),
+    withThinking("      enabled: false\n      budget_tokens: 1024"),
+    withThinking("      enabled: true\n      budget_tokens: 127"),
+    withThinking("      enabled: true\n      budget_tokens: 32769"),
+  ]) {
+    await assert.rejects(load(source), ConfigurationError);
+  }
+});
+
 test("多个配置必须按名称选择", async () => {
-  const source = `${VALID_PROVIDER}\n  - name: secondary\n    protocol: openai\n    model: second-model\n    base_url: http://127.0.0.1:3001/v1/\n    api_key: SECONDARY_KEY`;
+  const source = `${VALID_PROVIDER}\n  - name: secondary\n    protocol: openai\n    model: second-model\n    base_url: http://127.0.0.1:3001/v1/\n    api_key: SECONDARY_KEY\n    context:\n      window_tokens: 64000`;
 
   await assert.rejects(load(source), /--provider/);
   const result = await load(source, {
@@ -143,11 +187,15 @@ test("拒绝缺失或空白的每个必填字段", async () => {
     );
     await assert.rejects(load(emptyField), new RegExp(field));
   }
+  await assert.rejects(
+    load(VALID_PROVIDER.replace("\n    context:\n      window_tokens: 128000", "")),
+    /context/,
+  );
 });
 
 test("拒绝重复名、不支持协议、非法 URL 和环境变量模板", async () => {
   await assert.rejects(
-    load(`${VALID_PROVIDER}\n  - name: primary\n    protocol: openai\n    model: other\n    base_url: https://other.invalid/v1\n    api_key: OTHER_KEY`),
+    load(`${VALID_PROVIDER}\n  - name: primary\n    protocol: openai\n    model: other\n    base_url: https://other.invalid/v1\n    api_key: OTHER_KEY\n    context:\n      window_tokens: 128000`),
     /名称重复/,
   );
   await assert.rejects(load(VALID_PROVIDER.replace("openai", "anthropic")), /只支持 openai/);
@@ -170,6 +218,8 @@ test("拒绝 YAML alias 和不存在的配置名", async () => {
     "    model: model",
     "    base_url: https://example.invalid/v1",
     "    api_key: API_KEY",
+    "    context:",
+    "      window_tokens: 128000",
     "  - *provider",
   ].join("\n");
   await assert.rejects(load(aliasSource), /无法解析模型配置文件|alias|Alias/);
@@ -189,5 +239,27 @@ test("缺失凭据错误不包含哨兵值", async () => {
       assert.equal(error.message.includes(sentinel), false);
       return true;
     },
+  );
+});
+
+test("上下文配置支持默认阈值并拒绝非法关系", async () => {
+  const providers = await loadProviderConfigs({
+    filePath: "/virtual/orbitcode.yaml",
+    readTextFile: async () => VALID_PROVIDER,
+  });
+  assert.equal(providers[0]?.context.windowTokens, 128000);
+  assert.equal(providers[0]?.context.automaticReserveTokens, 13000);
+
+  await assert.rejects(
+    load(VALID_PROVIDER.replace("window_tokens: 128000", "window_tokens: 20000")),
+    /必须大于自动安全余量/,
+  );
+  await assert.rejects(
+    load(`${VALID_PROVIDER}\n      automatic_reserve_tokens: 2000`),
+    /必须大于 manual_reserve_tokens/,
+  );
+  await assert.rejects(
+    load(`${VALID_PROVIDER}\n      unknown_threshold: 1`),
+    /未知字段/,
   );
 });

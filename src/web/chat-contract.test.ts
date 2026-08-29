@@ -3,8 +3,10 @@ import test from "node:test";
 
 import {
   encodeWebChatEvent,
-  MAX_WEB_CHAT_MESSAGE_LENGTH,
-  MAX_WEB_CHAT_MESSAGES,
+  MAX_WEB_CHAT_INPUT_LENGTH,
+  parseContextCompressionResponse,
+  parseContextSessionCreateRequest,
+  parseContextSessionResponse,
   parseProviderCatalogResponse,
   parsePermissionDecisionRequest,
   parsePermissionDecisionResponse,
@@ -17,58 +19,45 @@ import {
   type WebChatEvent,
 } from "@/web/chat-contract";
 
-test("接受严格的多轮请求并保留消息顺序", () => {
+test("接受只携带本轮输入与两个服务端会话标识的请求", () => {
   const result = parseWebChatRequest({
     provider: " primary ",
     workspaceId: "project-a",
     permissionSessionId: "session-1",
+    contextSessionId: "context-1",
     mode: "plan",
     modeTurn: 5,
-    messages: [
-      { role: "user", content: "第一问" },
-      { role: "assistant", content: "第一答" },
-      { role: "user", content: "第二问" },
-    ],
+    input: "第二问",
   });
 
   assert.equal(result.provider, "primary");
   assert.equal(result.workspaceId, "project-a");
   assert.equal(result.permissionSessionId, "session-1");
+  assert.equal(result.contextSessionId, "context-1");
   assert.equal(result.mode, "plan");
   assert.equal(result.modeTurn, 5);
-  assert.deepEqual(result.messages, [
-    { role: "user", content: "第一问" },
-    { role: "assistant", content: "第一答" },
-    { role: "user", content: "第二问" },
-  ]);
+  assert.equal(result.input, "第二问");
 });
 
-test("拒绝未知字段、非法角色顺序和空内容", () => {
+test("拒绝未知字段、缺失会话标识和空输入", () => {
+  const valid = {
+    provider: "primary",
+    workspaceId: "project",
+    permissionSessionId: "permission-1",
+    contextSessionId: "context-1",
+    mode: "do",
+    modeTurn: 1,
+    input: "问题",
+  } as const;
   const invalidValues: readonly unknown[] = [
     null,
-    { provider: "primary", workspaceId: "project", mode: "do", modeTurn: 1, messages: [], extra: true },
-    { provider: "", workspaceId: "project", mode: "do", modeTurn: 1, messages: [{ role: "user", content: "问题" }] },
-    { provider: "primary", workspaceId: "project", mode: "invalid", modeTurn: 1, messages: [{ role: "user", content: "问题" }] },
-    { provider: "primary", workspaceId: "project", mode: "do", modeTurn: 1, messages: [{ role: "system", content: "越界" }] },
-    { provider: "primary", workspaceId: "project", mode: "do", modeTurn: 1, messages: [{ role: "assistant", content: "回答" }] },
-    {
-      provider: "primary",
-      workspaceId: "project",
-      mode: "do",
-      modeTurn: 1,
-      messages: [
-        { role: "user", content: "问题" },
-        { role: "user", content: "重复" },
-      ],
-    },
-    { provider: "primary", workspaceId: "project", mode: "do", modeTurn: 1, messages: [{ role: "user", content: "   " }] },
-    {
-      provider: "primary",
-      workspaceId: "project",
-      mode: "do",
-      modeTurn: 1,
-      messages: [{ role: "user", content: "问题", extra: true }],
-    },
+    { ...valid, extra: true },
+    { ...valid, provider: "" },
+    { ...valid, contextSessionId: "" },
+    { ...valid, permissionSessionId: "bad id" },
+    { ...valid, mode: "invalid" },
+    { ...valid, input: "   " },
+    { ...valid, messages: [{ role: "user", content: "旧协议" }] },
   ];
 
   for (const value of invalidValues) {
@@ -76,29 +65,19 @@ test("拒绝未知字段、非法角色顺序和空内容", () => {
   }
 });
 
-test("拒绝超长内容和过多历史", () => {
+test("拒绝超长用户输入", () => {
   assert.throws(
     () =>
       parseWebChatRequest({
         provider: "primary",
         workspaceId: "project",
         permissionSessionId: "session-1",
+        contextSessionId: "context-1",
         mode: "do",
         modeTurn: 1,
-        messages: [
-          { role: "user", content: "x".repeat(MAX_WEB_CHAT_MESSAGE_LENGTH + 1) },
-        ],
+        input: "x".repeat(MAX_WEB_CHAT_INPUT_LENGTH + 1),
       }),
     /超过/,
-  );
-
-  const messages = Array.from({ length: MAX_WEB_CHAT_MESSAGES + 1 }, (_, index) => ({
-    role: index % 2 === 0 ? "user" : "assistant",
-    content: String(index),
-  }));
-  assert.throws(
-    () => parseWebChatRequest({ provider: "primary", workspaceId: "project", permissionSessionId: "session-1", mode: "do", modeTurn: 1, messages }),
-    /数量/,
   );
 });
 
@@ -108,9 +87,11 @@ test("Workspace ID 必须是有界的不透明标识且不接受路径字段", (
       () => parseWebChatRequest({
         provider: "primary",
         workspaceId,
+        permissionSessionId: "permission-1",
+        contextSessionId: "context-1",
         mode: "do",
         modeTurn: 1,
-        messages: [{ role: "user", content: "问题" }],
+        input: "问题",
       }),
       WebChatContractError,
     );
@@ -119,10 +100,12 @@ test("Workspace ID 必须是有界的不透明标识且不接受路径字段", (
     () => parseWebChatRequest({
       provider: "primary",
       workspaceId: "project",
+      permissionSessionId: "permission-1",
+      contextSessionId: "context-1",
       workspacePath: "/tmp/project",
       mode: "do",
       modeTurn: 1,
-      messages: [{ role: "user", content: "问题" }],
+      input: "问题",
     }),
     WebChatContractError,
   );
@@ -134,13 +117,48 @@ test("模式连续轮次必须是有界正整数", () => {
       () => parseWebChatRequest({
         provider: "primary",
         workspaceId: "project",
+        permissionSessionId: "permission-1",
+        contextSessionId: "context-1",
         mode: "do",
         modeTurn,
-        messages: [{ role: "user", content: "问题" }],
+        input: "问题",
       }),
       WebChatContractError,
     );
   }
+});
+
+test("严格解析上下文会话与手动压缩结果", () => {
+  assert.deepEqual(
+    parseContextSessionCreateRequest({ provider: " primary ", workspaceId: "project" }),
+    { provider: "primary", workspaceId: "project" },
+  );
+  assert.deepEqual(
+    parseContextSessionResponse({
+      sessionId: "context-1",
+      provider: "primary",
+      workspaceId: "project",
+    }),
+    { sessionId: "context-1", provider: "primary", workspaceId: "project" },
+  );
+  assert.deepEqual(
+    parseContextCompressionResponse({
+      status: "succeeded",
+      trigger: "manual",
+      before: { tokens: 18_000, source: "approximation" },
+      after: { tokens: 6_000, source: "approximation" },
+    }),
+    {
+      status: "succeeded",
+      trigger: "manual",
+      before: { tokens: 18_000, source: "approximation" },
+      after: { tokens: 6_000, source: "approximation" },
+    },
+  );
+  assert.throws(
+    () => parseContextCompressionResponse({ status: "succeeded", trigger: "auto" }),
+    WebChatContractError,
+  );
 });
 
 test("严格解析权限会话、模式更新与只含枚举的授权决定", () => {
