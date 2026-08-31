@@ -18,6 +18,12 @@ type IntegerOptions = {
   readonly description?: string;
 };
 
+type ArrayOptions = {
+  readonly minItems?: number;
+  readonly maxItems?: number;
+  readonly description?: string;
+};
+
 export interface ValueSchema<T, TOptional extends boolean = false>
   extends ToolInputSchema<T> {
   readonly optional: TOptional;
@@ -81,6 +87,21 @@ export function booleanSchema(
   };
 }
 
+export function enumSchema<const TValues extends readonly string[]>(
+  values: TValues,
+  description?: string,
+): ValueSchema<TValues[number], false> {
+  return {
+    optional: false,
+    jsonSchema: compactObject({ type: "string", enum: values, description }),
+    parse(value) {
+      return typeof value === "string" && values.includes(value)
+        ? { ok: true, value: value as TValues[number] }
+        : issue("$", `必须是以下值之一：${values.join("、")}。`);
+    },
+  };
+}
+
 export function integerSchema(
   options: IntegerOptions = {},
 ): ValueSchema<number, false> {
@@ -111,6 +132,51 @@ export function optionalSchema<T>(
   schema: ValueSchema<T, false>,
 ): ValueSchema<T, true> {
   return { ...schema, optional: true };
+}
+
+export function arraySchema<T>(
+  itemSchema: ToolInputSchema<T>,
+  options: ArrayOptions = {},
+): ValueSchema<readonly T[], false> {
+  return {
+    optional: false,
+    jsonSchema: compactObject({
+      type: "array",
+      items: itemSchema.jsonSchema,
+      minItems: options.minItems,
+      maxItems: options.maxItems,
+      description: options.description,
+    }),
+    parse(value) {
+      if (!Array.isArray(value)) return issue("$", "必须是数组。");
+      if (options.minItems !== undefined && value.length < options.minItems) {
+        return issue("$", `项目数不能小于 ${options.minItems}。`);
+      }
+      if (options.maxItems !== undefined && value.length > options.maxItems) {
+        return issue("$", `项目数不能大于 ${options.maxItems}。`);
+      }
+      const output: T[] = [];
+      const issues: SchemaIssue[] = [];
+      for (const [index, item] of value.entries()) {
+        const parsed = itemSchema.parse(item);
+        if (parsed.ok) {
+          output.push(parsed.value);
+          continue;
+        }
+        for (const nested of parsed.issues) {
+          issues.push({
+            path: nested.path === "$"
+              ? `$[${index}]`
+              : `$[${index}]${nested.path.slice(1)}`,
+            message: nested.message,
+          });
+        }
+      }
+      return issues.length > 0
+        ? { ok: false, issues }
+        : { ok: true, value: output };
+    },
+  };
 }
 
 export function objectSchema<

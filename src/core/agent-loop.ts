@@ -1,5 +1,6 @@
 import type {
   AgentEvent,
+  AgentIterationLimit,
   AgentMode,
   AgentStopReason,
   TokenUsage,
@@ -10,12 +11,15 @@ import {
   AgentConfigurationError,
   ConversationStateError,
 } from "@/core/errors";
+import { CompletionTracker } from "@/core/completion-tracker";
 import { scheduleToolCalls, type ToolCallResult } from "@/core/tool-scheduler";
+import { ToolFailureBudget } from "@/core/tool-failure-budget";
 import {
   ProviderError,
   type AssistantMessage,
   type ChatProvider,
   type ConversationMessage,
+  type ModelStreamEvent,
   type ModelTokenUsage,
   type ModelToolCall,
   type PlainConversationMessage,
@@ -36,6 +40,8 @@ import {
 
 export const DEFAULT_MAX_AGENT_ITERATIONS = 8;
 export const MAX_AGENT_ITERATIONS = 32;
+export const DEFAULT_MAX_AGENT_RUNTIME_MS = 60 * 60 * 1_000;
+export const MAX_AGENT_RUNTIME_MS = 24 * 60 * 60 * 1_000;
 const UNKNOWN_TOOL_ITERATION_LIMIT = 2;
 export interface AgentSession {
   getHistory(): readonly PlainConversationMessage[];
@@ -50,34 +56,44 @@ export interface AgentSession {
 export class AgentLoop implements AgentSession {
   private history: PlainConversationMessage[];
   private state: "idle" | "running" = "idle";
-  private readonly maxIterations: number;
+  private readonly maxIterations: AgentIterationLimit;
+  private readonly maxRuntimeMs: number;
   private readonly promptEnvironment: PromptEnvironment;
   private readonly optionalPromptContext?: OptionalPromptContext;
   private readonly permissionGatewayForMode?: (
     mode: AgentMode,
   ) => PermissionGateway;
+  private readonly now: () => number;
+  private readonly completionTracker: CompletionTracker;
 
   constructor(
     private readonly provider: ChatProvider,
     private readonly toolAccessForMode: (mode: AgentMode) => ToolAccess,
     private readonly workspace: WorkspaceBoundary,
     options: {
-      readonly maxIterations: number;
+      readonly maxIterations: AgentIterationLimit;
+      readonly maxRuntimeMs?: number;
       readonly promptEnvironment: PromptEnvironment;
       readonly optionalPromptContext?: OptionalPromptContext;
       readonly permissionGatewayForMode?: (
         mode: AgentMode,
       ) => PermissionGateway;
       readonly contextManager?: ContextManager;
+      readonly completionTracker?: CompletionTracker;
+      readonly now?: () => number;
     },
     initialHistory: readonly PlainConversationMessage[] = [],
   ) {
     assertMaxAgentIterations(options.maxIterations);
+    assertMaxAgentRuntime(options.maxRuntimeMs ?? DEFAULT_MAX_AGENT_RUNTIME_MS);
     this.maxIterations = options.maxIterations;
+    this.maxRuntimeMs = options.maxRuntimeMs ?? DEFAULT_MAX_AGENT_RUNTIME_MS;
     this.promptEnvironment = options.promptEnvironment;
     this.optionalPromptContext = options.optionalPromptContext;
     this.permissionGatewayForMode = options.permissionGatewayForMode;
     this.contextManager = options.contextManager;
+    this.now = options.now ?? Date.now;
+    this.completionTracker = options.completionTracker ?? new CompletionTracker();
     this.history = initialHistory.map((message) => ({ ...message }));
   }
 
@@ -108,7 +124,16 @@ export class AgentLoop implements AgentSession {
       optional: this.optionalPromptContext,
       session: { mode: options.mode, modeTurn: options.modeTurn },
     });
+    const startedAt = this.now();
+    const durationMs = (): number =>
+      Math.max(0, Math.round(this.now() - startedAt));
+    const runtimeSignal = AbortSignal.timeout(this.maxRuntimeMs);
+    const signal = AbortSignal.any([options.signal, runtimeSignal]);
+    const runtimeExceeded = (): boolean =>
+      runtimeSignal.aborted && !options.signal.aborted;
+    const runtimeDetail = `Agent 已达到最大运行时间 ${formatRuntimeLimit(this.maxRuntimeMs)}。`;
     this.state = "running";
+    this.completionTracker.beginRun();
     const userMessage = { role: "user", content: options.input } as const;
     const transcript: ConversationMessage[] = [
       ...systemMessages,
@@ -124,6 +149,7 @@ export class AgentLoop implements AgentSession {
     const permissionGateway = this.permissionGatewayForMode?.(options.mode);
     let completedIterations = 0;
     let consecutiveUnknownIterations = 0;
+    const toolFailureBudget = new ToolFailureBudget();
     let sideEffect: SideEffectState = "none";
     let cumulativeUsage: TokenUsage | undefined;
     let contextTurnActive = false;
@@ -139,14 +165,29 @@ export class AgentLoop implements AgentSession {
       detail: string,
     ): Extract<AgentEvent, { type: "stopped" }> => {
       interruption = { reason, detail };
-      return stopped(reason, completedIterations, sideEffect, detail);
+      return stopped(
+        reason,
+        completedIterations,
+        durationMs(),
+        sideEffect,
+        detail,
+        this.completionTracker.assessment(),
+      );
     };
 
     try {
       this.contextManager?.beginTurn(options.input);
       contextTurnActive = this.contextManager !== undefined;
-      for (let iteration = 1; iteration <= this.maxIterations; iteration += 1) {
-        if (options.signal.aborted) {
+      for (
+        let iteration = 1;
+        this.maxIterations === "unlimited" || iteration <= this.maxIterations;
+        iteration += 1
+      ) {
+        if (signal.aborted) {
+          if (runtimeExceeded()) {
+            yield interrupt("max-runtime", runtimeDetail);
+            return;
+          }
           yield interrupt("cancelled", "Agent 轮次已取消。");
           return;
         }
@@ -160,13 +201,13 @@ export class AgentLoop implements AgentSession {
         const modelMessages = this.contextManager
           ? (await this.contextManager.prepareForModel(
               promptEnvelope,
-              options.signal,
+              signal,
             )).messages
           : transcript;
         const response = this.collectModelResponse(
           modelMessages,
           toolDefinitions,
-          options.signal,
+          signal,
           iteration,
         );
         let content = "";
@@ -175,7 +216,28 @@ export class AgentLoop implements AgentSession {
         let finishReason: "stop" | "tool-call" | undefined;
         let usage: ModelTokenUsage | undefined;
         for await (const event of response) {
-          if (event.type === "agent-text") {
+          if (event.type === "model-progress") {
+            yield {
+              type: "progress",
+              iteration,
+              maxIterations: this.maxIterations,
+              phase: "model",
+              model: {
+                stage: event.progress.stage,
+                elapsedMs: event.progress.elapsedMs,
+                attempt: event.progress.attempt,
+                ...(event.progress.traceId === undefined
+                  ? {}
+                  : { traceId: event.progress.traceId }),
+                ...(event.progress.toolName === undefined
+                  ? {}
+                  : { toolName: event.progress.toolName }),
+                ...(event.progress.toolArgumentsChars === undefined
+                  ? {}
+                  : { toolArgumentsChars: event.progress.toolArgumentsChars }),
+              },
+            };
+          } else if (event.type === "agent-text") {
             content += event.text;
             partialAssistantContent = content;
             yield { type: "text-delta", iteration, text: event.text };
@@ -234,8 +296,10 @@ export class AgentLoop implements AgentSession {
             type: "stopped",
             reason: "final-response",
             iterations: completedIterations,
+            durationMs: durationMs(),
             sideEffect,
             finalMessage: { ...finalMessage },
+            verification: this.completionTracker.assessment(),
           };
           return;
         }
@@ -251,13 +315,27 @@ export class AgentLoop implements AgentSession {
             sequence,
           };
         }
-        if (iteration === this.maxIterations) {
+        if (this.maxIterations !== "unlimited" && iteration === this.maxIterations) {
+          const unexecutedResults = cancelledToolResults(
+            calls,
+            [],
+            "达到最大迭代次数，工具未执行。",
+          );
+          for (const item of unexecutedResults) {
+            yield {
+              type: "tool-result",
+              iteration,
+              callId: item.call.id,
+              name: item.call.name,
+              sequence: item.sequence,
+              result: item.result,
+            };
+          }
           if (this.contextManager) {
             this.contextManager.appendToolExchange(
               content.length > 0 ? content : null,
               calls,
-              cancelledToolResults(calls, [], "达到最大迭代次数，工具未执行。")
-                .map(toContextToolResult),
+              unexecutedResults.map((item) => toContextToolResult(item)),
               reasoningContent.length > 0 ? reasoningContent : undefined,
             );
             partialAssistantContent = "";
@@ -289,7 +367,7 @@ export class AgentLoop implements AgentSession {
           calls,
           access,
           workspace: this.workspace,
-          signal: options.signal,
+          signal,
           permissionGateway,
         })) {
           if (event.type === "started") {
@@ -321,6 +399,16 @@ export class AgentLoop implements AgentSession {
               scope: event.scope,
             };
           } else if (event.type === "result") {
+            const decision = access.classify(event.call.name);
+            this.completionTracker.record({
+              call: event.call,
+              result: event.result,
+              iteration,
+              sequence: event.sequence,
+              mutability: decision.kind === "allowed"
+                ? decision.mutability
+                : "read-only",
+            });
             sideEffect = higherSideEffect(sideEffect, event.result.sideEffect);
             completedTools += 1;
             yield {
@@ -344,7 +432,10 @@ export class AgentLoop implements AgentSession {
           }
         }
 
-        if (options.signal.aborted) {
+        if (signal.aborted) {
+          const detail = runtimeExceeded()
+            ? runtimeDetail
+            : "Agent 轮次已取消。";
           if (this.contextManager) {
             this.contextManager.appendToolExchange(
               content.length > 0 ? content : null,
@@ -352,24 +443,45 @@ export class AgentLoop implements AgentSession {
               cancelledToolResults(
                 calls,
                 orderedResults,
-                "Agent 轮次已取消，工具未执行。",
-              ).map(toContextToolResult),
+                `${detail} 工具未执行。`,
+              ).map((item) => toContextToolResult(
+                item,
+                undefined,
+                this.completionTracker.evidenceId(item.call.id),
+              )),
               reasoningContent.length > 0 ? reasoningContent : undefined,
             );
             partialAssistantContent = "";
           }
-          yield interrupt("cancelled", "Agent 轮次已取消。");
+          yield interrupt(runtimeExceeded() ? "max-runtime" : "cancelled", detail);
           return;
         }
         if (orderedResults.length !== calls.length) {
           throw new Error("工具调度未返回完整结果。");
         }
 
+        const budgetGuidance = new Map<string, string>();
+        let budgetStopDetail: string | undefined;
+        for (const item of orderedResults) {
+          const decision = toolFailureBudget.observe(item.call, item.result);
+          if (decision.action === "switch") {
+            budgetGuidance.set(item.call.id, decision.guidance);
+          } else if (decision.action === "stop") {
+            budgetStopDetail ??= decision.detail;
+          }
+        }
+
         if (this.contextManager) {
           this.contextManager.appendToolExchange(
             content.length > 0 ? content : null,
             calls,
-            orderedResults.map(toContextToolResult),
+            orderedResults.map((item) =>
+              toContextToolResult(
+                item,
+                budgetGuidance.get(item.call.id),
+                this.completionTracker.evidenceId(item.call.id),
+              )
+            ),
             reasoningContent.length > 0 ? reasoningContent : undefined,
           );
           partialAssistantContent = "";
@@ -384,9 +496,17 @@ export class AgentLoop implements AgentSession {
             transcript.push({
               role: "tool",
               toolCallId: item.call.id,
-              content: JSON.stringify(item.result),
+              content: serializeToolResult(
+                item.result,
+                budgetGuidance.get(item.call.id),
+                this.completionTracker.evidenceId(item.call.id),
+              ),
             });
           }
+        }
+        if (budgetStopDetail !== undefined) {
+          yield interrupt("repeated-tool-failure", budgetStopDetail);
+          return;
         }
         if (
           allUnknown &&
@@ -401,6 +521,10 @@ export class AgentLoop implements AgentSession {
       }
       throw new Error("Agent 循环越过了最大迭代边界。");
     } catch (error) {
+      if (runtimeExceeded()) {
+        yield interrupt("max-runtime", runtimeDetail);
+        return;
+      }
       if (
         options.signal.aborted ||
         (error instanceof ProviderError && error.kind === "cancelled")
@@ -427,8 +551,14 @@ export class AgentLoop implements AgentSession {
     } finally {
       if (this.contextManager && contextTurnActive) {
         const terminal = interruption ?? {
-          reason: options.signal.aborted ? "cancelled" as const : "agent-error" as const,
-          detail: options.signal.aborted
+          reason: runtimeExceeded()
+            ? "max-runtime" as const
+            : options.signal.aborted
+              ? "cancelled" as const
+              : "agent-error" as const,
+          detail: runtimeExceeded()
+            ? runtimeDetail
+            : options.signal.aborted
             ? "Agent 轮次已取消。"
             : "Agent 轮次在完成前中断。",
         };
@@ -449,6 +579,10 @@ export class AgentLoop implements AgentSession {
     signal: AbortSignal,
     iteration: number,
   ): AsyncIterable<
+    | {
+        readonly type: "model-progress";
+        readonly progress: Extract<ModelStreamEvent, { type: "request-progress" }>;
+      }
     | { readonly type: "agent-text"; readonly text: string }
     | { readonly type: "model-reasoning"; readonly text: string }
     | { readonly type: "model-tool-call"; readonly call: ModelToolCall }
@@ -471,7 +605,9 @@ export class AgentLoop implements AgentSession {
       if (completed && event.type !== "usage") {
         throw new ProviderError("protocol", "模型在完成事件后仍返回了数据。");
       }
-      if (event.type === "reasoning-delta") {
+      if (event.type === "request-progress") {
+        yield { type: "model-progress", progress: event };
+      } else if (event.type === "reasoning-delta") {
         yield { type: "model-reasoning", text: event.text };
       } else if (event.type === "text-delta") {
         yield { type: "agent-text", text: event.text };
@@ -512,21 +648,51 @@ function safeToolCallForDisplay(call: ModelToolCall): ModelToolCall {
   };
 }
 
-export function assertMaxAgentIterations(value: number): void {
-  if (!Number.isInteger(value) || value < 1 || value > MAX_AGENT_ITERATIONS) {
+export function assertMaxAgentIterations(value: AgentIterationLimit): void {
+  if (
+    value !== "unlimited" &&
+    (!Number.isInteger(value) || value < 1 || value > MAX_AGENT_ITERATIONS)
+  ) {
     throw new AgentConfigurationError(
       `Agent 最大迭代次数必须是 1 到 ${MAX_AGENT_ITERATIONS} 之间的整数。`,
     );
   }
 }
 
+export function assertMaxAgentRuntime(value: number): void {
+  if (!Number.isInteger(value) || value < 1 || value > MAX_AGENT_RUNTIME_MS) {
+    throw new AgentConfigurationError(
+      `Agent 最大运行时间必须是 1 到 ${MAX_AGENT_RUNTIME_MS} 毫秒之间的整数。`,
+    );
+  }
+}
+
+function formatRuntimeLimit(runtimeMs: number): string {
+  if (runtimeMs % (60 * 60 * 1_000) === 0) {
+    return `${runtimeMs / (60 * 60 * 1_000)} 小时`;
+  }
+  if (runtimeMs % (60 * 1_000) === 0) return `${runtimeMs / (60 * 1_000)} 分钟`;
+  if (runtimeMs % 1_000 === 0) return `${runtimeMs / 1_000} 秒`;
+  return `${runtimeMs} 毫秒`;
+}
+
 function stopped(
   reason: AgentStopReason,
   iterations: number,
+  durationMs: number,
   sideEffect: SideEffectState,
   detail: string,
+  verification: ReturnType<CompletionTracker["assessment"]>,
 ): Extract<AgentEvent, { type: "stopped" }> {
-  return { type: "stopped", reason, iterations, sideEffect, detail };
+  return {
+    type: "stopped",
+    reason,
+    iterations,
+    durationMs,
+    sideEffect,
+    detail,
+    verification,
+  };
 }
 
 function reportedUsage(
@@ -611,12 +777,30 @@ function cancelledToolResults(
   });
 }
 
-function toContextToolResult(item: ToolCallResult): {
+function toContextToolResult(
+  item: ToolCallResult,
+  guidance?: string,
+  evidenceId?: string,
+): {
   readonly toolCallId: string;
   readonly content: string;
 } {
   return {
     toolCallId: item.call.id,
-    content: JSON.stringify(item.result),
+    content: serializeToolResult(item.result, guidance, evidenceId),
   };
+}
+
+function serializeToolResult(
+  result: ToolCallResult["result"],
+  guidance?: string,
+  evidenceId?: string,
+): string {
+  return JSON.stringify({
+    ...result,
+    ...(evidenceId === undefined ? {} : { evidence_call_id: evidenceId }),
+    ...(guidance === undefined
+      ? {}
+      : { failureBudget: { action: "switch-strategy", guidance } }),
+  });
 }

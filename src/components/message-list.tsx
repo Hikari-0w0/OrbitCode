@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { PermissionRequestCard } from "@/components/permission-request-card";
 import type { PermissionUserDecision } from "@/core/permissions/approval";
+import type { CompletionAssessment } from "@/core/completion-tracker";
 import type { WebChatEvent } from "@/web/chat-contract";
 
 type ProgressEvent = Extract<WebChatEvent, { type: "progress" }>;
@@ -73,6 +74,8 @@ export type VisibleMessage = {
   readonly usage?: TokenUsageEvent["usage"];
   readonly cumulativeUsage?: TokenUsageEvent["cumulative"];
   readonly stopReason?: StoppedEvent["reason"];
+  readonly durationMs?: number;
+  readonly verification?: CompletionAssessment;
 };
 
 type MessageListProps = {
@@ -178,9 +181,17 @@ export function MessageList({
                     <span className="streamingCursor" aria-label="正在生成" />
                   )}
                   {message.cumulativeUsage && <UsageLine usage={message.cumulativeUsage} />}
+                  {message.durationMs !== undefined && (
+                    <p className="usageLine">运行时间：{formatDuration(message.durationMs)}</p>
+                  )}
                   {message.stopReason && (
                     <p className={`stopReason stopReason--${message.state}`}>
                       停止原因：{stopReasonLabel(message.stopReason)}
+                    </p>
+                  )}
+                  {message.verification && (
+                    <p className={`verificationState verificationState--${message.verification.status}`}>
+                      验证状态：{verificationLabel(message.verification.status)}
                     </p>
                   )}
                   {message.detail && (
@@ -235,6 +246,7 @@ function MessageTimeline({
     <div className="messageTimeline">
       {message.parts?.map((part, index) => {
         if (part.type === "text") {
+          if (part.content.trim().length === 0) return null;
           return <p key={`text:${index}`} className="messageText">{part.content}</p>;
         }
         const execution = message.toolExecutions?.find(
@@ -262,16 +274,26 @@ function MessageTimeline({
 function AgentProgress({ progress }: { readonly progress: ProgressEvent }) {
   const toolProgress = progress.phase === "tools"
     ? ` · 工具 ${progress.completedTools ?? 0}/${progress.totalTools ?? 0}`
-    : " · 正在请求模型";
-  const percentage = progress.phase === "tools" && progress.totalTools
-    ? ((progress.iteration - 1) + (progress.completedTools ?? 0) / progress.totalTools)
-      / progress.maxIterations * 100
-    : (progress.iteration - 1) / progress.maxIterations * 100;
+    : (
+        <ModelProgressLabel
+          key={modelProgressKey(progress)}
+          progress={progress}
+        />
+      );
+  const percentage = progress.maxIterations === "unlimited"
+    ? 18
+    : progress.phase === "tools" && progress.totalTools
+      ? ((progress.iteration - 1) + (progress.completedTools ?? 0) / progress.totalTools)
+        / progress.maxIterations * 100
+      : (progress.iteration - 1) / progress.maxIterations * 100;
+  const iterationLimit = progress.maxIterations === "unlimited"
+    ? "∞"
+    : progress.maxIterations;
 
   return (
     <div className="agentProgress" aria-label="Agent 当前进度">
       <div className="progressHeader">
-        <span>迭代 {progress.iteration}/{progress.maxIterations}</span>
+        <span>迭代 {progress.iteration}/{iterationLimit}</span>
         <span>{toolProgress}</span>
       </div>
       <div className="progressTrack" aria-hidden="true">
@@ -279,6 +301,53 @@ function AgentProgress({ progress }: { readonly progress: ProgressEvent }) {
       </div>
     </div>
   );
+}
+
+function ModelProgressLabel({ progress }: { readonly progress: ProgressEvent }) {
+  const [silentMs, setSilentMs] = useState(0);
+  useEffect(() => {
+    const receivedAt = Date.now();
+    const timer = window.setInterval(() => {
+      setSilentMs(Date.now() - receivedAt);
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return modelProgressLabel(progress, silentMs);
+}
+
+function modelProgressKey(progress: ProgressEvent): string {
+  if (progress.phase !== "model" || progress.model === undefined) return "model";
+  return [
+    progress.iteration,
+    progress.model.stage,
+    progress.model.elapsedMs,
+    progress.model.attempt,
+    progress.model.toolName ?? "",
+    progress.model.toolArgumentsChars ?? "",
+  ].join(":");
+}
+
+function modelProgressLabel(progress: ProgressEvent, silentMs = 0): string {
+  if (progress.phase !== "model" || progress.model === undefined) {
+    return " · 正在请求模型";
+  }
+  const seconds = Math.max(0, (progress.model.elapsedMs + silentMs) / 1_000).toFixed(1);
+  const retry = progress.model.attempt > 1 ? ` · 重试 ${progress.model.attempt - 1}` : "";
+  const waiting = silentMs >= 1_000
+    ? ` · 等待新数据 ${Math.floor(silentMs / 1_000)}s`
+    : "";
+  if (progress.model.stage === "waiting-first-byte") {
+    return ` · 等待模型响应 ${seconds}s${retry}${waiting}`;
+  }
+  if (progress.model.stage === "streaming-tool-arguments") {
+    const name = progress.model.toolName ?? "工具";
+    const size = progress.model.toolArgumentsChars ?? 0;
+    return ` · 生成 ${name} 参数 ${size.toLocaleString()} 字符 · ${seconds}s${retry}${waiting}`;
+  }
+  if (progress.model.stage === "waiting-done") {
+    return ` · 等待模型结束标记 ${seconds}s${retry}${waiting}`;
+  }
+  return ` · 正在生成回复 ${seconds}s${retry}${waiting}`;
 }
 
 function UsageLine({ usage }: { readonly usage: TokenUsageEvent["cumulative"] }) {
@@ -291,6 +360,14 @@ function UsageLine({ usage }: { readonly usage: TokenUsageEvent["cumulative"] })
       {cacheUsageLabel(usage)}
     </p>
   );
+}
+
+function formatDuration(durationMs: number): string {
+  if (durationMs < 1_000) return `${durationMs} 毫秒`;
+  if (durationMs < 60_000) return `${(durationMs / 1_000).toFixed(1)} 秒`;
+  const minutes = Math.floor(durationMs / 60_000);
+  const seconds = Math.floor((durationMs % 60_000) / 1_000);
+  return `${minutes} 分 ${seconds} 秒`;
 }
 
 function cacheUsageLabel(
@@ -389,13 +466,22 @@ function toolStateLabel(state: VisibleToolExecution["state"]): string {
 function stopReasonLabel(reason: StoppedEvent["reason"]): string {
   if (reason === "final-response") return "模型生成最终回复";
   if (reason === "max-iterations") return "达到最大迭代次数";
+  if (reason === "max-runtime") return "达到最大运行时间";
   if (reason === "cancelled") return "用户取消";
   if (reason === "repeated-unknown-tool") return "连续调用未知工具";
+  if (reason === "repeated-tool-failure") return "工具连续产生同类失败";
   if (reason === "context-error") return "上下文压缩失败";
   if (reason === "context-capacity") return "上下文容量不足";
   if (reason === "context-circuit-open") return "上下文自动压缩熔断";
   if (reason === "model-error") return "模型响应流错误";
   return "Agent 内部错误";
+}
+
+function verificationLabel(status: CompletionAssessment["status"]): string {
+  if (status === "verified") return "已验证";
+  if (status === "partial") return "部分验证";
+  if (status === "blocked") return "存在阻塞";
+  return "未验证";
 }
 
 function MessageState({ state }: { readonly state: VisibleMessage["state"] }) {

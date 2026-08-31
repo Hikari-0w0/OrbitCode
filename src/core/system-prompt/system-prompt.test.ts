@@ -58,8 +58,11 @@ test("固定模块包含核心行为且不混入运行态标签", () => {
   assert.match(prompt, /Plan 模式只分析/u);
   assert.match(prompt, /Do 模式/u);
   assert.match(prompt, /不要用 run_command 替代/u);
+  assert.match(prompt, /互不依赖的工具应在同一回复中一起调用/u);
+  assert.match(prompt, /多个文件时优先使用 write_files/u);
   assert.match(prompt, /修改或覆盖已有文件前.*read_file/u);
   assert.match(prompt, /未经实际执行和验证不要声称成功/u);
+  assert.match(prompt, /Do 模式完成变更后.*report_completion/u);
   assert.match(prompt, /最终回复先给结果/u);
   assert.match(prompt, /证据已经足够时立即停止探索/u);
   assert.match(prompt, /行数、字数、格式和内容范围是硬性输出约束/u);

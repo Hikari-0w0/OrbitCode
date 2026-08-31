@@ -1,5 +1,6 @@
 import type {
   AgentEvent,
+  AgentIterationLimit,
   AgentMode,
   AgentStopReason,
   TokenUsage,
@@ -19,6 +20,12 @@ import type {
   ModelToolCall,
   PromptCacheUsage,
 } from "@/models/provider";
+import type {
+  ConversationCheckpoint,
+  ConversationSummary,
+} from "@/core/conversations/types";
+import { isCompletionAssessment } from "@/core/completion-tracker";
+import { parseConversationCheckpoint } from "@/core/conversations/validation";
 import { parseServerSentEvents, SseError } from "@/models/sse";
 import type {
   JsonValue,
@@ -29,6 +36,7 @@ import type {
   ToolExecutionResult,
   ToolResultMeta,
 } from "@/tools/types";
+import { MAX_TOOL_ARGUMENTS_JSON_CHARS } from "@/tools/types";
 
 export const MAX_WEB_CHAT_BODY_BYTES = 256 * 1024;
 export const MAX_WEB_CHAT_INPUT_LENGTH = 20_000;
@@ -38,26 +46,44 @@ export const MAX_WEB_WORKSPACE_NAME_LENGTH = 80;
 export const MAX_PERMISSION_SESSION_ID_LENGTH = 128;
 export const MAX_PERMISSION_REQUEST_ID_LENGTH = 128;
 export const MAX_CONTEXT_SESSION_ID_LENGTH = 128;
+const MAX_WEB_AGENT_ITERATION = Number.MAX_SAFE_INTEGER;
 
 export type WebChatRequest = {
-  readonly provider: string;
-  readonly workspaceId: string;
+  readonly conversationId: string;
+  readonly revision: number;
   readonly permissionSessionId: string;
-  readonly contextSessionId: string;
   readonly mode: AgentMode;
   readonly modeTurn: number;
   readonly input: string;
 };
 
-export type ContextSessionCreateRequest = {
-  readonly provider: string;
-  readonly workspaceId: string;
+export type ConversationCatalogResponse = {
+  readonly conversations: readonly ConversationSummary[];
 };
 
-export type ContextSessionResponse = {
-  readonly sessionId: string;
-  readonly provider: string;
+export type ConversationActivity =
+  | { readonly status: "idle" }
+  | { readonly status: "active" }
+  | { readonly status: "interrupted"; readonly expectedRevision: number };
+
+export type ConversationDetailResponse = Omit<ConversationCheckpoint, "context"> & {
+  readonly availability: "ready" | "read-only";
+  readonly unavailableReason?: string;
+  readonly activity: ConversationActivity;
+};
+
+export type ConversationCreateRequest = {
+  readonly providerId: string;
   readonly workspaceId: string;
+  readonly title?: string;
+};
+
+export type ConversationMutationRequest = {
+  readonly expectedRevision: number;
+};
+
+export type ConversationRenameRequest = ConversationMutationRequest & {
+  readonly title: string;
 };
 
 export type ContextCompressionResponse = CompressionReport;
@@ -80,7 +106,15 @@ export type PermissionDecisionResponse = {
   readonly accepted: true;
 };
 
-export type WebChatEvent = AgentEvent;
+export type WebPersistenceState =
+  | { readonly status: "saved"; readonly revision: number }
+  | { readonly status: "failed"; readonly detail: string };
+
+export type WebChatEvent =
+  | Exclude<AgentEvent, { type: "stopped" }>
+  | (Extract<AgentEvent, { type: "stopped" }> & {
+      readonly persistence?: WebPersistenceState;
+    });
 
 export type ProviderSummary = {
   readonly name: string;
@@ -114,6 +148,10 @@ export type WebApiError = {
     | "permission-request"
     | "context-session"
     | "context-compression"
+    | "conversation-not-found"
+    | "conversation-conflict"
+    | "conversation-busy"
+    | "conversation-storage"
     | "invalid-request"
     | "forbidden";
 };
@@ -129,10 +167,9 @@ export function parseWebChatRequest(value: unknown): WebChatRequest {
   if (
     !isRecord(value) ||
     !hasExactFields(value, [
-      "provider",
-      "workspaceId",
+      "conversationId",
+      "revision",
       "permissionSessionId",
-      "contextSessionId",
       "mode",
       "modeTurn",
       "input",
@@ -140,25 +177,14 @@ export function parseWebChatRequest(value: unknown): WebChatRequest {
   ) {
     throw new WebChatContractError("对话请求格式无效。");
   }
-  if (typeof value.provider !== "string" || value.provider.trim().length === 0) {
-    throw new WebChatContractError("必须选择模型配置。");
+  if (!isSafePermissionId(value.conversationId, MAX_CONTEXT_SESSION_ID_LENGTH)) {
+    throw new WebChatContractError("会话 ID 无效。");
   }
-  if (value.provider.length > 128) {
-    throw new WebChatContractError("模型配置名称过长。");
-  }
-  if (
-    typeof value.workspaceId !== "string" ||
-    value.workspaceId.length === 0 ||
-    value.workspaceId.length > MAX_WEB_WORKSPACE_ID_LENGTH ||
-    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value.workspaceId)
-  ) {
-    throw new WebChatContractError("Workspace ID 无效。");
+  if (!isNonNegativeInteger(value.revision, Number.MAX_SAFE_INTEGER)) {
+    throw new WebChatContractError("会话修订号无效。");
   }
   if (!isSafePermissionId(value.permissionSessionId, MAX_PERMISSION_SESSION_ID_LENGTH)) {
     throw new WebChatContractError("权限会话 ID 无效。");
-  }
-  if (!isSafePermissionId(value.contextSessionId, MAX_CONTEXT_SESSION_ID_LENGTH)) {
-    throw new WebChatContractError("上下文会话 ID 无效。");
   }
   if (!isAgentMode(value.mode)) {
     throw new WebChatContractError("Agent 模式无效。");
@@ -177,55 +203,134 @@ export function parseWebChatRequest(value: unknown): WebChatRequest {
   }
 
   return {
-    provider: value.provider.trim(),
-    workspaceId: value.workspaceId,
+    conversationId: value.conversationId,
+    revision: value.revision,
     permissionSessionId: value.permissionSessionId,
-    contextSessionId: value.contextSessionId,
     mode: value.mode,
     modeTurn: value.modeTurn,
     input: value.input,
   };
 }
 
-export function parseContextSessionCreateRequest(
+export function parseConversationCreateRequest(
   value: unknown,
-): ContextSessionCreateRequest {
+): ConversationCreateRequest {
+  const fields = isRecord(value) && value.title !== undefined
+    ? ["providerId", "workspaceId", "title"]
+    : ["providerId", "workspaceId"];
   if (
     !isRecord(value) ||
-    !hasExactFields(value, ["provider", "workspaceId"]) ||
-    typeof value.provider !== "string" ||
-    value.provider.trim().length === 0 ||
-    value.provider.length > 128 ||
+    !hasExactFields(value, fields) ||
+    typeof value.providerId !== "string" ||
+    value.providerId.trim().length === 0 ||
+    value.providerId.length > 128 ||
     typeof value.workspaceId !== "string" ||
     value.workspaceId.length === 0 ||
     value.workspaceId.length > MAX_WEB_WORKSPACE_ID_LENGTH ||
-    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value.workspaceId)
+    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value.workspaceId) ||
+    (value.title !== undefined &&
+      (typeof value.title !== "string" || value.title.trim().length === 0 || value.title.length > 120))
   ) {
-    throw new WebChatContractError("上下文会话创建请求无效。");
-  }
-  return { provider: value.provider.trim(), workspaceId: value.workspaceId };
-}
-
-export function parseContextSessionResponse(
-  value: unknown,
-): ContextSessionResponse {
-  if (
-    !isRecord(value) ||
-    !hasExactFields(value, ["sessionId", "provider", "workspaceId"]) ||
-    !isSafePermissionId(value.sessionId, MAX_CONTEXT_SESSION_ID_LENGTH) ||
-    typeof value.provider !== "string" ||
-    value.provider.length === 0 ||
-    value.provider.length > 128 ||
-    typeof value.workspaceId !== "string" ||
-    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value.workspaceId)
-  ) {
-    throw new WebChatContractError("服务端返回了无效的上下文会话。");
+    throw new WebChatContractError("会话创建请求无效。");
   }
   return {
-    sessionId: value.sessionId,
-    provider: value.provider,
+    providerId: value.providerId.trim(),
     workspaceId: value.workspaceId,
+    ...(value.title === undefined ? {} : { title: value.title.trim() }),
   };
+}
+
+export function parseConversationMutationRequest(
+  value: unknown,
+): ConversationMutationRequest {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, ["expectedRevision"]) ||
+    !isNonNegativeInteger(value.expectedRevision, Number.MAX_SAFE_INTEGER)
+  ) throw new WebChatContractError("会话修改请求无效。");
+  return { expectedRevision: value.expectedRevision };
+}
+
+export function parseConversationRenameRequest(
+  value: unknown,
+): ConversationRenameRequest {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, ["expectedRevision", "title"]) ||
+    !isNonNegativeInteger(value.expectedRevision, Number.MAX_SAFE_INTEGER) ||
+    typeof value.title !== "string" ||
+    value.title.trim().length === 0 ||
+    value.title.length > 120
+  ) throw new WebChatContractError("会话重命名请求无效。");
+  return { expectedRevision: value.expectedRevision, title: value.title.trim() };
+}
+
+export function parseConversationCatalogResponse(
+  value: unknown,
+): ConversationCatalogResponse {
+  if (!isRecord(value) || !hasExactFields(value, ["conversations"]) || !Array.isArray(value.conversations)) {
+    throw new WebChatContractError("服务端返回了无效的会话列表。");
+  }
+  const conversations = value.conversations.map((item) =>
+    parseConversationCheckpoint({
+      schemaVersion: 1,
+      summary: item,
+      mode: "do",
+      modeTurn: 0,
+      displayMessages: [],
+      context: { messages: [], consecutiveSummaryFailures: 0 },
+    }).summary
+  );
+  return { conversations };
+}
+
+export function parseConversationDetailResponse(
+  value: unknown,
+): ConversationDetailResponse {
+  const fields = isRecord(value) && value.unavailableReason !== undefined
+    ? ["schemaVersion", "summary", "mode", "modeTurn", "displayMessages", "availability", "unavailableReason", "activity"]
+    : ["schemaVersion", "summary", "mode", "modeTurn", "displayMessages", "availability", "activity"];
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, fields) ||
+    (value.availability !== "ready" && value.availability !== "read-only") ||
+    !isConversationActivity(value.activity)
+  ) {
+    throw new WebChatContractError("服务端返回了无效的会话详情。");
+  }
+  const { availability, unavailableReason, activity, ...displayValue } = value;
+  if (unavailableReason !== undefined && typeof unavailableReason !== "string") {
+    throw new WebChatContractError("服务端返回了无效的会话详情。");
+  }
+  try {
+    const checkpoint = parseConversationCheckpoint({
+      ...displayValue,
+      context: { messages: [], consecutiveSummaryFailures: 0 },
+    });
+    return {
+      schemaVersion: checkpoint.schemaVersion,
+      summary: checkpoint.summary,
+      mode: checkpoint.mode,
+      modeTurn: checkpoint.modeTurn,
+      displayMessages: checkpoint.displayMessages,
+      availability,
+      activity,
+      ...(unavailableReason === undefined ? {} : { unavailableReason }),
+    };
+  } catch {
+    throw new WebChatContractError("服务端返回了无效的会话详情。");
+  }
+}
+
+function isConversationActivity(value: unknown): value is ConversationActivity {
+  if (!isRecord(value) || typeof value.status !== "string") return false;
+  if (
+    (value.status === "idle" || value.status === "active") &&
+    hasExactFields(value, ["status"])
+  ) return true;
+  return value.status === "interrupted" &&
+    hasExactFields(value, ["status", "expectedRevision"]) &&
+    isNonNegativeInteger(value.expectedRevision, Number.MAX_SAFE_INTEGER);
 }
 
 export function parseContextCompressionResponse(
@@ -513,7 +618,7 @@ function parsePermissionRequestedEvent(
       "sequence",
       "prompt",
     ]) ||
-    !isPositiveInteger(value.iteration, 32) ||
+    !isPositiveInteger(value.iteration, MAX_WEB_AGENT_ITERATION) ||
     !isSafeCallId(value.callId) ||
     !isSafeToolName(value.name) ||
     !isNonNegativeInteger(value.sequence, 15)
@@ -542,7 +647,7 @@ function parsePermissionResolvedEvent(
     : ["type", "iteration", "callId", "name", "sequence", "requestId", "status", "scope"];
   if (
     !hasExactFields(value, allowedFields) ||
-    !isPositiveInteger(value.iteration, 32) ||
+    !isPositiveInteger(value.iteration, MAX_WEB_AGENT_ITERATION) ||
     !isSafeCallId(value.callId) ||
     !isSafeToolName(value.name) ||
     !isNonNegativeInteger(value.sequence, 15) ||
@@ -608,21 +713,27 @@ function parsePermissionPrompt(value: unknown): PermissionPrompt {
 
 function parseProgressEvent(value: Record<string, unknown>): WebChatEvent {
   if (
-    !isPositiveInteger(value.iteration, 32) ||
-    !isPositiveInteger(value.maxIterations, 32) ||
-    value.iteration > value.maxIterations
+    !isPositiveInteger(value.iteration, MAX_WEB_AGENT_ITERATION) ||
+    !isIterationLimit(value.maxIterations) ||
+    (typeof value.maxIterations === "number" && value.iteration > value.maxIterations)
   ) {
     throw invalidEvent();
   }
-  if (
-    value.phase === "model" &&
-    hasExactFields(value, ["type", "iteration", "maxIterations", "phase"])
-  ) {
+  if (value.phase === "model") {
+    const hasModel = value.model !== undefined;
+    if (!hasExactFields(
+      value,
+      hasModel
+        ? ["type", "iteration", "maxIterations", "phase", "model"]
+        : ["type", "iteration", "maxIterations", "phase"],
+    )) throw invalidEvent();
+    const model = hasModel ? parseModelProgress(value.model) : undefined;
     return {
       type: "progress",
       iteration: value.iteration,
       maxIterations: value.maxIterations,
       phase: "model",
+      ...(model === undefined ? {} : { model }),
     };
   }
   if (
@@ -651,10 +762,41 @@ function parseProgressEvent(value: Record<string, unknown>): WebChatEvent {
   throw invalidEvent();
 }
 
+function parseModelProgress(
+  value: unknown,
+): NonNullable<Extract<WebChatEvent, { type: "progress" }>["model"]> {
+  if (!isRecord(value)) throw invalidEvent();
+  const fields = [
+    "stage",
+    "elapsedMs",
+    "attempt",
+    ...(value.traceId === undefined ? [] : ["traceId"]),
+    ...(value.toolName === undefined ? [] : ["toolName"]),
+    ...(value.toolArgumentsChars === undefined ? [] : ["toolArgumentsChars"]),
+  ];
+  if (
+    !hasExactFields(value, fields) ||
+    ![
+      "waiting-first-byte",
+      "streaming-text",
+      "streaming-tool-arguments",
+      "waiting-done",
+    ].includes(String(value.stage)) ||
+    !isNonNegativeInteger(value.elapsedMs, 30 * 60 * 1_000) ||
+    !isPositiveInteger(value.attempt, 4) ||
+    (value.traceId !== undefined &&
+      (typeof value.traceId !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(value.traceId))) ||
+    (value.toolName !== undefined && !isSafeToolName(value.toolName)) ||
+    (value.toolArgumentsChars !== undefined &&
+      !isNonNegativeInteger(value.toolArgumentsChars, MAX_TOOL_ARGUMENTS_JSON_CHARS))
+  ) throw invalidEvent();
+  return value as NonNullable<Extract<WebChatEvent, { type: "progress" }>["model"]>;
+}
+
 function parseTextEvent(value: Record<string, unknown>): WebChatEvent {
   if (
     !hasExactFields(value, ["type", "iteration", "text"]) ||
-    !isPositiveInteger(value.iteration, 32) ||
+    !isPositiveInteger(value.iteration, MAX_WEB_AGENT_ITERATION) ||
     typeof value.text !== "string" ||
     value.text.length === 0
   ) {
@@ -666,7 +808,7 @@ function parseTextEvent(value: Record<string, unknown>): WebChatEvent {
 function parseToolCallEvent(value: Record<string, unknown>): WebChatEvent {
   if (
     !hasExactFields(value, ["type", "iteration", "call", "sequence"]) ||
-    !isPositiveInteger(value.iteration, 32) ||
+    !isPositiveInteger(value.iteration, MAX_WEB_AGENT_ITERATION) ||
     !isNonNegativeInteger(value.sequence, 15)
   ) {
     throw invalidEvent();
@@ -682,7 +824,7 @@ function parseToolCallEvent(value: Record<string, unknown>): WebChatEvent {
 function parseToolStartedEvent(value: Record<string, unknown>): WebChatEvent {
   if (
     !hasExactFields(value, ["type", "iteration", "callId", "name", "sequence"]) ||
-    !isPositiveInteger(value.iteration, 32) ||
+    !isPositiveInteger(value.iteration, MAX_WEB_AGENT_ITERATION) ||
     !isSafeCallId(value.callId) ||
     !isSafeToolName(value.name) ||
     !isNonNegativeInteger(value.sequence, 15)
@@ -708,7 +850,7 @@ function parseToolResultEvent(value: Record<string, unknown>): WebChatEvent {
       "sequence",
       "result",
     ]) ||
-    !isPositiveInteger(value.iteration, 32) ||
+    !isPositiveInteger(value.iteration, MAX_WEB_AGENT_ITERATION) ||
     !isSafeCallId(value.callId) ||
     !isSafeToolName(value.name) ||
     !isNonNegativeInteger(value.sequence, 15)
@@ -728,7 +870,7 @@ function parseToolResultEvent(value: Record<string, unknown>): WebChatEvent {
 function parseTokenUsageEvent(value: Record<string, unknown>): WebChatEvent {
   if (
     !hasExactFields(value, ["type", "iteration", "usage", "cumulative"]) ||
-    !isPositiveInteger(value.iteration, 32)
+    !isPositiveInteger(value.iteration, MAX_WEB_AGENT_ITERATION)
   ) {
     throw invalidEvent();
   }
@@ -743,21 +885,22 @@ function parseTokenUsageEvent(value: Record<string, unknown>): WebChatEvent {
 function parseStoppedEvent(value: Record<string, unknown>): WebChatEvent {
   if (
     !isAgentStopReason(value.reason) ||
-    !isNonNegativeInteger(value.iterations, 32) ||
+    !isNonNegativeInteger(value.iterations, MAX_WEB_AGENT_ITERATION) ||
+    !isNonNegativeInteger(value.durationMs, Number.MAX_SAFE_INTEGER) ||
     !isSideEffectState(value.sideEffect)
   ) {
     throw invalidEvent();
   }
   if (value.reason === "final-response") {
+    const fields = [
+      "type", "reason", "iterations", "durationMs", "sideEffect", "finalMessage",
+      ...(value.verification === undefined ? [] : ["verification"]),
+      ...(value.persistence === undefined ? [] : ["persistence"]),
+    ];
     if (
-      !hasExactFields(value, [
-        "type",
-        "reason",
-        "iterations",
-        "sideEffect",
-        "finalMessage",
-      ]) ||
-      !isAssistantMessage(value.finalMessage)
+      !hasExactFields(value, fields) ||
+      !isAssistantMessage(value.finalMessage) ||
+      (value.verification !== undefined && !isCompletionAssessment(value.verification))
     ) {
       throw invalidEvent();
     }
@@ -765,21 +908,26 @@ function parseStoppedEvent(value: Record<string, unknown>): WebChatEvent {
       type: "stopped",
       reason: "final-response",
       iterations: value.iterations,
+      durationMs: value.durationMs,
       sideEffect: value.sideEffect,
       finalMessage: value.finalMessage,
+      ...(value.verification === undefined ? {} : { verification: value.verification }),
+      ...(value.persistence === undefined
+        ? {}
+        : { persistence: parsePersistenceState(value.persistence) }),
     };
   }
+  const fields = [
+    "type", "reason", "iterations", "durationMs", "sideEffect", "detail",
+    ...(value.verification === undefined ? [] : ["verification"]),
+    ...(value.persistence === undefined ? [] : ["persistence"]),
+  ];
   if (
-    !hasExactFields(value, [
-      "type",
-      "reason",
-      "iterations",
-      "sideEffect",
-      "detail",
-    ]) ||
+    !hasExactFields(value, fields) ||
     typeof value.detail !== "string" ||
     value.detail.length === 0 ||
-    value.detail.length > 1_000
+    value.detail.length > 1_000 ||
+    (value.verification !== undefined && !isCompletionAssessment(value.verification))
   ) {
     throw invalidEvent();
   }
@@ -787,9 +935,32 @@ function parseStoppedEvent(value: Record<string, unknown>): WebChatEvent {
     type: "stopped",
     reason: value.reason,
     iterations: value.iterations,
+    durationMs: value.durationMs,
     sideEffect: value.sideEffect,
     detail: value.detail,
+    ...(value.verification === undefined ? {} : { verification: value.verification }),
+    ...(value.persistence === undefined
+      ? {}
+      : { persistence: parsePersistenceState(value.persistence) }),
   };
+}
+
+function parsePersistenceState(value: unknown): WebPersistenceState {
+  if (
+    isRecord(value) &&
+    value.status === "saved" &&
+    hasExactFields(value, ["status", "revision"]) &&
+    isNonNegativeInteger(value.revision, Number.MAX_SAFE_INTEGER)
+  ) return { status: "saved", revision: value.revision };
+  if (
+    isRecord(value) &&
+    value.status === "failed" &&
+    hasExactFields(value, ["status", "detail"]) &&
+    typeof value.detail === "string" &&
+    value.detail.length > 0 &&
+    value.detail.length <= 1_000
+  ) return { status: "failed", detail: value.detail };
+  throw invalidEvent();
 }
 
 function parseModelToolCall(value: unknown): ModelToolCall {
@@ -1060,11 +1231,17 @@ function isAgentMode(value: unknown): value is AgentMode {
   return value === "plan" || value === "do";
 }
 
+function isIterationLimit(value: unknown): value is AgentIterationLimit {
+  return value === "unlimited" || isPositiveInteger(value, 32);
+}
+
 const STOP_REASONS = new Set<AgentStopReason>([
   "final-response",
   "max-iterations",
+  "max-runtime",
   "cancelled",
   "repeated-unknown-tool",
+  "repeated-tool-failure",
   "context-error",
   "context-capacity",
   "context-circuit-open",

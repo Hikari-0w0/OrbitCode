@@ -51,6 +51,8 @@ test("加载单个合法配置并从环境解析凭据", async () => {
       automaticReserveTokens: 13000,
       manualReserveTokens: 3000,
       previewChars: 2000,
+      operationalCompactionTokens: 24000,
+      recentToolExchanges: 4,
     },
     apiKey: "test-secret",
   });
@@ -106,6 +108,60 @@ test("解析显式思考模式并保留未配置 Provider 的默认行为", asyn
   assert.equal(omitted.thinking, undefined);
 });
 
+test("解析 DeepSeek 官方思考参数风格", async () => {
+  const configured = VALID_PROVIDER.replace(
+    "    context:",
+    [
+      "    thinking:",
+      "      enabled: false",
+      "      api_style: deepseek",
+      "    context:",
+    ].join("\n"),
+  );
+
+  assert.deepEqual((await load(configured)).thinking, {
+    enabled: false,
+    apiStyle: "deepseek",
+  });
+});
+
+test("解析模型传输超时与有限重试策略", async () => {
+  const configured = VALID_PROVIDER.replace(
+    "    context:",
+    [
+      "    transport:",
+      "      first_byte_timeout_ms: 30000",
+      "      idle_timeout_ms: 300000",
+      "      total_timeout_ms: 600000",
+      "      max_retries: 1",
+      "    context:",
+    ].join("\n"),
+  );
+
+  assert.deepEqual((await load(configured)).transport, {
+    firstByteTimeoutMs: 30_000,
+    idleTimeoutMs: 300_000,
+    totalTimeoutMs: 600_000,
+    maxRetries: 1,
+  });
+  assert.equal((await load(VALID_PROVIDER)).transport, undefined);
+});
+
+test("拒绝不完整、越界或关系错误的模型传输策略", async () => {
+  const withTransport = (body: string) => VALID_PROVIDER.replace(
+    "    context:",
+    `    transport:\n${body}\n    context:`,
+  );
+  for (const source of [
+    withTransport("      first_byte_timeout_ms: 30000"),
+    withTransport("      first_byte_timeout_ms: 99\n      idle_timeout_ms: 100\n      total_timeout_ms: 100\n      max_retries: 0"),
+    withTransport("      first_byte_timeout_ms: 200\n      idle_timeout_ms: 200\n      total_timeout_ms: 100\n      max_retries: 0"),
+    withTransport("      first_byte_timeout_ms: 100\n      idle_timeout_ms: 100\n      total_timeout_ms: 100\n      max_retries: 4"),
+  ]) {
+    await assert.rejects(load(source), ConfigurationError);
+  }
+});
+
 test("拒绝无效思考开关和越界预算", async () => {
   const withThinking = (body: string) => VALID_PROVIDER.replace(
     "    context:",
@@ -116,6 +172,8 @@ test("拒绝无效思考开关和越界预算", async () => {
     withThinking("      enabled: false\n      budget_tokens: 1024"),
     withThinking("      enabled: true\n      budget_tokens: 127"),
     withThinking("      enabled: true\n      budget_tokens: 32769"),
+    withThinking("      enabled: false\n      api_style: unknown"),
+    withThinking("      enabled: true\n      api_style: deepseek\n      budget_tokens: 1024"),
   ]) {
     await assert.rejects(load(source), ConfigurationError);
   }

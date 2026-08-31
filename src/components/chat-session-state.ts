@@ -5,6 +5,7 @@ import type {
   VisibleToolExecution,
 } from "@/components/message-list";
 import type { AgentMode } from "@/core/agent-events";
+import type { PersistedDisplayMessage } from "@/core/conversations/types";
 import type { PlainConversationMessage } from "@/models/provider";
 import type { WebChatEvent } from "@/web/chat-contract";
 
@@ -18,6 +19,10 @@ type TokenUsageEvent = Extract<WebChatEvent, { type: "token-usage" }>;
 type StoppedEvent = Extract<WebChatEvent, { type: "stopped" }>;
 
 export type ChatSessionState = {
+  readonly conversationId: string;
+  readonly revision: number;
+  readonly conversationAvailability: "loading" | "ready" | "read-only";
+  readonly unsavedExpectedRevision?: number;
   readonly selectedWorkspaceId: string;
   readonly selectedProvider: string;
   readonly mode: AgentMode;
@@ -38,6 +43,18 @@ export type ChatSessionAction =
     }
   | { readonly type: "workspace-selected"; readonly workspaceId: string }
   | { readonly type: "provider-selected"; readonly provider: string }
+  | {
+      readonly type: "conversation-loaded";
+      readonly conversationId: string;
+      readonly revision: number;
+      readonly workspaceId: string;
+      readonly provider: string;
+      readonly mode: AgentMode;
+      readonly modeTurn: number;
+      readonly messages: readonly PersistedDisplayMessage[];
+      readonly availability: "ready" | "read-only";
+      readonly notice?: string;
+    }
   | {
       readonly type: "mode-selected";
       readonly mode: AgentMode;
@@ -82,6 +99,8 @@ export type ChatSessionAction =
       readonly userMessage: PlainConversationMessage;
       readonly finalMessage: PlainConversationMessage;
       readonly mode: AgentMode;
+      readonly event?: StoppedEvent;
+      readonly durationMs?: number;
     }
   | {
       readonly type: "request-stopped";
@@ -98,6 +117,9 @@ export type ChatSessionAction =
   | { readonly type: "request-settled" };
 
 export const INITIAL_CHAT_SESSION_STATE: ChatSessionState = {
+  conversationId: "",
+  revision: 0,
+  conversationAvailability: "loading",
   selectedWorkspaceId: "",
   selectedProvider: "",
   mode: "do",
@@ -112,6 +134,29 @@ export function chatSessionReducer(
   state: ChatSessionState,
   action: ChatSessionAction,
 ): ChatSessionState {
+  if (action.type === "conversation-loaded") {
+    return {
+      ...state,
+      conversationId: action.conversationId,
+      revision: action.revision,
+      conversationAvailability: action.availability,
+      unsavedExpectedRevision: undefined,
+      selectedWorkspaceId: action.workspaceId,
+      selectedProvider: action.provider,
+      mode: action.mode,
+      modeTurn: action.modeTurn,
+      messages: action.messages.map((message) => ({ ...message })),
+      history: action.messages.flatMap((message): readonly PlainConversationMessage[] =>
+        message.content.length === 0
+          ? []
+          : [{ role: message.role, content: message.content }],
+      ),
+      draft: "",
+      requestState: "idle",
+      executablePlanMessageId: undefined,
+      notice: action.notice,
+    };
+  }
   if (action.type === "catalogs-ready") {
     return {
       ...state,
@@ -299,6 +344,8 @@ export function chatSessionReducer(
         : action.finalMessage.content,
       state: "complete",
       stopReason: "final-response",
+      durationMs: action.event?.durationMs ?? action.durationMs ?? 0,
+      verification: action.event?.verification,
       progress: undefined,
     }));
     return {
@@ -306,6 +353,15 @@ export function chatSessionReducer(
       history: [...state.history, action.userMessage, action.finalMessage],
       executablePlanMessageId:
         action.mode === "plan" ? action.assistantId : undefined,
+      revision: action.event?.persistence?.status === "saved"
+        ? action.event.persistence.revision
+        : state.revision,
+      notice: action.event?.persistence?.status === "failed"
+        ? action.event.persistence.detail
+        : next.notice,
+      unsavedExpectedRevision: action.event?.persistence?.status === "failed"
+        ? state.revision
+        : undefined,
     };
   }
   if (action.type === "request-stopped") {
@@ -315,13 +371,23 @@ export function chatSessionReducer(
       state: action.event.reason === "cancelled" ? "cancelled" : "failed",
       detail,
       stopReason: action.event.reason,
+      durationMs: action.event.durationMs,
+      verification: action.event.verification,
       progress: undefined,
       toolExecutions: settleInterruptedTools(message.toolExecutions ?? []),
     }));
     return {
       ...next,
       executablePlanMessageId: undefined,
-      notice: action.event.reason === "cancelled" ? undefined : detail,
+      revision: action.event.persistence?.status === "saved"
+        ? action.event.persistence.revision
+        : state.revision,
+      notice: action.event.persistence?.status === "failed"
+        ? action.event.persistence.detail
+        : action.event.reason === "cancelled" ? undefined : detail,
+      unsavedExpectedRevision: action.event.persistence?.status === "failed"
+        ? state.revision
+        : undefined,
     };
   }
   if (action.type === "request-transport-failed") {
@@ -386,6 +452,10 @@ function resetConversation(
   return {
     ...state,
     ...selections,
+    conversationId: "",
+    revision: 0,
+    conversationAvailability: "loading",
+    unsavedExpectedRevision: undefined,
     mode: "do",
     modeTurn: 0,
     messages: [],
@@ -554,8 +624,10 @@ function stopDetail(event: StoppedEvent): string {
 function stopReasonLabel(reason: StoppedEvent["reason"]): string {
   if (reason === "final-response") return "任务已完成";
   if (reason === "max-iterations") return "已达到最大迭代次数";
+  if (reason === "max-runtime") return "已达到最大运行时间";
   if (reason === "cancelled") return "用户已取消运行";
   if (reason === "repeated-unknown-tool") return "模型连续请求未知工具";
+  if (reason === "repeated-tool-failure") return "工具连续产生同类失败";
   if (reason === "context-error") return "上下文压缩失败";
   if (reason === "context-capacity") return "上下文容量不足";
   if (reason === "context-circuit-open") return "上下文自动压缩已熔断";

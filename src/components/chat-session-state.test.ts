@@ -31,6 +31,33 @@ test("Workspace 真实切换清空会话并恢复 Do，重选当前项不重置"
   assert.equal(next.executablePlanMessageId, undefined);
 });
 
+test("加载持久化会话恢复绑定、终态工具时间线和 revision", () => {
+  const restored = chatSessionReducer(INITIAL_CHAT_SESSION_STATE, {
+    type: "conversation-loaded",
+    conversationId: "conversation-1",
+    revision: 4,
+    workspaceId: "project",
+    provider: "deepseek",
+    mode: "do",
+    modeTurn: 2,
+    availability: "ready",
+    messages: [
+      { id: "user-1", role: "user", content: "检查", state: "complete" },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "完成",
+        state: "complete",
+        durationMs: 80,
+      },
+    ],
+  });
+  assert.equal(restored.conversationId, "conversation-1");
+  assert.equal(restored.revision, 4);
+  assert.equal(restored.messages[1]?.durationMs, 80);
+  assert.deepEqual(restored.history.map((item) => item.content), ["检查", "完成"]);
+});
+
 test("Provider 切换和清空会话保留 Workspace", () => {
   const switched = chatSessionReducer(populatedState(), {
     type: "provider-selected",
@@ -84,6 +111,7 @@ test("仅成功 Plan 回复成为最新可执行候选", () => {
     userMessage: { role: "user", content: "新计划" },
     finalMessage: { role: "assistant", content: "计划内容" },
     mode: "plan",
+    durationMs: 1_200,
   });
   assert.equal(completed.executablePlanMessageId, "assistant-new");
   assert.equal(completed.history.at(-1)?.content, "计划内容");
@@ -97,6 +125,7 @@ test("仅成功 Plan 回复成为最新可执行候选", () => {
     userMessage: { role: "user", content: "执行" },
     finalMessage: { role: "assistant", content: "完成" },
     mode: "do",
+    durationMs: 800,
   });
   assert.equal(doCompleted.executablePlanMessageId, undefined);
 });
@@ -131,6 +160,7 @@ test("模型文字与工具调用按事件顺序保留，完成时不覆盖中�
     userMessage: { role: "user", content: "新计划" },
     finalMessage: { role: "assistant", content: "读取完成。" },
     mode: "do",
+    durationMs: 1_500,
   });
 
   const message = state.messages.find((item) => item.id === "assistant-new");
@@ -151,6 +181,7 @@ test("失败、取消和非最终停止不污染历史或 Plan 候选", () => {
       type: "stopped",
       reason: "max-iterations",
       iterations: 8,
+      durationMs: 8_000,
       sideEffect: "none",
       detail: "已到上限",
     },
@@ -166,6 +197,59 @@ test("失败、取消和非最终停止不污染历史或 Plan 候选", () => {
   });
   assert.equal(cancelled.executablePlanMessageId, undefined);
   assert.equal(cancelled.notice, undefined);
+});
+
+test("中断后保留已展示的文字和工具顺序并收敛未完成工具", () => {
+  let state = startRequest({ ...populatedState(), requestState: "idle" }, "do");
+  state = chatSessionReducer(state, {
+    type: "text-delta",
+    assistantId: "assistant-new",
+    iteration: 1,
+    text: "正在检查。",
+  });
+  state = chatSessionReducer(state, {
+    type: "tool-call",
+    assistantId: "assistant-new",
+    event: {
+      type: "tool-call",
+      iteration: 1,
+      sequence: 0,
+      call: { id: "read-running", name: "read_file", argumentsJson: "{}" },
+    },
+  });
+  state = chatSessionReducer(state, {
+    type: "tool-started",
+    assistantId: "assistant-new",
+    event: {
+      type: "tool-started",
+      iteration: 1,
+      sequence: 0,
+      callId: "read-running",
+      name: "read_file",
+    },
+  });
+  state = chatSessionReducer(state, {
+    type: "request-stopped",
+    assistantId: "assistant-new",
+    event: {
+      type: "stopped",
+      reason: "cancelled",
+      iterations: 1,
+      durationMs: 900,
+      sideEffect: "none",
+      detail: "Agent 轮次已取消。",
+    },
+  });
+
+  const message = state.messages.find((item) => item.id === "assistant-new");
+  assert.equal(message?.content, "正在检查。");
+  assert.deepEqual(message?.parts, [
+    { type: "text", iteration: 1, content: "正在检查。" },
+    { type: "tool", iteration: 1, callId: "read-running" },
+  ]);
+  assert.equal(message?.toolExecutions?.[0]?.state, "cancelled");
+  assert.equal(message?.state, "cancelled");
+  assert.equal(message?.stopReason, "cancelled");
 });
 
 test("请求期间拒绝 Workspace、Provider、Mode 和清空转换", () => {

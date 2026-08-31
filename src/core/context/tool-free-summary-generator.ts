@@ -34,7 +34,9 @@ export class ToolFreeSummaryGenerator {
         if (signal.aborted) {
           throw new ContextManagementError("cancelled", "上下文压缩已取消。");
         }
-        if (event.type === "reasoning-delta") {
+        if (event.type === "request-progress") {
+          continue;
+        } else if (event.type === "reasoning-delta") {
           if (completed) throw protocolError("摘要完成后仍返回推理内容。");
         } else if (event.type === "text-delta") {
           if (completed) throw protocolError("摘要完成后仍返回文本。");

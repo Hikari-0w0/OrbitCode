@@ -4,6 +4,7 @@ import {
   providerMessages,
 } from "@/core/context/heavy-compaction";
 import { compactToolResults } from "@/core/context/lightweight-compaction";
+import { compactOperationalHistory } from "@/core/context/operational-compaction";
 import {
   TokenEstimator,
   type TokenEstimatorState,
@@ -49,6 +50,11 @@ export type ContextManagerSnapshot = {
   readonly consecutiveSummaryFailures: number;
 };
 
+export type ContextManagerPersistentState = {
+  readonly messages: readonly ManagedContextMessage[];
+  readonly consecutiveSummaryFailures: number;
+};
+
 export class ContextManager {
   private committed: ManagedContextMessage[];
   private readonly estimator = new TokenEstimator();
@@ -65,13 +71,25 @@ export class ContextManager {
       readonly store: ContextStore;
       readonly provider: ChatProvider;
       readonly initialHistory?: readonly PlainConversationMessage[];
+      readonly initialState?: ContextManagerPersistentState;
     },
   ) {
+    if (options.initialHistory !== undefined && options.initialState !== undefined) {
+      throw new ContextManagementError(
+        "session",
+        "上下文不能同时从纯文本历史和持久化快照恢复。",
+      );
+    }
     this.generator = new ToolFreeSummaryGenerator(options.provider);
-    this.committed = (options.initialHistory ?? []).map((message) => ({
-      kind: message.role,
-      content: message.content,
-    }));
+    this.committed = options.initialState === undefined
+      ? (options.initialHistory ?? []).map((message) => ({
+          kind: message.role,
+          content: message.content,
+        }))
+      : cloneManagedMessages(options.initialState.messages);
+    if (options.initialState !== undefined) {
+      this.consecutiveSummaryFailures = options.initialState.consecutiveSummaryFailures;
+    }
   }
 
   beginTurn(userContent: string): void {
@@ -97,6 +115,15 @@ export class ContextManager {
   ): Promise<PreparedContext> {
     const turn = this.requireTurn();
     turn.lastEnvelope = cloneEnvelope(envelope);
+    const operational = await compactOperationalHistory({
+      messages: turn.messages,
+      sessionId: this.options.sessionId,
+      config: this.options.config,
+      store: this.options.store,
+      signal,
+    });
+    turn.messages = cloneManagedMessages(operational.messages);
+    turn.createdReferences.push(...operational.createdReferences);
     const light = await compactToolResults({
       messages: turn.messages,
       sessionId: this.options.sessionId,
@@ -294,6 +321,19 @@ export class ContextManager {
     return {
       messages: cloneManagedMessages(this.committed),
       compression: cloneCompressionState(this.lastCompression),
+      consecutiveSummaryFailures: this.consecutiveSummaryFailures,
+    };
+  }
+
+  persistentSnapshot(): ContextManagerPersistentState {
+    if (this.activeTurn) {
+      throw new ContextManagementError(
+        "concurrent",
+        "Agent 轮次结束前不能生成持久化上下文快照。",
+      );
+    }
+    return {
+      messages: cloneManagedMessages(this.committed),
       consecutiveSummaryFailures: this.consecutiveSummaryFailures,
     };
   }

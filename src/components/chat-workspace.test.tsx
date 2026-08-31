@@ -18,6 +18,12 @@ test("Provider 选择器在标签被响应式样式隐藏后仍有可访问名�
   );
 });
 
+test("对话页提供完整对话导出按钮", () => {
+  const markup = renderToStaticMarkup(<ChatWorkspace />);
+
+  assert.match(markup, /<button[^>]*class="exportButton"[^>]*>.*导出对话.*<\/button>/);
+});
+
 test("示例问题容器使用可命名的分组语义", () => {
   const markup = renderToStaticMarkup(<ChatWorkspace />);
 

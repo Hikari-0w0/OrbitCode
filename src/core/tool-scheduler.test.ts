@@ -13,6 +13,7 @@ import { defineTool, successfulToolResult, ToolRegistry } from "@/tools/registry
 import { integerSchema, objectSchema, stringSchema } from "@/tools/schema";
 import type { ToolMutability, ToolName, WorkspaceBoundary } from "@/tools/types";
 import { createWorkspaceBoundary } from "@/tools/workspace";
+import { writeFilesTool } from "@/tools/write-files";
 import { PermissionSessionManager } from "@/web/permission-session-manager";
 
 type Interval = {
@@ -303,6 +304,70 @@ test("等待授权时取消不会发出 started 或执行工具", async () => {
     await import("node:fs/promises").then(({ rm }) =>
       rm(root, { recursive: true, force: true }),
     );
+  }
+});
+
+test("批量写入逐路径授权，任一目标拒绝时整批不执行", async () => {
+  const { mkdtemp, rm, stat } = await import("node:fs/promises");
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-scheduler-multi-target-"));
+  const manager = new PermissionSessionManager();
+  try {
+    const permissionWorkspace = await createWorkspaceBoundary(root);
+    const session = manager.createSession();
+    const turn = manager.beginTurn(session.id, {
+      workspace: { id: "test", name: "Test" },
+      providerId: "test-provider",
+    });
+    const iterator = scheduleToolCalls({
+      calls: [{
+        id: "batch",
+        name: "write_files",
+        argumentsJson: JSON.stringify({
+          files: [
+            { path: "first.txt", content: "first" },
+            { path: "second.txt", content: "second" },
+          ],
+        }),
+      }],
+      access: createModeToolPolicy(new ToolRegistry([writeFilesTool]), "do"),
+      workspace: permissionWorkspace,
+      signal: new AbortController().signal,
+      permissionGateway: new PermissionGateway({
+        agentMode: "do",
+        permissionMode: "default",
+        workspace: permissionWorkspace,
+        broker: turn.broker,
+        loadRules: async () => [],
+      }),
+    })[Symbol.asyncIterator]();
+
+    const firstRequest = await iterator.next();
+    assert.equal(firstRequest.value?.type, "permission-requested");
+    if (firstRequest.value?.type !== "permission-requested") return;
+    manager.resolveDecision(session.id, firstRequest.value.prompt.requestId, "allow-once");
+
+    assert.equal((await iterator.next()).value?.type, "permission-resolved");
+    const secondRequest = await iterator.next();
+    assert.equal(secondRequest.value?.type, "permission-requested");
+    if (secondRequest.value?.type !== "permission-requested") return;
+    manager.resolveDecision(session.id, secondRequest.value.prompt.requestId, "deny");
+
+    const remaining = await collect({
+      [Symbol.asyncIterator]: () => iterator,
+    });
+    assert.equal(remaining.some((event) => event.type === "started"), false);
+    assert.equal(
+      remaining.some((event) =>
+        event.type === "result" &&
+        !event.result.ok &&
+        event.result.error.kind === "user-denied"
+      ),
+      true,
+    );
+    await assert.rejects(stat(path.join(root, "first.txt")), /ENOENT/);
+    await assert.rejects(stat(path.join(root, "second.txt")), /ENOENT/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

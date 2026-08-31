@@ -1,19 +1,24 @@
 import type { PermissionPrompt } from "@/core/permissions/approval";
+import type { CompletionAssessment } from "@/core/completion-tracker";
 import type { PermissionResolutionStatus } from "@/core/tool-scheduler";
 import type {
   AssistantMessage,
+  ModelRequestStage,
   ModelToolCall,
   PromptCacheUsage,
 } from "@/models/provider";
 import type { SideEffectState, ToolExecutionResult } from "@/tools/types";
 
 export type AgentMode = "plan" | "do";
+export type AgentIterationLimit = number | "unlimited";
 
 export type AgentStopReason =
   | "final-response"
   | "max-iterations"
+  | "max-runtime"
   | "cancelled"
   | "repeated-unknown-tool"
+  | "repeated-tool-failure"
   | "context-error"
   | "context-capacity"
   | "context-circuit-open"
@@ -36,8 +41,16 @@ export type AgentEvent =
   | {
       readonly type: "progress";
       readonly iteration: number;
-      readonly maxIterations: number;
+      readonly maxIterations: AgentIterationLimit;
       readonly phase: AgentProgressPhase;
+      readonly model?: {
+        readonly stage: ModelRequestStage;
+        readonly elapsedMs: number;
+        readonly attempt: number;
+        readonly traceId?: string;
+        readonly toolName?: string;
+        readonly toolArgumentsChars?: number;
+      };
       readonly completedTools?: number;
       readonly totalTools?: number;
     }
@@ -95,7 +108,9 @@ export type AgentEvent =
       readonly type: "stopped";
       readonly reason: AgentStopReason;
       readonly iterations: number;
+      readonly durationMs: number;
       readonly sideEffect: SideEffectState;
       readonly finalMessage?: AssistantMessage;
       readonly detail?: string;
+      readonly verification?: CompletionAssessment;
     };

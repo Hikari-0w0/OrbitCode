@@ -3,11 +3,13 @@ import { constants as fileSystemConstants } from "node:fs";
 import {
   access,
   lstat,
+  mkdir,
   open,
   readdir,
   readFile,
   realpath,
   rename,
+  rmdir,
   rm,
   stat,
 } from "node:fs/promises";
@@ -110,11 +112,9 @@ class LocalWorkspaceBoundary implements WorkspaceBoundary {
     const normalized = normalizeRelativePath(input);
     assertAllowed(normalized);
     const parentRelative = path.posix.dirname(normalized);
-    const parent = await this.resolveExistingDirectory(
-      parentRelative === "." ? "." : parentRelative,
-    );
+    const parentAbsolutePath = await this.resolveWriteParent(parentRelative);
     const requestedAbsolutePath = path.join(
-      parent.absolutePath,
+      parentAbsolutePath,
       path.posix.basename(normalized),
     );
     const requestedState = await lstat(requestedAbsolutePath).catch((error: unknown) => {
@@ -240,46 +240,134 @@ class LocalWorkspaceBoundary implements WorkspaceBoundary {
     return { absolutePath: canonical, relativePath, existed: true };
   }
 
+  private async resolveWriteParent(parentRelative: string): Promise<string> {
+    if (parentRelative === ".") return this.root;
+    let current = this.root;
+    let encounteredMissingDirectory = false;
+    for (const segment of parentRelative.split("/")) {
+      const candidate = path.join(current, segment);
+      if (encounteredMissingDirectory) {
+        current = candidate;
+        continue;
+      }
+      const state = await lstat(candidate).catch((error: unknown) => {
+        if (isNodeError(error, "ENOENT")) return undefined;
+        throw mapFileError(error, "无法检查写入目录。");
+      });
+      if (state === undefined) {
+        encounteredMissingDirectory = true;
+        current = candidate;
+        continue;
+      }
+      const canonical = await realpath(candidate).catch((error: unknown) => {
+        throw mapFileError(error, "无法解析写入目录。", "invalid-path");
+      });
+      assertWithinRoot(this.root, canonical, "写入目录超出授权工作目录。");
+      const canonicalState = await safeLstat(canonical);
+      if (!canonicalState.isDirectory()) {
+        throw new WorkspaceError("not-directory", "写入目标的父路径不是目录。");
+      }
+      current = canonical;
+    }
+    assertWithinRoot(this.root, current, "写入目录超出授权工作目录。");
+    return current;
+  }
+
   private async commit(
     target: ResolvedWorkspacePath,
     content: string,
     expectedIdentity: FileIdentity | undefined,
   ): Promise<void> {
     const parent = path.dirname(target.absolutePath);
-    const canonicalParent = await realpath(parent);
-    if (!isWithinRoot(this.root, canonicalParent)) {
-      throw new WorkspaceError("invalid-path", "写入目标超出授权工作目录。");
-    }
-    const current = await lstat(target.absolutePath).catch((error: unknown) => {
-      if (isNodeError(error, "ENOENT")) return undefined;
-      throw mapFileError(error, "无法检查写入目标。");
-    });
-    if (current?.isSymbolicLink()) {
-      throw new WorkspaceError("conflict", "写入目标已变为符号链接。");
-    }
-    if (
-      (expectedIdentity === undefined && current !== undefined) ||
-      (expectedIdentity !== undefined &&
-        (current === undefined || !sameIdentity(expectedIdentity, identityOf(current))))
-    ) {
-      throw new WorkspaceError("conflict", "写入目标已被其他进程修改。");
-    }
-
-    const temporaryPath = path.join(parent, `.orbitcode-${randomUUID()}.tmp`);
-    let handle;
+    const createdDirectories = await this.ensureParentDirectories(parent);
     try {
-      handle = await open(temporaryPath, "wx", current?.mode ?? 0o600);
-      await handle.writeFile(content, "utf8");
-      await handle.sync();
-      await handle.close();
-      handle = undefined;
-      await this.options.beforeAtomicRename?.();
-      await rename(temporaryPath, target.absolutePath);
+      const canonicalParent = await realpath(parent).catch((error: unknown) => {
+        throw mapFileError(error, "无法解析写入目录。", "invalid-path");
+      });
+      if (!isWithinRoot(this.root, canonicalParent)) {
+        throw new WorkspaceError("invalid-path", "写入目标超出授权工作目录。");
+      }
+      if (canonicalParent !== parent) {
+        throw new WorkspaceError("conflict", "写入目录在执行期间发生变化。");
+      }
+      const current = await lstat(target.absolutePath).catch((error: unknown) => {
+        if (isNodeError(error, "ENOENT")) return undefined;
+        throw mapFileError(error, "无法检查写入目标。");
+      });
+      if (current?.isSymbolicLink()) {
+        throw new WorkspaceError("conflict", "写入目标已变为符号链接。");
+      }
+      if (
+        (expectedIdentity === undefined && current !== undefined) ||
+        (expectedIdentity !== undefined &&
+          (current === undefined || !sameIdentity(expectedIdentity, identityOf(current))))
+      ) {
+        throw new WorkspaceError("conflict", "写入目标已被其他进程修改。");
+      }
+
+      const temporaryPath = path.join(parent, `.orbitcode-${randomUUID()}.tmp`);
+      let handle;
+      try {
+        handle = await open(temporaryPath, "wx", current?.mode ?? 0o600);
+        await handle.writeFile(content, "utf8");
+        await handle.sync();
+        await handle.close();
+        handle = undefined;
+        await this.options.beforeAtomicRename?.();
+        await rename(temporaryPath, target.absolutePath);
+      } finally {
+        await handle?.close().catch(() => undefined);
+        await rm(temporaryPath, { force: true }).catch(() => undefined);
+      }
     } catch (error) {
+      await removeEmptyDirectories(createdDirectories);
       throw mapFileError(error, "无法原子写入文件。");
-    } finally {
-      await handle?.close().catch(() => undefined);
-      await rm(temporaryPath, { force: true }).catch(() => undefined);
+    }
+  }
+
+  private async ensureParentDirectories(parent: string): Promise<readonly string[]> {
+    assertWithinRoot(this.root, parent, "写入目录超出授权工作目录。");
+    const relative = path.relative(this.root, parent);
+    if (relative.length === 0) return [];
+    const created: string[] = [];
+    let current = this.root;
+    try {
+      for (const segment of relative.split(path.sep)) {
+        const candidate = path.join(current, segment);
+        let state = await lstat(candidate).catch((error: unknown) => {
+          if (isNodeError(error, "ENOENT")) return undefined;
+          throw mapFileError(error, "无法检查写入目录。");
+        });
+        if (state === undefined) {
+          try {
+            await mkdir(candidate, { mode: 0o700 });
+            created.push(candidate);
+          } catch (error) {
+            if (!isNodeError(error, "EEXIST")) {
+              throw mapFileError(error, "无法创建写入目录。");
+            }
+          }
+          state = await safeLstat(candidate);
+        }
+        if (state.isSymbolicLink()) {
+          throw new WorkspaceError("conflict", "写入目录已变为符号链接。");
+        }
+        if (!state.isDirectory()) {
+          throw new WorkspaceError("not-directory", "写入目标的父路径不是目录。");
+        }
+        const canonical = await realpath(candidate).catch((error: unknown) => {
+          throw mapFileError(error, "无法解析写入目录。", "invalid-path");
+        });
+        assertWithinRoot(this.root, canonical, "写入目录超出授权工作目录。");
+        current = canonical;
+      }
+      if (current !== parent) {
+        throw new WorkspaceError("conflict", "写入目录在执行期间发生变化。");
+      }
+      return created;
+    } catch (error) {
+      await removeEmptyDirectories(created);
+      throw error;
     }
   }
 }
@@ -376,6 +464,14 @@ function mapFileError(
 
 function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error && error.code === code;
+}
+
+async function removeEmptyDirectories(
+  directories: readonly string[],
+): Promise<void> {
+  for (const directory of [...directories].reverse()) {
+    await rmdir(directory).catch(() => undefined);
+  }
 }
 
 function assertNotAborted(signal: AbortSignal): void {

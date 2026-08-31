@@ -4,15 +4,19 @@ import {
   type ConversationMessage,
   type ModelStreamEvent,
   type ModelThinkingConfig,
+  type ProviderTransportPolicy,
   type ModelTokenUsage,
   type ModelToolCall,
   type PromptCacheUsage,
 } from "@/models/provider";
 import { parseServerSentEvents, SseError } from "@/models/sse";
-import type { ModelToolDefinition } from "@/tools/types";
+import {
+  MAX_TOOL_ARGUMENTS_JSON_CHARS,
+  type ModelToolDefinition,
+} from "@/tools/types";
 
 const MAX_MODEL_TOOL_CALLS = 16;
-const MAX_MODEL_TOOL_ARGUMENTS_LENGTH = 64 * 1024;
+const MAX_MODEL_TOOL_ARGUMENTS_LENGTH = MAX_TOOL_ARGUMENTS_JSON_CHARS;
 const MAX_REASONING_CONTENT_LENGTH = 256 * 1024;
 const SAFE_TOOL_CALL_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const SAFE_TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
@@ -22,7 +26,15 @@ type OpenAIProviderOptions = {
   readonly baseUrl: string;
   readonly apiKey: string;
   readonly thinking?: ModelThinkingConfig;
+  readonly transport?: ProviderTransportPolicy;
   readonly fetchImplementation?: typeof fetch;
+};
+
+export const DEFAULT_PROVIDER_TRANSPORT_POLICY: ProviderTransportPolicy = {
+  firstByteTimeoutMs: 30_000,
+  idleTimeoutMs: 300_000,
+  totalTimeoutMs: 600_000,
+  maxRetries: 1,
 };
 
 type ToolCallAccumulator = {
@@ -52,6 +64,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
   private readonly endpoint: URL;
   private readonly apiKey: string;
   private readonly thinking?: ModelThinkingConfig;
+  private readonly transport: ProviderTransportPolicy;
   private readonly fetchImplementation: typeof fetch;
 
   constructor({
@@ -59,12 +72,14 @@ export class OpenAICompatibleProvider implements ChatProvider {
     baseUrl,
     apiKey,
     thinking,
+    transport = DEFAULT_PROVIDER_TRANSPORT_POLICY,
     fetchImplementation = fetch,
   }: OpenAIProviderOptions) {
     this.model = model;
     this.endpoint = new URL(`${baseUrl.replace(/\/+$/, "")}/chat/completions`);
     this.apiKey = apiKey;
     this.thinking = thinking;
+    this.transport = transport;
     this.fetchImplementation = fetchImplementation;
   }
 
@@ -76,14 +91,62 @@ export class OpenAICompatibleProvider implements ChatProvider {
       readonly toolChoice: "auto" | "none";
     },
   ): AsyncIterable<ModelStreamEvent> {
+    for (let attempt = 1; ; attempt += 1) {
+      let semanticOutput = false;
+      try {
+        for await (const event of this.streamAttempt(messages, options, attempt)) {
+          if (
+            event.type === "reasoning-delta" ||
+            event.type === "text-delta" ||
+            event.type === "tool-call"
+          ) {
+            semanticOutput = true;
+          }
+          yield event;
+        }
+        return;
+      } catch (error) {
+        if (
+          !(error instanceof ProviderError) ||
+          !error.retryable ||
+          semanticOutput ||
+          options.signal.aborted ||
+          attempt > this.transport.maxRetries
+        ) {
+          throw error;
+        }
+        await abortableDelay(Math.min(100 * attempt, 500), options.signal);
+      }
+    }
+  }
+
+  private async *streamAttempt(
+    messages: readonly ConversationMessage[],
+    options: {
+      readonly signal: AbortSignal;
+      readonly tools?: readonly ModelToolDefinition[];
+      readonly toolChoice: "auto" | "none";
+    },
+    attempt: number,
+  ): AsyncIterable<ModelStreamEvent> {
+    const startedAt = Date.now();
     const tools = options.tools ?? [];
     if (options.toolChoice === "auto" && tools.length === 0) {
       throw new ProviderError("protocol", "启用工具选择时必须提供工具定义。");
     }
 
+    yield {
+      type: "request-progress",
+      stage: "waiting-first-byte",
+      elapsedMs: 0,
+      attempt,
+    };
+    const requestController = new AbortController();
+    const abortRequest = (): void => requestController.abort();
+    options.signal.addEventListener("abort", abortRequest, { once: true });
     let response: Response;
     try {
-      response = await this.fetchImplementation(this.endpoint, {
+      response = await withProviderTimeout(this.fetchImplementation(this.endpoint, {
         method: "POST",
         headers: {
           accept: "text/event-stream",
@@ -96,42 +159,60 @@ export class OpenAICompatibleProvider implements ChatProvider {
           stream: true,
           stream_options: { include_usage: true },
           tool_choice: options.toolChoice,
-          ...(this.thinking === undefined
-            ? {}
-            : {
-                enable_thinking: this.thinking.enabled,
-                ...(this.thinking.enabled && this.thinking.budgetTokens !== undefined
-                  ? { thinking_budget: this.thinking.budgetTokens }
-                  : {}),
-              }),
+          ...thinkingRequestFields(this.thinking),
           ...(tools.length > 0
             ? { tools, parallel_tool_calls: true }
             : {}),
         }),
         redirect: "manual",
-        signal: options.signal,
+        signal: requestController.signal,
+      }), {
+        timeoutMs: Math.min(
+          this.transport.firstByteTimeoutMs,
+          this.transport.totalTimeoutMs,
+        ),
+        phase: "first-byte",
+        controller: requestController,
       });
     } catch (error) {
+      options.signal.removeEventListener("abort", abortRequest);
       if (options.signal.aborted) {
         throw new ProviderError("cancelled", "模型请求已取消。", { cause: error });
       }
       if (error instanceof ProviderError) throw error;
       throw new ProviderError("network", "无法连接模型服务，请检查网络和地址。", {
+        retryable: true,
         cause: error,
       });
     }
 
+    const traceId = safeTraceId(
+      response.headers.get("x-siliconcloud-trace-id") ??
+      response.headers.get("x-request-id"),
+    );
+    yield {
+      type: "request-progress",
+      stage: "waiting-first-byte",
+      elapsedMs: Date.now() - startedAt,
+      attempt,
+      ...(traceId === undefined ? {} : { traceId }),
+    };
+
     if (!response.ok) {
+      options.signal.removeEventListener("abort", abortRequest);
       throw new ProviderError("http", `模型服务返回 HTTP ${response.status}。`, {
         status: response.status,
-        requestId: safeRequestId(response.headers.get("x-request-id")),
+        traceId,
+        retryable: response.status === 408 || response.status === 429 || response.status >= 500,
       });
     }
     const contentType = response.headers.get("content-type")?.toLowerCase();
     if (!contentType?.startsWith("text/event-stream")) {
+      options.signal.removeEventListener("abort", abortRequest);
       throw new ProviderError("protocol", "模型服务未返回 SSE 响应。");
     }
     if (!response.body) {
+      options.signal.removeEventListener("abort", abortRequest);
       throw new ProviderError("stream", "模型服务返回了空响应流。");
     }
 
@@ -142,7 +223,16 @@ export class OpenAICompatibleProvider implements ChatProvider {
     let reasoningContentLength = 0;
 
     try {
-      for await (const data of parseServerSentEvents(readResponseBody(response.body))) {
+      for await (const data of parseServerSentEvents(readResponseBody(
+        response.body,
+        {
+          startedAt,
+          policy: this.transport,
+          controller: requestController,
+          outerSignal: options.signal,
+          traceId,
+        },
+      ))) {
         if (options.signal.aborted) {
           throw new ProviderError("cancelled", "模型请求已取消。");
         }
@@ -171,6 +261,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
           event.reasoningContent !== undefined &&
           event.reasoningContent.length > 0
         ) {
+          yield progressEvent("streaming-text", startedAt, attempt, traceId);
           reasoningContentLength += event.reasoningContent.length;
           if (reasoningContentLength > MAX_REASONING_CONTENT_LENGTH) {
             throw new ProviderError("protocol", "模型推理内容过长。");
@@ -178,6 +269,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
           yield { type: "reasoning-delta", text: event.reasoningContent };
         }
         if (event.content !== undefined && event.content.length > 0) {
+          yield progressEvent("streaming-text", startedAt, attempt, traceId);
           yield { type: "text-delta", text: event.content };
         }
         for (const delta of event.toolCalls) {
@@ -185,10 +277,19 @@ export class OpenAICompatibleProvider implements ChatProvider {
             throw new ProviderError("protocol", "模型在禁用工具时仍返回了工具调用。");
           }
           appendToolCall(toolCalls, delta);
+          const current = toolCalls.get(delta.index);
+          yield {
+            ...progressEvent("streaming-tool-arguments", startedAt, attempt, traceId),
+            ...(current?.name ? { toolName: current.name } : {}),
+            ...(current === undefined
+              ? {}
+              : { toolArgumentsChars: current.argumentsJson.length }),
+          };
         }
         if (event.finishReason === undefined) continue;
 
         modelFinished = true;
+        yield progressEvent("waiting-done", startedAt, attempt, traceId);
         if (event.finishReason === "stop") {
           if (toolCalls.size > 0) {
             throw new ProviderError("protocol", "工具响应使用了错误的完成原因。");
@@ -206,20 +307,43 @@ export class OpenAICompatibleProvider implements ChatProvider {
         yield { type: "done", finishReason: "tool-call" };
       }
     } catch (error) {
+      options.signal.removeEventListener("abort", abortRequest);
       if (options.signal.aborted) {
         throw new ProviderError("cancelled", "模型请求已取消。", { cause: error });
       }
       if (error instanceof ProviderError) throw error;
       if (error instanceof SseError) {
+        if (error.cause instanceof ProviderError) {
+          throw error.cause;
+        }
         throw new ProviderError("stream", error.message, { cause: error });
       }
       throw new ProviderError("stream", "读取模型响应流失败。", { cause: error });
     }
 
     if (!transportFinished) {
+      options.signal.removeEventListener("abort", abortRequest);
       throw new ProviderError("stream", "模型响应缺少完成标记。");
     }
+    options.signal.removeEventListener("abort", abortRequest);
   }
+}
+
+function thinkingRequestFields(
+  thinking: ModelThinkingConfig | undefined,
+): Readonly<Record<string, unknown>> {
+  if (thinking === undefined) return {};
+  if (thinking.apiStyle === "deepseek") {
+    return {
+      thinking: { type: thinking.enabled ? "enabled" : "disabled" },
+    };
+  }
+  return {
+    enable_thinking: thinking.enabled,
+    ...(thinking.enabled && thinking.budgetTokens !== undefined
+      ? { thinking_budget: thinking.budgetTokens }
+      : {}),
+  };
 }
 
 function toOpenAIMessage(message: ConversationMessage): Record<string, unknown> {
@@ -566,7 +690,7 @@ function eventHasModelData(event: ParsedEvent): boolean {
   );
 }
 
-function safeRequestId(value: string | null): string | undefined {
+function safeTraceId(value: string | null): string | undefined {
   return value !== null && /^[A-Za-z0-9._-]{1,128}$/.test(value)
     ? value
     : undefined;
@@ -574,17 +698,123 @@ function safeRequestId(value: string | null): string | undefined {
 
 async function* readResponseBody(
   body: ReadableStream<Uint8Array>,
+  options: {
+    readonly startedAt: number;
+    readonly policy: ProviderTransportPolicy;
+    readonly controller: AbortController;
+    readonly outerSignal: AbortSignal;
+    readonly traceId?: string;
+  },
 ): AsyncIterable<Uint8Array> {
   const reader = body.getReader();
+  let receivedFirstByte = false;
   try {
     for (;;) {
-      const result = await reader.read();
+      if (options.outerSignal.aborted) {
+        throw new ProviderError("cancelled", "模型请求已取消。");
+      }
+      const elapsedMs = Date.now() - options.startedAt;
+      const totalRemainingMs = options.policy.totalTimeoutMs - elapsedMs;
+      const stageRemainingMs = receivedFirstByte
+        ? options.policy.idleTimeoutMs
+        : options.policy.firstByteTimeoutMs - elapsedMs;
+      const phase = totalRemainingMs <= stageRemainingMs
+        ? "total" as const
+        : receivedFirstByte
+          ? "idle" as const
+          : "first-byte" as const;
+      const timeoutMs = Math.min(totalRemainingMs, stageRemainingMs);
+      if (timeoutMs <= 0) {
+        options.controller.abort();
+        throw providerTimeout(phase, options.traceId);
+      }
+      const result = await withProviderTimeout(reader.read(), {
+        timeoutMs,
+        phase,
+        controller: options.controller,
+        traceId: options.traceId,
+      });
       if (result.done) return;
+      receivedFirstByte = true;
       yield result.value;
     }
   } finally {
     reader.releaseLock();
   }
+}
+
+function progressEvent(
+  stage: Extract<ModelStreamEvent, { type: "request-progress" }>["stage"],
+  startedAt: number,
+  attempt: number,
+  traceId: string | undefined,
+): Extract<ModelStreamEvent, { type: "request-progress" }> {
+  return {
+    type: "request-progress",
+    stage,
+    elapsedMs: Math.max(0, Date.now() - startedAt),
+    attempt,
+    ...(traceId === undefined ? {} : { traceId }),
+  };
+}
+
+async function withProviderTimeout<T>(
+  operation: Promise<T>,
+  options: {
+    readonly timeoutMs: number;
+    readonly phase: "first-byte" | "idle" | "total";
+    readonly controller: AbortController;
+    readonly traceId?: string;
+  },
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let timeoutError: ProviderError | undefined;
+  const timedOut = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      timeoutError = providerTimeout(options.phase, options.traceId);
+      reject(timeoutError);
+      options.controller.abort();
+    }, Math.max(1, options.timeoutMs));
+  });
+  try {
+    return await Promise.race([operation, timedOut]);
+  } catch (error) {
+    throw timeoutError ?? error;
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
+function providerTimeout(
+  phase: "first-byte" | "idle" | "total",
+  traceId?: string,
+): ProviderError {
+  const label = phase === "first-byte"
+    ? "等待模型首字节超时。"
+    : phase === "idle"
+      ? "模型响应流长时间没有新数据。"
+      : "模型单次请求超过总时长限制。";
+  return new ProviderError("timeout", label, {
+    timeoutPhase: phase,
+    traceId,
+    retryable: true,
+  });
+}
+
+async function abortableDelay(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) throw new ProviderError("cancelled", "模型请求已取消。");
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    }, delayMs);
+    const abort = (): void => {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", abort);
+      reject(new ProviderError("cancelled", "模型请求已取消。"));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

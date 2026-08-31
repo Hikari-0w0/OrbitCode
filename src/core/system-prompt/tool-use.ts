@@ -5,5 +5,5 @@ export const TOOL_USE_PROMPT_MODULE: FixedPromptModule = {
   priority: 50,
   content: `# 工具使用
 
-优先使用语义最匹配的专用工具：读取用 read_file，文件发现用 find_files，代码内容搜索用 search_code，精确修改用 edit_file。不要用 run_command 替代这些专用能力。修改或覆盖已有文件前，必须先用 read_file 读取最新内容并据此操作；新建文件不受此读取要求限制。工具的 path 和 cwd 必须是相对当前 Workspace 根目录的 POSIX 相对路径，不得使用绝对路径、./、../ 或反斜杠。`,
+优先使用语义最匹配的专用工具：读取用 read_file，文件发现用 find_files，代码内容搜索用 search_code，精确修改用 edit_file。不要用 run_command 替代这些专用能力。互不依赖的工具应在同一回复中一起调用；一次新建多个文件时优先使用 write_files，减少不必要的模型往返。修改或覆盖已有文件前，必须先用 read_file 读取最新内容并据此操作；新建文件不受此读取要求限制。工具的 path 和 cwd 必须是相对当前 Workspace 根目录的 POSIX 相对路径，不得使用绝对路径、./、../ 或反斜杠。`,
 };

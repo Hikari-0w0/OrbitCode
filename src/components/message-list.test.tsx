@@ -70,6 +70,7 @@ test("助手文字和工具卡按实际发生顺序展示", () => {
         role: "assistant",
         content: "先读取。读取完成。",
         state: "complete",
+        durationMs: 65_400,
         parts: [
           { type: "text", iteration: 1, content: "先读取。" },
           { type: "tool", iteration: 1, callId: "read-1" },
@@ -92,4 +93,97 @@ test("助手文字和工具卡按实际发生顺序展示", () => {
 
   assert.ok(markup.indexOf("先读取。") < markup.indexOf("read_file"));
   assert.ok(markup.indexOf("read_file") < markup.indexOf("读取完成。"));
+  assert.match(markup, /运行时间：1 分 5 秒/u);
+});
+
+test("纯换行时间线片段不会撑开连续工具卡", () => {
+  const tools = [8, 9, 10].map((iteration) => ({
+    iteration,
+    sequence: 0,
+    callId: `write-${iteration}`,
+    name: "write_file",
+    argumentsJson: "{}",
+    state: "succeeded" as const,
+  }));
+  const markup = renderToStaticMarkup(
+    <MessageList
+      messages={[{
+        id: "blank-parts",
+        role: "assistant",
+        content: "\n\n\n\n\n",
+        state: "complete",
+        parts: [
+          { type: "tool", iteration: 8, callId: "write-8" },
+          { type: "text", iteration: 9, content: "\n\n\n\n\n\n\n" },
+          { type: "tool", iteration: 9, callId: "write-9" },
+          { type: "text", iteration: 10, content: "\n\n\n" },
+          { type: "tool", iteration: 10, callId: "write-10" },
+        ],
+        toolExecutions: tools,
+      }]}
+      onSuggestion={() => undefined}
+      planActionDisabled={false}
+      onExecutePlan={() => undefined}
+    />,
+  );
+
+  assert.equal((markup.match(/class="toolCard /g) ?? []).length, 3);
+  assert.equal((markup.match(/class="messageText"/g) ?? []).length, 0);
+  assert.ok(markup.indexOf("第 8 轮") < markup.indexOf("第 9 轮"));
+  assert.ok(markup.indexOf("第 9 轮") < markup.indexOf("第 10 轮"));
+});
+
+test("无限迭代模式显示无穷上限", () => {
+  const markup = renderToStaticMarkup(
+    <MessageList
+      messages={[{
+        id: "unlimited",
+        role: "assistant",
+        content: "",
+        state: "streaming",
+        progress: {
+          type: "progress",
+          iteration: 33,
+          maxIterations: "unlimited",
+          phase: "model",
+        },
+      }]}
+      onSuggestion={() => undefined}
+      planActionDisabled={false}
+      onExecutePlan={() => undefined}
+    />,
+  );
+
+  assert.match(markup, /迭代 33\/∞/u);
+});
+
+test("模型工具参数进度显示累计字符与耗时", () => {
+  const markup = renderToStaticMarkup(
+    <MessageList
+      messages={[{
+        id: "tool-arguments-progress",
+        role: "assistant",
+        content: "",
+        state: "streaming",
+        progress: {
+          type: "progress",
+          iteration: 2,
+          maxIterations: 20,
+          phase: "model",
+          model: {
+            stage: "streaming-tool-arguments",
+            elapsedMs: 12_300,
+            attempt: 1,
+            toolName: "write_files",
+            toolArgumentsChars: 19_368,
+          },
+        },
+      }]}
+      onSuggestion={() => undefined}
+      planActionDisabled={false}
+      onExecutePlan={() => undefined}
+    />,
+  );
+
+  assert.match(markup, /生成 write_files 参数 19,368 字符 · 12\.3s/u);
 });

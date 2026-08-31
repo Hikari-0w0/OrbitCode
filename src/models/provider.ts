@@ -3,6 +3,22 @@ import type { ModelToolDefinition } from "@/tools/types";
 export type ModelThinkingConfig = {
   readonly enabled: boolean;
   readonly budgetTokens?: number;
+  readonly apiStyle?: "siliconflow" | "deepseek";
+};
+
+export type ModelRequestStage =
+  | "waiting-first-byte"
+  | "streaming-text"
+  | "streaming-tool-arguments"
+  | "waiting-done";
+
+export type ProviderTimeoutPhase = "first-byte" | "idle" | "total";
+
+export type ProviderTransportPolicy = {
+  readonly firstByteTimeoutMs: number;
+  readonly idleTimeoutMs: number;
+  readonly totalTimeoutMs: number;
+  readonly maxRetries: number;
 };
 
 export type PlainConversationMessage =
@@ -53,6 +69,15 @@ export type ModelTokenUsage = {
 };
 
 export type ModelStreamEvent =
+  | {
+      readonly type: "request-progress";
+      readonly stage: ModelRequestStage;
+      readonly elapsedMs: number;
+      readonly attempt: number;
+      readonly traceId?: string;
+      readonly toolName?: string;
+      readonly toolArgumentsChars?: number;
+    }
   | { readonly type: "reasoning-delta"; readonly text: string }
   | { readonly type: "text-delta"; readonly text: string }
   | { readonly type: "tool-call"; readonly call: ModelToolCall }
@@ -67,18 +92,23 @@ export type ProviderFailureKind =
   | "http"
   | "protocol"
   | "stream"
+  | "timeout"
   | "cancelled";
 
 export type ProviderErrorOptions = {
   readonly status?: number;
-  readonly requestId?: string;
+  readonly traceId?: string;
+  readonly timeoutPhase?: ProviderTimeoutPhase;
+  readonly retryable?: boolean;
   readonly cause?: unknown;
 };
 
 export class ProviderError extends Error {
   readonly kind: ProviderFailureKind;
   readonly status?: number;
-  readonly requestId?: string;
+  readonly traceId?: string;
+  readonly timeoutPhase?: ProviderTimeoutPhase;
+  readonly retryable: boolean;
 
   constructor(
     kind: ProviderFailureKind,
@@ -89,7 +119,11 @@ export class ProviderError extends Error {
     this.name = "ProviderError";
     this.kind = kind;
     this.status = options.status;
-    this.requestId = options.requestId;
+    this.traceId = options.traceId;
+    this.timeoutPhase = options.timeoutPhase;
+    this.retryable =
+      options.retryable ??
+      (kind === "network" || kind === "stream" || kind === "timeout");
   }
 }
 

@@ -70,7 +70,7 @@ type AuthorizedCall = {
   readonly call: ModelToolCall;
   readonly sequence: number;
   readonly prepared: PreparedToolCall;
-  readonly permission?: PermissionExecutable;
+  readonly permissions: readonly PermissionExecutable[];
 };
 
 type SchedulerOptions = {
@@ -116,55 +116,66 @@ export async function* scheduleToolCalls(
       continue;
     }
 
-    let authorization: PermissionAuthorization | undefined;
+    const permissions: PermissionExecutable[] = [];
+    let authorizationDenied = false;
     if (
       options.permissionGateway &&
       current.preparation.call.permissionTarget.kind !== "context"
     ) {
-      authorization = await options.permissionGateway.authorize(
-        current.preparation.call,
-        current.call.id,
-        options.signal,
-      );
-    }
-    if (authorization?.kind === "awaiting") {
-      yield* flushReadBatch(readBatch, completed, options, concurrency);
-      yield {
-        type: "permission-requested",
-        call: current.call,
-        sequence: current.sequence,
-        prompt: authorization.prompt,
-      };
-      const requestId = authorization.prompt.requestId;
-      const resolvedAuthorization = await authorization.resolve();
-      if (resolvedAuthorization.kind === "awaiting") {
-        throw new Error("授权代理返回了嵌套等待项。");
+      const targets = current.preparation.call.permissionTargets ?? [
+        current.preparation.call.permissionTarget,
+      ];
+      for (const target of targets) {
+        let authorization: PermissionAuthorization =
+          await options.permissionGateway.authorize(
+            current.preparation.call,
+            current.call.id,
+            options.signal,
+            target,
+          );
+        if (authorization.kind === "awaiting") {
+          yield* flushReadBatch(readBatch, completed, options, concurrency);
+          yield {
+            type: "permission-requested",
+            call: current.call,
+            sequence: current.sequence,
+            prompt: authorization.prompt,
+          };
+          const requestId = authorization.prompt.requestId;
+          const resolvedAuthorization = await authorization.resolve();
+          if (resolvedAuthorization.kind === "awaiting") {
+            throw new Error("授权代理返回了嵌套等待项。");
+          }
+          authorization = resolvedAuthorization;
+          yield {
+            type: "permission-resolved",
+            call: current.call,
+            sequence: current.sequence,
+            requestId,
+            status: resolutionStatus(authorization),
+            scope: authorization.kind === "allowed"
+              ? authorization.approvalScope
+              : undefined,
+          };
+        }
+        if (authorization.kind === "denied") {
+          yield* flushReadBatch(readBatch, completed, options, concurrency);
+          const result = toCallResult(current, authorization.result);
+          completed.push(result);
+          yield { type: "result", ...result };
+          authorizationDenied = true;
+          break;
+        }
+        permissions.push(authorization);
       }
-      authorization = resolvedAuthorization;
-      yield {
-        type: "permission-resolved",
-        call: current.call,
-        sequence: current.sequence,
-        requestId,
-        status: resolutionStatus(authorization),
-        scope: authorization.kind === "allowed"
-          ? authorization.approvalScope
-          : undefined,
-      };
     }
-    if (authorization?.kind === "denied") {
-      yield* flushReadBatch(readBatch, completed, options, concurrency);
-      const result = toCallResult(current, authorization.result);
-      completed.push(result);
-      yield { type: "result", ...result };
-      continue;
-    }
+    if (authorizationDenied) continue;
 
     const authorized: AuthorizedCall = {
       call: current.call,
       sequence: current.sequence,
       prepared: current.preparation.call,
-      permission: authorization?.kind === "allowed" ? authorization : undefined,
+      permissions,
     };
     if (authorized.prepared.mutability === "read-only") {
       readBatch.push(authorized);
@@ -207,7 +218,11 @@ async function* executeAuthorizedBatch(
   const pending = new Map<number, Promise<ToolCallResult>>();
   for (const call of calls) {
     if (options.signal.aborted) break;
-    const revalidationFailure = await call.permission?.revalidate(options.signal);
+    let revalidationFailure: ToolExecutionResult | undefined;
+    for (const permission of call.permissions) {
+      revalidationFailure = await permission.revalidate(options.signal);
+      if (revalidationFailure) break;
+    }
     if (revalidationFailure) {
       const result = toCallResult(call, revalidationFailure);
       completed.push(result);

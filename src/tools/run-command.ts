@@ -1,4 +1,5 @@
 import type { CommandSandbox } from "@/tools/command-sandbox";
+import { preflightCommand } from "@/tools/command-preflight";
 import { SandboxUnavailableError } from "@/tools/macos-seatbelt-sandbox";
 import { defineTool, successfulToolResult } from "@/tools/registry";
 import {
@@ -8,25 +9,46 @@ import {
   stringSchema,
 } from "@/tools/schema";
 import { emptyResultMeta, toolFailure } from "@/tools/types";
+import type { ToolInputSchema } from "@/tools/types";
 import { WORKSPACE_RELATIVE_PATH_DESCRIPTION } from "@/tools/workspace-path";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const OUTPUT_LIMIT_BYTES = 128 * 1024;
+
+type RunCommandInput = {
+  readonly command: string;
+  readonly cwd?: string;
+  readonly timeout_ms?: number;
+};
+
+const baseRunCommandSchema = objectSchema({
+  command: stringSchema({ minLength: 1, maxLength: 8 * 1024 }),
+  cwd: optionalSchema(stringSchema({
+    minLength: 1,
+    maxLength: 1_024,
+    description: WORKSPACE_RELATIVE_PATH_DESCRIPTION,
+  })),
+  timeout_ms: optionalSchema(integerSchema({ minimum: 100, maximum: 120_000 })),
+});
+
+const runCommandSchema: ToolInputSchema<RunCommandInput> = {
+  jsonSchema: baseRunCommandSchema.jsonSchema,
+  parse(value) {
+    const parsed = baseRunCommandSchema.parse(value);
+    if (!parsed.ok) return parsed;
+    const issues = preflightCommand(parsed.value);
+    return issues.length === 0
+      ? { ok: true, value: parsed.value }
+      : { ok: false, issues };
+  },
+};
 
 export function createRunCommandTool(sandbox: CommandSandbox) {
   return defineTool({
     name: "run_command",
     description:
       "在严格文件隔离的授权 Workspace 内执行确有必要的 shell 命令，可联网安装依赖或访问开发服务。不得用本工具替代 read_file、find_files、search_code、write_file 或 edit_file；仅在专用工具无法合理完成任务时使用。",
-    inputSchema: objectSchema({
-      command: stringSchema({ minLength: 1, maxLength: 8 * 1024 }),
-      cwd: optionalSchema(stringSchema({
-        minLength: 1,
-        maxLength: 1_024,
-        description: WORKSPACE_RELATIVE_PATH_DESCRIPTION,
-      })),
-      timeout_ms: optionalSchema(integerSchema({ minimum: 100, maximum: 120_000 })),
-    }),
+    inputSchema: runCommandSchema,
     mutability: "command",
     permission: {
       targetKind: "command",

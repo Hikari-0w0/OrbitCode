@@ -8,7 +8,9 @@ import type {
   CommandExecution,
   CommandRequest,
   CommandSandbox,
+  ManagedCommandRequest,
   SandboxAvailability,
+  SandboxManagedProcess,
 } from "@/tools/command-sandbox";
 import { isProtectedPath } from "@/tools/protected-paths";
 import type { WorkspaceBoundary } from "@/tools/types";
@@ -40,6 +42,17 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
       throw new SandboxUnavailableError(availability.message);
     }
     return this.runIsolated(request, options.workspace, options.signal);
+  }
+
+  async start(
+    request: ManagedCommandRequest,
+    options: { readonly workspace: WorkspaceBoundary },
+  ): Promise<SandboxManagedProcess> {
+    const availability = await this.probe(options.workspace);
+    if (!availability.available) {
+      throw new SandboxUnavailableError(availability.message);
+    }
+    return this.startIsolated(request, options.workspace);
   }
 
   private async performProbe(
@@ -135,26 +148,11 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
       protectedPaths,
       developerRoot,
     );
-    const environment: Record<string, string> = {
-      PATH: [
-        path.join(workspace.root, "node_modules", ".bin"),
-        path.dirname(process.execPath),
-        ...(developerRoot === undefined
-          ? []
-          : [path.join(developerRoot, "usr", "bin")]),
-        "/usr/bin",
-        "/bin",
-        "/usr/sbin",
-        "/sbin",
-      ].join(":"),
-      LANG: "en_US.UTF-8",
-      LC_ALL: "en_US.UTF-8",
-      HOME: executionRoot,
-      TMPDIR: executionRoot,
-      ...(developerRoot === undefined
-        ? {}
-        : { SDKROOT: path.join(developerRoot, "SDKs", "MacOSX.sdk") }),
-    };
+    const environment = createCommandEnvironment(
+      workspace.root,
+      executionRoot,
+      developerRoot,
+    );
     try {
       return await spawnAndCollect(
         SANDBOX_EXEC,
@@ -170,6 +168,45 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
     } finally {
       await rm(executionRoot, { recursive: true, force: true }).catch(() => undefined);
       await removeEmptyDirectory(runtimeRoot);
+    }
+  }
+
+  private async startIsolated(
+    request: ManagedCommandRequest,
+    workspace: WorkspaceBoundary,
+  ): Promise<SandboxManagedProcess> {
+    const runtimeRoot = path.join(workspace.root, ".orbitcode-runtime");
+    const executionRoot = path.join(runtimeRoot, `process-${randomUUID()}`);
+    await mkdir(executionRoot, { recursive: true, mode: 0o700 });
+    try {
+      const protectedPaths = await collectProtectedPaths(workspace.root);
+      const developerRoot = await resolveDeveloperRoot();
+      const profile = await createProfile(
+        workspace.root,
+        protectedPaths,
+        developerRoot,
+      );
+      const environment = createCommandEnvironment(
+        workspace.root,
+        executionRoot,
+        developerRoot,
+      );
+      const managed = spawnManaged(
+        SANDBOX_EXEC,
+        ["-p", profile, SHELL, "-c", request.command],
+        { cwd: request.cwd.absolutePath, env: environment },
+      );
+      return {
+        ...managed,
+        completion: managed.completion.finally(async () => {
+          await rm(executionRoot, { recursive: true, force: true }).catch(() => undefined);
+          await removeEmptyDirectory(runtimeRoot);
+        }),
+      };
+    } catch (error) {
+      await rm(executionRoot, { recursive: true, force: true }).catch(() => undefined);
+      await removeEmptyDirectory(runtimeRoot);
+      throw error;
     }
   }
 }
@@ -402,6 +439,81 @@ function spawnAndCollect(
       options.signal.removeEventListener("abort", abort);
     }
   });
+}
+
+function createCommandEnvironment(
+  workspaceRoot: string,
+  executionRoot: string,
+  developerRoot: string | undefined,
+): Record<string, string> {
+  return {
+    PATH: [
+      path.join(workspaceRoot, "node_modules", ".bin"),
+      path.dirname(process.execPath),
+      ...(developerRoot === undefined
+        ? []
+        : [path.join(developerRoot, "usr", "bin")]),
+      "/usr/bin",
+      "/bin",
+      "/usr/sbin",
+      "/sbin",
+    ].join(":"),
+    LANG: "en_US.UTF-8",
+    LC_ALL: "en_US.UTF-8",
+    HOME: executionRoot,
+    TMPDIR: executionRoot,
+    ...(developerRoot === undefined
+      ? {}
+      : { SDKROOT: path.join(developerRoot, "SDKs", "MacOSX.sdk") }),
+  };
+}
+
+function spawnManaged(
+  executable: string,
+  args: readonly string[],
+  options: { readonly cwd: string; readonly env: Record<string, string> },
+): SandboxManagedProcess {
+  const child = spawn(executable, [...args], {
+    cwd: options.cwd,
+    env: options.env as NodeJS.ProcessEnv,
+    detached: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let settled = false;
+  const completion = new Promise<{
+    readonly exitCode: number | null;
+    readonly terminationSignal: NodeJS.Signals | null;
+  }>((resolve, reject) => {
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
+    child.once("close", (exitCode, terminationSignal) => {
+      if (settled) return;
+      settled = true;
+      resolve({ exitCode, terminationSignal });
+    });
+  });
+  return {
+    pid: child.pid ?? 0,
+    stdout: child.stdout,
+    stderr: child.stderr,
+    completion,
+    async stop() {
+      if (settled) return;
+      killProcessGroup(child, "SIGTERM");
+      const forceKill = setTimeout(
+        () => killProcessGroup(child, "SIGKILL"),
+        TERMINATION_GRACE_MS,
+      );
+      try {
+        await completion.catch(() => undefined);
+      } finally {
+        clearTimeout(forceKill);
+      }
+    },
+  };
 }
 
 class OutputCollector {
