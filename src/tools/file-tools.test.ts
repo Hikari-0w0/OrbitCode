@@ -126,6 +126,27 @@ test("查找与搜索返回稳定相对位置并支持空结果", async () => {
   }
 });
 
+test("find_files 自动解包 pattern 字段中的合法工具 JSON", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-find-unwrap-"));
+  try {
+    await mkdir(path.join(root, "src"));
+    await writeFile(path.join(root, "src", "main.ts"), "export {};\n");
+    const workspace = await createWorkspaceBoundary(root);
+    const prepared = findFilesTool.prepareUnknown({
+      pattern: '{"pattern":"**/*.ts"}',
+    });
+    assert.equal(prepared.kind, "ready");
+    if (prepared.kind !== "ready") return;
+    const result = await prepared.call.execute(toolContext(workspace));
+    assert.deepEqual(result.ok && result.output, {
+      paths: ["src/main.ts"],
+      count: 1,
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("文件工具结构化拒绝敏感路径、非法模式和超限写入", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "orbitcode-file-failure-"));
   const outside = path.join(tmpdir(), `orbitcode-write-sentinel-${process.pid}.txt`);

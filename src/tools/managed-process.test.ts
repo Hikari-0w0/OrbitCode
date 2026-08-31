@@ -80,6 +80,33 @@ test("数量上限、无效 ID 和 close 回收均有界", async () => {
   }
 });
 
+test("等待就绪前退出时保留诊断日志且不暴露失效进程 ID", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-managed-failure-"));
+  const port = await availablePort();
+  const workspace = await createWorkspaceBoundary(root);
+  const controller = new ManagedProcessController(new TestProcessSandbox(), workspace);
+  try {
+    await assert.rejects(
+      controller.start({
+        command: "printf config-broken; exit 1",
+        readyPort: port,
+        readyTimeoutMs: 1_000,
+        signal: new AbortController().signal,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof ManagedProcessError);
+        assert.equal(error.kind, "not-ready");
+        assert.equal(error.processAvailable, false);
+        assert.equal(error.logs.some((chunk) => chunk.text.includes("config-broken")), true);
+        return true;
+      },
+    );
+  } finally {
+    await controller.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 class TestProcessSandbox implements CommandSandbox {
   async probe() { return { available: true as const }; }
   async run(): Promise<never> { throw new Error("unused"); }

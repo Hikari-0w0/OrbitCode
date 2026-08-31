@@ -14,8 +14,21 @@ test("受限 Glob 支持星号、问号与跨目录双星号", () => {
 });
 
 test("受限 Glob 拒绝越界、空段和歧义模式", () => {
-  for (const value of ["", "/src/*", "src/", "../*", "src//*.ts", "ab**cd", "a\\b"]) {
+  for (const value of [
+    "",
+    "/src/*",
+    "src/",
+    "../*",
+    "src//*.ts",
+    "ab**cd",
+    "a\\b",
+    "**/*.{ts,tsx,css}",
+  ]) {
     assert.throws(() => compileGlob(value), GlobPatternError);
   }
+  assert.throws(
+    () => compileGlob("**/*.{ts,tsx,css}"),
+    /不支持花括号扩展/u,
+  );
   assert.throws(() => compileGlob("x".repeat(513)), /过长/);
 });

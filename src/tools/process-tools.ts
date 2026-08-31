@@ -135,10 +135,19 @@ function processFailure(error: unknown) {
     return toolFailure("invalid-arguments", error.message, { retryable: true });
   }
   if (error.kind === "not-ready") {
-    return toolFailure("timeout", error.message, {
+    const failure = toolFailure("timeout", error.message, {
       retryable: true,
       sideEffect: "possible",
     });
+    return error.processAvailable === false
+      ? {
+          ...failure,
+          output: {
+            processAvailable: false,
+            logs: error.logs,
+          },
+        }
+      : failure;
   }
   return toolFailure("execution-failed", error.message, { sideEffect: "possible" });
 }

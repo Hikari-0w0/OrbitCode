@@ -15,6 +15,11 @@ export function compileGlob(pattern: string): GlobMatcher {
   if (pattern.includes("\0") || pattern.includes("\\")) {
     throw new GlobPatternError("文件模式包含非法字符。");
   }
+  if (pattern.includes("{") || pattern.includes("}")) {
+    throw new GlobPatternError(
+      "受限 Glob 不支持花括号扩展；请分别查找或使用更宽的模式。",
+    );
+  }
   if (pattern.startsWith("/") || pattern.endsWith("/")) {
     throw new GlobPatternError("文件模式必须是相对文件模式。");
   }

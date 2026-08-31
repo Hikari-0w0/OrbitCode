@@ -231,6 +231,23 @@ export function objectSchema<
   };
 }
 
+export function unwrapSingleJsonObjectField(
+  value: unknown,
+  field: string,
+): unknown {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).length !== 1 ||
+    typeof value[field] !== "string"
+  ) return value;
+  try {
+    const nested: unknown = JSON.parse(value[field]);
+    return isRecord(nested) ? nested : value;
+  } catch {
+    return value;
+  }
+}
+
 function issue<T>(path: string, message: string): SchemaParseResult<T> {
   return { ok: false, issues: [{ path, message }] };
 }

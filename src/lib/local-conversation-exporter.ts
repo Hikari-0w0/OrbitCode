@@ -1,4 +1,5 @@
 import type { ConversationCheckpoint } from "@/core/conversations/types";
+import { collectContextReferences } from "@/lib/context-references";
 import {
   AgentRunLogError,
   LocalAgentRunLog,
@@ -99,10 +100,8 @@ export class LocalConversationExporter {
   ): Promise<readonly ExportedContextObject[]> {
     const references = new Set<string>();
     for (const checkpoint of revisions) {
-      for (const message of checkpoint.context.messages) {
-        if (message.kind === "tool-result" && message.payload.storage === "offloaded") {
-          references.add(message.payload.reference);
-        }
+      for (const reference of collectContextReferences(checkpoint.context.messages)) {
+        references.add(reference);
       }
     }
     const objects: ExportedContextObject[] = [];

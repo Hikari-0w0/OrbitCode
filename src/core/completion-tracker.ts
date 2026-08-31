@@ -36,6 +36,8 @@ type EvidenceRecord = {
   readonly sequence: number;
   readonly mutability: ToolMutability;
   readonly sideEffect: ToolExecutionResult["sideEffect"];
+  readonly toolName: string;
+  readonly argumentsJson: string;
 };
 
 export class CompletionTracker {
@@ -76,6 +78,8 @@ export class CompletionTracker {
       sequence: input.sequence,
       mutability: input.mutability,
       sideEffect: input.result.sideEffect,
+      toolName: input.call.name,
+      argumentsJson: input.call.argumentsJson,
     });
     return evidenceId;
   }
@@ -87,6 +91,13 @@ export class CompletionTracker {
   accept(report: CompletionReportInput):
     | { readonly ok: true; readonly assessment: CompletionAssessment }
     | { readonly ok: false; readonly message: string } {
+    const unresolvedQualityGate = latestFailedQualityGate(this.#evidence.values());
+    if (report.status === "complete" && unresolvedQualityGate !== undefined) {
+      return {
+        ok: false,
+        message: `${unresolvedQualityGate} 质量检查最后一次执行仍失败，不能声明 complete；请修复后重跑，或如实报告 partial/blocked。`,
+      };
+    }
     for (const check of report.checks) {
       const records = check.evidenceCallIds.map((id) => this.#resolveEvidence(id));
       if (records.some((record) => record === undefined)) {
@@ -98,6 +109,24 @@ export class CompletionTracker {
       if (check.status === "passed") {
         if (records.length === 0 || records.some((record) => !record?.ok)) {
           return { ok: false, message: "通过项必须引用至少一个成功工具结果。" };
+        }
+        if (!records.some((record) => record !== undefined && isVerification(record))) {
+          return {
+            ok: false,
+            message: "通过项必须引用成功的只读或命令验证结果；写入成功不能替代验证。",
+          };
+        }
+        if (requiresBuildEvidence(check.criterion) && !records.some(isBuildEvidence)) {
+          return { ok: false, message: "构建证据必须来自成功的 build 命令。" };
+        }
+        if (requiresLintEvidence(check.criterion) && !records.some(isLintEvidence)) {
+          return { ok: false, message: "Lint 证据必须来自成功的 lint 命令。" };
+        }
+        if (
+          requiresHttpEvidence(check.criterion) &&
+          !records.some((record) => isHttpEvidence(record, check.criterion))
+        ) {
+          return { ok: false, message: "HTTP 证据必须来自对声明目标的成功请求。" };
         }
       }
       if (check.status === "not-run" && records.length > 0) {
@@ -222,6 +251,115 @@ function isAfter(left: EvidenceRecord, right: EvidenceRecord): boolean {
 
 function isVerification(record: EvidenceRecord): boolean {
   return record.mutability === "read-only" || record.mutability === "command";
+}
+
+function latestFailedQualityGate(
+  records: Iterable<EvidenceRecord>,
+): string | undefined {
+  const latestByGate = new Map<
+    string,
+    { readonly gate: string; readonly record: EvidenceRecord }
+  >();
+  for (const record of records) {
+    for (const gate of qualityGates(record)) {
+      const key = `${gate}\0${commandWorkingDirectory(record.argumentsJson)}`;
+      const current = latestByGate.get(key);
+      if (current === undefined || isAfter(record, current.record)) {
+        latestByGate.set(key, { gate, record });
+      }
+    }
+  }
+  return [...latestByGate.values()].find(({ record }) => !record.ok)?.gate;
+}
+
+function qualityGates(record: EvidenceRecord): readonly string[] {
+  if (record.toolName !== "run_command") return [];
+  const command = commandArgument(record.argumentsJson);
+  if (command === undefined) return [];
+
+  const gates: string[] = [];
+  if (/\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?check\b/iu.test(command)) {
+    gates.push("check");
+  }
+  if (isBuildCommand(command)) gates.push("build");
+  if (isLintCommand(command)) gates.push("lint");
+  if (
+    /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:typecheck|type-check)\b/iu.test(command) ||
+    /\btsc\b/iu.test(command)
+  ) gates.push("typecheck");
+  if (
+    /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b/iu.test(command) ||
+    /\b(?:vitest|jest|tsx\s+--test|node\s+--test)\b/iu.test(command)
+  ) gates.push("test");
+  return gates;
+}
+
+function requiresBuildEvidence(criterion: string): boolean {
+  return /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?build\b/iu.test(criterion) ||
+    /(?:构建|编译).*(?:通过|成功|无.*错误)/u.test(criterion);
+}
+
+function isBuildEvidence(record: EvidenceRecord | undefined): boolean {
+  if (!record?.ok || record.toolName !== "run_command") return false;
+  const command = commandArgument(record.argumentsJson);
+  return command !== undefined && isBuildCommand(command);
+}
+
+function isBuildCommand(command: string): boolean {
+  return /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?build\b/iu.test(command) ||
+    /\bnext\s+build\b/iu.test(command);
+}
+
+function requiresLintEvidence(criterion: string): boolean {
+  return /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?lint\b/iu.test(criterion) ||
+    /\b(?:eslint|lint)\b.*(?:通过|成功|无.*错误)/iu.test(criterion);
+}
+
+function isLintEvidence(record: EvidenceRecord | undefined): boolean {
+  if (!record?.ok || record.toolName !== "run_command") return false;
+  const command = commandArgument(record.argumentsJson);
+  return command !== undefined && isLintCommand(command);
+}
+
+function isLintCommand(command: string): boolean {
+  return /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?lint\b/iu.test(command) ||
+    /\beslint\b/iu.test(command);
+}
+
+function requiresHttpEvidence(criterion: string): boolean {
+  return /\b(?:curl|https?:\/\/|HTTP)\b/iu.test(criterion) ||
+    /(?:状态码|返回)\s*2\d\d/u.test(criterion);
+}
+
+function isHttpEvidence(
+  record: EvidenceRecord | undefined,
+  criterion: string,
+): boolean {
+  if (!record?.ok || record.toolName !== "run_command") return false;
+  const command = commandArgument(record.argumentsJson);
+  if (command === undefined || !/\bcurl\b/iu.test(command)) return false;
+  const targets = criterion.match(/\b(?:localhost|127\.0\.0\.1):\d+\b/giu) ?? [];
+  return targets.every((target) => command.includes(target));
+}
+
+function commandArgument(argumentsJson: string): string | undefined {
+  try {
+    const value: unknown = JSON.parse(argumentsJson);
+    return isRecord(value) && typeof value.command === "string"
+      ? value.command
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function commandWorkingDirectory(argumentsJson: string): string {
+  try {
+    const value: unknown = JSON.parse(argumentsJson);
+    return isRecord(value) && typeof value.cwd === "string" ? value.cwd : ".";
+  } catch {
+    return ".";
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

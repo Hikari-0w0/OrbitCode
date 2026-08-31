@@ -18,6 +18,7 @@ import type { WorkspaceBoundary } from "@/tools/types";
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 const SHELL = "/bin/sh";
 const TERMINATION_GRACE_MS = 250;
+const SYSTEM_RUNTIME_READ_ROOTS = ["/private/etc/ssl"] as const;
 
 export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
   private readonly probes = new Map<string, Promise<SandboxAvailability>>();
@@ -138,15 +139,17 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
     workspace: WorkspaceBoundary,
     signal: AbortSignal,
   ): Promise<CommandExecution> {
-    const runtimeRoot = path.join(workspace.root, ".orbitcode-runtime");
-    const executionRoot = path.join(runtimeRoot, `run-${randomUUID()}`);
-    await mkdir(executionRoot, { recursive: true, mode: 0o700 });
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "orbitcode-sandbox-run-"));
+    const privateRuntimeRoot = await realpath(runtimeRoot);
+    const executionRoot = path.join(privateRuntimeRoot, "home");
+    await mkdir(executionRoot, { mode: 0o700 });
     const protectedPaths = await collectProtectedPaths(workspace.root);
     const developerRoot = await resolveDeveloperRoot();
     const profile = await createProfile(
       workspace.root,
       protectedPaths,
       developerRoot,
+      privateRuntimeRoot,
     );
     const environment = createCommandEnvironment(
       workspace.root,
@@ -166,8 +169,7 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
         },
       );
     } finally {
-      await rm(executionRoot, { recursive: true, force: true }).catch(() => undefined);
-      await removeEmptyDirectory(runtimeRoot);
+      await rm(privateRuntimeRoot, { recursive: true, force: true }).catch(() => undefined);
     }
   }
 
@@ -175,9 +177,10 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
     request: ManagedCommandRequest,
     workspace: WorkspaceBoundary,
   ): Promise<SandboxManagedProcess> {
-    const runtimeRoot = path.join(workspace.root, ".orbitcode-runtime");
-    const executionRoot = path.join(runtimeRoot, `process-${randomUUID()}`);
-    await mkdir(executionRoot, { recursive: true, mode: 0o700 });
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "orbitcode-sandbox-process-"));
+    const privateRuntimeRoot = await realpath(runtimeRoot);
+    const executionRoot = path.join(privateRuntimeRoot, "home");
+    await mkdir(executionRoot, { mode: 0o700 });
     try {
       const protectedPaths = await collectProtectedPaths(workspace.root);
       const developerRoot = await resolveDeveloperRoot();
@@ -185,6 +188,7 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
         workspace.root,
         protectedPaths,
         developerRoot,
+        privateRuntimeRoot,
       );
       const environment = createCommandEnvironment(
         workspace.root,
@@ -199,13 +203,11 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
       return {
         ...managed,
         completion: managed.completion.finally(async () => {
-          await rm(executionRoot, { recursive: true, force: true }).catch(() => undefined);
-          await removeEmptyDirectory(runtimeRoot);
+          await rm(privateRuntimeRoot, { recursive: true, force: true }).catch(() => undefined);
         }),
       };
     } catch (error) {
-      await rm(executionRoot, { recursive: true, force: true }).catch(() => undefined);
-      await removeEmptyDirectory(runtimeRoot);
+      await rm(privateRuntimeRoot, { recursive: true, force: true }).catch(() => undefined);
       throw error;
     }
   }
@@ -222,11 +224,14 @@ async function createProfile(
   workspaceRoot: string,
   protectedPaths: readonly string[],
   developerRoot: string | undefined,
+  privateRuntimeRoot: string,
 ): Promise<string> {
   const executable = await realpath(process.execPath).catch(() => process.execPath);
   const runtimeRoot = path.dirname(path.dirname(executable));
   const trustedReadRoots = [
     runtimeRoot,
+    privateRuntimeRoot,
+    ...SYSTEM_RUNTIME_READ_ROOTS,
     ...(developerRoot === undefined ? [] : [developerRoot]),
   ];
   const protectedRules = protectedPaths.map(
@@ -275,6 +280,7 @@ async function createProfile(
     "(allow default)",
     `(deny file-write* (require-all ` +
       `(require-not (subpath ${schemeString(workspaceRoot)})) ` +
+      `(require-not (subpath ${schemeString(privateRuntimeRoot)})) ` +
       `(require-not (literal ${schemeString("/dev/null")}))))`,
     ...readBoundaryRules,
     ...protectedRules,

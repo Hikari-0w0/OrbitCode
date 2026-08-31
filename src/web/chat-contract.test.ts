@@ -317,6 +317,38 @@ test("Web SSE 事件按网络分块往返解析", async () => {
   assert.deepEqual(actual, expected);
 });
 
+test("授权请求作为长等待前最后一帧时会强制刷新 SSE 缓冲", async () => {
+  const event: WebChatEvent = {
+    type: "permission-requested",
+    iteration: 1,
+    callId: "call-approval",
+    name: "run_command",
+    sequence: 0,
+    prompt: {
+      requestId: "request-1",
+      toolCallId: "call-approval",
+      toolName: "run_command",
+      workspace: { id: "project", name: "Project" },
+      summary: {
+        operation: "执行命令",
+        command: "node --version && npm --version",
+        cwd: ".",
+      },
+      risk: { level: "high", message: "命令需要确认。" },
+      source: "mode",
+      persistentLayer: "local",
+      expiresAt: "2026-08-31T06:00:00.000Z",
+    },
+  };
+
+  const encoded = encodeWebChatEvent(event);
+  assert.ok(encoded.byteLength >= 2_048);
+
+  const actual: WebChatEvent[] = [];
+  for await (const item of parseWebChatEvents(asAsync([encoded]))) actual.push(item);
+  assert.deepEqual(actual, [event]);
+});
+
 test("Web SSE 接受 unlimited、长迭代序号和运行时间停止", async () => {
   const expected: readonly WebChatEvent[] = [
     {

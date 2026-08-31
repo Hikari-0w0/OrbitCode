@@ -80,6 +80,7 @@ export type VisibleMessage = {
 
 type MessageListProps = {
   readonly messages: readonly VisibleMessage[];
+  readonly currentRunStartedAtMs?: number;
   readonly onSuggestion: (value: string) => void;
   readonly executablePlanMessageId?: string;
   readonly planActionDisabled: boolean;
@@ -98,6 +99,7 @@ const suggestions = [
 
 export function MessageList({
   messages,
+  currentRunStartedAtMs,
   onSuggestion,
   executablePlanMessageId,
   planActionDisabled,
@@ -155,7 +157,6 @@ export function MessageList({
                     <span>{message.role === "assistant" ? "OrbitCode" : "你"}</span>
                     <MessageState state={message.state} />
                   </div>
-                  {message.progress && <AgentProgress progress={message.progress} />}
                   {message.parts && message.parts.length > 0 ? (
                     <MessageTimeline
                       message={message}
@@ -180,9 +181,15 @@ export function MessageList({
                   {message.state === "streaming" && (
                     <span className="streamingCursor" aria-label="正在生成" />
                   )}
+                  {message.progress && (
+                    <AgentProgress
+                      progress={message.progress}
+                      runStartedAtMs={currentRunStartedAtMs}
+                    />
+                  )}
                   {message.cumulativeUsage && <UsageLine usage={message.cumulativeUsage} />}
                   {message.durationMs !== undefined && (
-                    <p className="usageLine">运行时间：{formatDuration(message.durationMs)}</p>
+                    <p className="usageLine">总用时：{formatDuration(message.durationMs)}</p>
                   )}
                   {message.stopReason && (
                     <p className={`stopReason stopReason--${message.state}`}>
@@ -271,7 +278,13 @@ function MessageTimeline({
   );
 }
 
-function AgentProgress({ progress }: { readonly progress: ProgressEvent }) {
+function AgentProgress({
+  progress,
+  runStartedAtMs,
+}: {
+  readonly progress: ProgressEvent;
+  readonly runStartedAtMs?: number;
+}) {
   const toolProgress = progress.phase === "tools"
     ? ` · 工具 ${progress.completedTools ?? 0}/${progress.totalTools ?? 0}`
     : (
@@ -294,13 +307,27 @@ function AgentProgress({ progress }: { readonly progress: ProgressEvent }) {
     <div className="agentProgress" aria-label="Agent 当前进度">
       <div className="progressHeader">
         <span>迭代 {progress.iteration}/{iterationLimit}</span>
-        <span>{toolProgress}</span>
+        <span>
+          {toolProgress}
+          {runStartedAtMs !== undefined && <LiveTotalDuration startedAtMs={runStartedAtMs} />}
+        </span>
       </div>
       <div className="progressTrack" aria-hidden="true">
         <span style={{ width: `${Math.max(4, percentage)}%` }} />
       </div>
     </div>
   );
+}
+
+function LiveTotalDuration({ startedAtMs }: { readonly startedAtMs: number }) {
+  const [durationMs, setDurationMs] = useState(0);
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setDurationMs(Math.max(0, Date.now() - startedAtMs));
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, [startedAtMs]);
+  return <> · 总用时：{formatDuration(durationMs)}</>;
 }
 
 function ModelProgressLabel({ progress }: { readonly progress: ProgressEvent }) {

@@ -2,6 +2,7 @@ import { open } from "node:fs/promises";
 import path from "node:path";
 
 import type { ConversationCheckpoint } from "@/core/conversations/types";
+import { collectContextReferences } from "@/lib/context-references";
 import {
   AgentRunLogError,
   LocalAgentRunLog,
@@ -160,10 +161,8 @@ export class LocalAgentRunExporter {
     const references = new Set<string>();
     for (const item of [checkpoints.before, checkpoints.after]) {
       if (item.status !== "included") continue;
-      for (const message of item.checkpoint.context.messages) {
-        if (message.kind === "tool-result" && message.payload.storage === "offloaded") {
-          references.add(message.payload.reference);
-        }
+      for (const reference of collectContextReferences(item.checkpoint.context.messages)) {
+        references.add(reference);
       }
     }
     const objects: ExportedContextObject[] = [];

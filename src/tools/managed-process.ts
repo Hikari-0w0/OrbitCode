@@ -40,10 +40,19 @@ export class ManagedProcessError extends Error {
   constructor(
     readonly kind: "limit" | "unavailable" | "invalid-id" | "start" | "not-ready",
     message: string,
+    diagnostic: {
+      readonly processAvailable: false;
+      readonly logs: readonly ManagedProcessLogChunk[];
+    } | undefined = undefined,
   ) {
     super(message);
     this.name = "ManagedProcessError";
+    this.processAvailable = diagnostic?.processAvailable;
+    this.logs = diagnostic?.logs ?? [];
   }
+
+  readonly processAvailable: false | undefined;
+  readonly logs: readonly ManagedProcessLogChunk[];
 }
 
 export class ManagedProcessController {
@@ -129,6 +138,14 @@ export class ManagedProcessController {
       return this.status(record.id, 0);
     } catch (error) {
       await handle.stop().catch(() => undefined);
+      const logs = record.logs.read(0).chunks;
+      this.#records.delete(record.id);
+      if (error instanceof ManagedProcessError) {
+        throw new ManagedProcessError(error.kind, error.message, {
+          processAvailable: false,
+          logs,
+        });
+      }
       throw error;
     }
   }

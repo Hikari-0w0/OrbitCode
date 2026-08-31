@@ -1,28 +1,48 @@
 import { fileToolFailure } from "@/tools/file-tool-result";
 import { compileGlob, GlobPatternError } from "@/tools/glob";
 import { defineTool, successfulToolResult } from "@/tools/registry";
-import { objectSchema, optionalSchema, stringSchema } from "@/tools/schema";
-import { emptyResultMeta, toolFailure } from "@/tools/types";
+import {
+  objectSchema,
+  optionalSchema,
+  stringSchema,
+  unwrapSingleJsonObjectField,
+} from "@/tools/schema";
+import { emptyResultMeta, toolFailure, type ToolInputSchema } from "@/tools/types";
 import { WORKSPACE_RELATIVE_PATH_DESCRIPTION } from "@/tools/workspace-path";
 
 const MAX_RESULTS = 1_000;
 
+type FindFilesInput = {
+  readonly pattern: string;
+  readonly path?: string;
+};
+
+const baseFindFilesSchema = objectSchema({
+  pattern: stringSchema({
+    minLength: 1,
+    maxLength: 512,
+    description:
+      "匹配 Workspace 相对完整路径的受限 Glob 模式；仅支持 *、? 和独立路径段 **，不支持花括号扩展。",
+  }),
+  path: optionalSchema(stringSchema({
+    minLength: 1,
+    maxLength: 1_024,
+    description: WORKSPACE_RELATIVE_PATH_DESCRIPTION,
+  })),
+});
+
+const findFilesSchema: ToolInputSchema<FindFilesInput> = {
+  jsonSchema: baseFindFilesSchema.jsonSchema,
+  parse: (value) => baseFindFilesSchema.parse(
+    unwrapSingleJsonObjectField(value, "pattern"),
+  ),
+};
+
 export const findFilesTool = defineTool({
   name: "find_files",
   description:
-    "按受限 Glob 模式发现授权 Workspace 内的文件，优先于 shell 的 ls/find。pattern 匹配 Workspace 相对完整路径；path 只缩小遍历范围，因此 pattern 仍应包含对应目录前缀。",
-  inputSchema: objectSchema({
-    pattern: stringSchema({
-      minLength: 1,
-      maxLength: 512,
-      description: "匹配 Workspace 相对完整路径的受限 Glob 模式。",
-    }),
-    path: optionalSchema(stringSchema({
-      minLength: 1,
-      maxLength: 1_024,
-      description: WORKSPACE_RELATIVE_PATH_DESCRIPTION,
-    })),
-  }),
+    "按受限 Glob 模式发现授权 Workspace 内的文件，优先于 shell 的 ls/find。仅支持 *、? 和独立路径段 **，不支持 {ts,tsx} 等花括号扩展。pattern 匹配 Workspace 相对完整路径；path 只缩小遍历范围，因此 pattern 仍应包含对应目录前缀。",
+  inputSchema: findFilesSchema,
   mutability: "read-only",
   permission: {
     targetKind: "path",

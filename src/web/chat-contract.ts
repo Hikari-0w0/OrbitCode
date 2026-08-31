@@ -447,7 +447,12 @@ export function parsePermissionDecisionResponse(
 }
 
 export function encodeWebChatEvent(event: WebChatEvent): Uint8Array {
-  return new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
+  const data = `data: ${JSON.stringify(event)}\n\n`;
+  if (event.type !== "permission-requested") {
+    return new TextEncoder().encode(data);
+  }
+  // 授权事件后服务端会立即停下等待人工决定，用 SSE 注释撑过常见的小分块缓冲阈值。
+  return new TextEncoder().encode(`${data}: ${" ".repeat(2_048)}\n\n`);
 }
 
 export function parseProviderCatalogResponse(
