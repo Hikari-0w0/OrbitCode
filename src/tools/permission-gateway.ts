@@ -65,9 +65,13 @@ export class PermissionGateway {
     call: PreparedToolCall,
     toolCallId: string,
     signal: AbortSignal,
+    permissionTarget = call.permissionTarget,
   ): Promise<PermissionAuthorization> {
+    const scopedCall = permissionTarget === call.permissionTarget
+      ? call
+      : { ...call, permissionTarget, permissionTargets: [permissionTarget] };
     if (signal.aborted) return denied(cancelledFailure());
-    if (this.options.agentMode === "plan" && call.mutability !== "read-only") {
+    if (this.options.agentMode === "plan" && scopedCall.mutability !== "read-only") {
       return denied(
         toolFailure(
           "permission-denied",
@@ -76,10 +80,10 @@ export class PermissionGateway {
         ),
       );
     }
-    const preliminaryHardFailure = preliminaryDangerousFailure(call);
+    const preliminaryHardFailure = preliminaryDangerousFailure(scopedCall);
     if (preliminaryHardFailure) return denied(preliminaryHardFailure);
 
-    const subject = await this.#resolveSubject(call);
+    const subject = await this.#resolveSubject(scopedCall);
     if (!subject.ok) return denied(subject.result);
     const hardFailure = dangerousFailure(subject.value);
     if (hardFailure) return denied(hardFailure);
@@ -90,30 +94,30 @@ export class PermissionGateway {
       return denied(permissionDenied(evaluation.value.reason.message));
     }
     if (evaluation.value.kind === "allow") {
-      return this.#allowed(call, subject.value, "policy");
+      return this.#allowed(scopedCall, subject.value, "policy");
     }
     if (this.options.broker.hasSessionGrant(subject.value)) {
-      return this.#allowed(call, subject.value, "session");
+      return this.#allowed(scopedCall, subject.value, "session");
     }
 
     const handle = this.options.broker.request(
       {
         toolCallId,
         subject: subject.value,
-        fingerprint: call.fingerprint,
+        fingerprint: scopedCall.fingerprint,
         reason: evaluation.value.reason,
-        summary: summarizePermissionSubject(subject.value, call.permissionTarget),
+        summary: summarizePermissionSubject(subject.value, scopedCall.permissionTarget),
       },
       signal,
     );
-    const expectedFingerprint = call.fingerprint;
+    const expectedFingerprint = scopedCall.fingerprint;
     let resolution: Promise<PermissionAuthorization> | undefined;
     return {
       kind: "awaiting",
       prompt: handle.prompt,
       resolve: () => {
         resolution ??= this.#resolveApproval(
-          call,
+          scopedCall,
           subject.value,
           expectedFingerprint,
           handle.outcome,

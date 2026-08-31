@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { OpenAICompatibleProvider } from "@/models/openai-provider";
 import { ProviderError, type ModelStreamEvent } from "@/models/provider";
+import { MAX_TOOL_ARGUMENTS_JSON_CHARS } from "@/tools/types";
 import {
   DONE_EVENT,
   startOpenAIMockServer,
@@ -19,9 +20,26 @@ async function collect(
 ): Promise<ModelStreamEvent[]> {
   const result: ModelStreamEvent[] = [];
   for await (const event of source) {
-    result.push(event);
+    if (event.type !== "request-progress") result.push(event);
   }
   return result;
+}
+
+async function collectAll(
+  source: AsyncIterable<ModelStreamEvent>,
+): Promise<ModelStreamEvent[]> {
+  const result: ModelStreamEvent[] = [];
+  for await (const event of source) result.push(event);
+  return result;
+}
+
+async function nextSemantic(
+  iterator: AsyncIterator<ModelStreamEvent>,
+): Promise<IteratorResult<ModelStreamEvent>> {
+  for (;;) {
+    const next = await iterator.next();
+    if (next.done || next.value.type !== "request-progress") return next;
+  }
 }
 
 test("发送正确请求并按网络分块实时产出文本", async () => {
@@ -50,14 +68,14 @@ test("发送正确请求并按网络分块实时产出文本", async () => {
       })
       [Symbol.asyncIterator]();
 
-    assert.deepEqual(await iterator.next(), {
+    assert.deepEqual(await nextSemantic(iterator), {
       done: false,
       value: { type: "text-delta", text: "你" },
     });
     assert.equal(doneWasSent, false);
     const remaining: ModelStreamEvent[] = [];
     for (;;) {
-      const next = await iterator.next();
+      const next = await nextSemantic(iterator);
       if (next.done) {
         break;
       }
@@ -104,6 +122,30 @@ test("显式关闭兼容接口的思考模式", async () => {
 
     const body = server.requests[0]?.body as Record<string, unknown>;
     assert.equal(body.enable_thinking, false);
+  } finally {
+    await server.close();
+  }
+});
+
+test("DeepSeek 官方接口使用 thinking 对象关闭思考模式", async () => {
+  const server = await startOpenAIMockServer(() => ({ chunks: [{ data: DONE_EVENT }] }));
+  try {
+    const provider = new OpenAICompatibleProvider({
+      model: "test-model",
+      baseUrl: server.baseUrl,
+      apiKey: "test-secret",
+      thinking: { enabled: false, apiStyle: "deepseek" },
+    });
+
+    await collect(provider.stream([{ role: "user", content: "快速处理" }], {
+      signal: new AbortController().signal,
+      toolChoice: "none",
+    }));
+
+    const body = server.requests[0]?.body as Record<string, unknown>;
+    assert.deepEqual(body.thinking, { type: "disabled" });
+    assert.equal("enable_thinking" in body, false);
+    assert.equal("thinking_budget" in body, false);
   } finally {
     await server.close();
   }
@@ -337,7 +379,7 @@ test("流截断和用户取消分别归类", async () => {
     const iterator = provider
       .stream([], { signal: controller.signal, toolChoice: "none" })
       [Symbol.asyncIterator]();
-    assert.equal((await iterator.next()).value?.type, "text-delta");
+    assert.equal((await nextSemantic(iterator)).value?.type, "text-delta");
     controller.abort();
     await assert.rejects(iterator.next(), (error: unknown) => {
       assert.ok(error instanceof ProviderError);
@@ -375,6 +417,133 @@ test("连接失败被归类为可恢复网络错误", async () => {
       return true;
     },
   );
+});
+
+test("首字节超时会在语义输出前重试并保留 SiliconFlow trace", async () => {
+  const server = await startOpenAIMockServer(() => ({
+    headers: { "x-siliconcloud-trace-id": `trace-${server.requests.length}` },
+    chunks: server.requests.length === 1
+      ? [{ data: DONE_EVENT, delayMs: 150 }]
+      : [{ data: DONE_EVENT }],
+  }));
+  try {
+    const provider = new OpenAICompatibleProvider({
+      model: "test-model",
+      baseUrl: server.baseUrl,
+      apiKey: "test-secret",
+      transport: {
+        firstByteTimeoutMs: 100,
+        idleTimeoutMs: 1_000,
+        totalTimeoutMs: 1_000,
+        maxRetries: 1,
+      },
+    });
+
+    const events = await collectAll(provider.stream([], {
+      signal: new AbortController().signal,
+      toolChoice: "none",
+    }));
+
+    assert.equal(server.requests.length, 2);
+    assert.ok(events.some((event) =>
+      event.type === "request-progress" &&
+      event.attempt === 2 &&
+      event.traceId === "trace-2"
+    ));
+    assert.deepEqual(
+      events.filter((event) => event.type !== "request-progress"),
+      [{ type: "done", finishReason: "stop" }],
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("响应流总超时保留结构化超时原因", async () => {
+  const server = await startOpenAIMockServer(() => ({
+    chunks: [
+      { data: textDelta("partial") },
+      { data: DONE_EVENT, delayMs: 150 },
+    ],
+  }));
+  try {
+    const provider = new OpenAICompatibleProvider({
+      model: "test-model",
+      baseUrl: server.baseUrl,
+      apiKey: "test-secret",
+      transport: {
+        firstByteTimeoutMs: 100,
+        idleTimeoutMs: 1_000,
+        totalTimeoutMs: 100,
+        maxRetries: 0,
+      },
+    });
+
+    await assert.rejects(
+      collect(provider.stream([], {
+        signal: new AbortController().signal,
+        toolChoice: "none",
+      })),
+      (error: unknown) => {
+        assert.ok(error instanceof ProviderError);
+        assert.equal(error.kind, "timeout");
+        assert.equal(error.timeoutPhase, "total");
+        assert.match(error.message, /总时长/u);
+        return true;
+      },
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("工具参数流式累积阶段可观察且不记录完整参数", async () => {
+  const server = await startOpenAIMockServer(() => ({
+    headers: { "x-siliconcloud-trace-id": "trace-tool" },
+    chunks: [{
+      data: toolCallDelta({
+        id: "call_write",
+        name: "write_file",
+        argumentsJson: '{"path":"a.txt","content":"secret"}',
+      }) + TOOL_FINISH_EVENT + TRANSPORT_DONE_EVENT,
+    }],
+  }));
+  try {
+    const provider = new OpenAICompatibleProvider({
+      model: "test-model",
+      baseUrl: server.baseUrl,
+      apiKey: "test-secret",
+    });
+    const events = await collectAll(provider.stream([], {
+      signal: new AbortController().signal,
+      tools: [{
+        type: "function",
+        function: {
+          name: "write_file",
+          description: "写入文件",
+          parameters: { type: "object", properties: {}, additionalProperties: true },
+        },
+      }],
+      toolChoice: "auto",
+    }));
+    const progress = events.find((event) =>
+      event.type === "request-progress" &&
+      event.stage === "streaming-tool-arguments"
+    );
+    assert.ok(progress?.type === "request-progress");
+    assert.deepEqual(progress, {
+      type: "request-progress",
+      stage: "streaming-tool-arguments",
+      elapsedMs: progress?.elapsedMs,
+      attempt: 1,
+      traceId: "trace-tool",
+      toolName: "write_file",
+      toolArgumentsChars: 35,
+    });
+    assert.equal(JSON.stringify(progress).includes("secret"), false);
+  } finally {
+    await server.close();
+  }
 });
 
 test("跨事件与网络分块拼接单个工具调用并发送标准定义", async () => {
@@ -1384,7 +1553,7 @@ test("拒绝冲突/重复/不安全标识、错误索引、超长参数和错误
     toolCallDelta({
       id: "too_large",
       name: "read_file",
-      argumentsJson: "x".repeat(64 * 1024 + 1),
+      argumentsJson: "x".repeat(MAX_TOOL_ARGUMENTS_JSON_CHARS + 1),
     }) + TOOL_FINISH_EVENT + TRANSPORT_DONE_EVENT,
     toolCallDelta({ id: "wrong_finish", name: "read_file", argumentsJson: "{}" }) +
       DONE_EVENT,

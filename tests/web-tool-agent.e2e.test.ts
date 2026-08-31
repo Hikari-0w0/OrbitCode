@@ -173,15 +173,20 @@ test(
       assert.match(JSON.stringify(toolResults[0]), /timeoutMs = 1000/);
       assert.match(JSON.stringify(toolResults[1]), /"replacements":1/);
       assert.match(JSON.stringify(toolResults[2]), /timeoutMs = 1500/);
-      assert.deepEqual(events.at(-1), {
+      const finalEvent = events.at(-1);
+      assert.equal(finalEvent?.type, "stopped");
+      assert.ok(finalEvent?.type === "stopped" && finalEvent.durationMs >= 0);
+      assert.deepEqual(finalEvent, {
         type: "stopped",
         reason: "final-response",
         iterations: 4,
+        durationMs: finalEvent?.type === "stopped" ? finalEvent.durationMs : -1,
         sideEffect: "applied",
         finalMessage: {
           role: "assistant",
           content: "已将 timeoutMs 改为 1500，并读取最终文件确认。",
         },
+        verification: { status: "unverified", checks: [], blockers: [] },
       });
 
       assert.equal(server.requests.length, 4);

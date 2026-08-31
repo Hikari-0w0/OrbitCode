@@ -93,6 +93,96 @@ test("失败轮次回滚新增消息和 usage 锚点", async () => {
   assert.equal(manager.snapshot().messages.length, 2);
 });
 
+test("持久化快照恢复完整工具协议、中断边界和压缩失败计数", async () => {
+  const provider = new ScriptedSummaryProvider([]);
+  const initialState = {
+    messages: [
+      { kind: "user" as const, content: "检查文件" },
+      {
+        kind: "assistant-tool-call" as const,
+        content: null,
+        reasoningContent: "内部推理协议",
+        toolCalls: [{ id: "read-1", name: "read_file", argumentsJson: "{}" }],
+      },
+      {
+        kind: "tool-result" as const,
+        toolCallId: "read-1",
+        payload: { storage: "inline" as const, content: "文件内容" },
+      },
+      {
+        kind: "interruption" as const,
+        reason: "max-iterations" as const,
+        detail: "达到上限",
+        sideEffect: "none" as const,
+      },
+    ],
+    consecutiveSummaryFailures: 2,
+  };
+  const manager = new ContextManager({
+    sessionId: "conversation-1",
+    config: policy(),
+    store: new MemoryStore(),
+    provider,
+    initialState,
+  });
+  assert.deepEqual(manager.persistentSnapshot(), initialState);
+  assert.equal(manager.getModelHistory()[1]?.role, "assistant");
+  assert.equal(manager.getModelHistory()[2]?.role, "tool");
+
+  manager.beginTurn("继续");
+  assert.throws(() => manager.persistentSnapshot(), /结束前不能/);
+  await manager.rollbackTurn();
+  assert.deepEqual(manager.persistentSnapshot(), initialState);
+});
+
+test("运行阶段压缩创建的引用在轮次回滚时清理", async () => {
+  const store = new MemoryStore();
+  const messages = Array.from({ length: 3 }, (_, index) => {
+    const id = `write-${index}`;
+    return [
+      {
+        kind: "assistant-tool-call" as const,
+        content: null,
+        toolCalls: [{
+          id,
+          name: "write_file",
+          argumentsJson: JSON.stringify({ content: "x".repeat(500) }),
+        }],
+      },
+      {
+        kind: "tool-result" as const,
+        toolCallId: id,
+        payload: {
+          storage: "inline" as const,
+          content: JSON.stringify({ ok: true, output: { path: `file-${index}` } }),
+        },
+      },
+    ];
+  }).flat();
+  const initialState = { messages, consecutiveSummaryFailures: 0 };
+  const manager = new ContextManager({
+    sessionId: "session",
+    config: {
+      ...policy(),
+      operationalCompactionTokens: 1,
+      recentToolExchanges: 1,
+    },
+    store,
+    provider: new ScriptedSummaryProvider([]),
+    initialState,
+  });
+
+  manager.beginTurn("继续");
+  await manager.prepareForModel(
+    { systemMessages: [], tools: [] },
+    new AbortController().signal,
+  );
+  assert.equal(store.references.length, 2);
+  await manager.rollbackTurn();
+  assert.deepEqual(store.deleted, store.references);
+  assert.deepEqual(manager.persistentSnapshot(), initialState);
+});
+
 class ScriptedSummaryProvider implements ChatProvider {
   constructor(private readonly scripts: Array<readonly ModelStreamEvent[]>) {}
   stream(): AsyncIterable<ModelStreamEvent> {
@@ -103,11 +193,18 @@ class ScriptedSummaryProvider implements ChatProvider {
 }
 
 class MemoryStore implements ContextStore {
+  readonly references: string[] = [];
+  readonly deleted: string[] = [];
+
   async write(input: { readonly content: string }): Promise<StoredContextReference> {
-    return { reference: "context://v1/00000000-0000-4000-8000-000000000001", byteLength: input.content.length };
+    const reference = `context://v1/00000000-0000-4000-8000-${String(this.references.length + 1).padStart(12, "0")}`;
+    this.references.push(reference);
+    return { reference, byteLength: input.content.length };
   }
   async read(): Promise<ContextChunk> { throw new Error("unused"); }
-  async deleteReference(): Promise<void> {}
+  async deleteReference(input: { readonly reference: string }): Promise<void> {
+    this.deleted.push(input.reference);
+  }
   async deleteSession(): Promise<void> {}
 }
 

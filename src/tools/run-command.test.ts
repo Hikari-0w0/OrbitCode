@@ -81,3 +81,30 @@ test("命令工具拒绝非法 cwd 和不可用沙箱", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("畸形命令在权限准备和沙箱执行前被拒绝", () => {
+  let probed = false;
+  const tool = createRunCommandTool({
+    async probe() {
+      probed = true;
+      return { available: true };
+    },
+    async run() {
+      throw new Error("不应执行");
+    },
+  });
+
+  for (const input of [
+    { command: '{"command":"pwd"}' },
+    { command: '"pwd"' },
+    { command: "cd server && pwd", cwd: "server" },
+  ]) {
+    const prepared = tool.prepareUnknown(input);
+    assert.equal(prepared.kind, "failure");
+    if (prepared.kind === "failure") {
+      assert.equal(prepared.result.ok, false);
+      assert.equal(prepared.result.ok ? undefined : prepared.result.error.kind, "invalid-arguments");
+    }
+  }
+  assert.equal(probed, false);
+});

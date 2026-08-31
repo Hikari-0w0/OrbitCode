@@ -35,6 +35,7 @@ export type PreparedToolCall = {
   readonly name: ToolName;
   readonly mutability: ToolMutability;
   readonly permissionTarget: ToolPermissionTarget;
+  readonly permissionTargets?: readonly ToolPermissionTarget[];
   readonly fingerprint: string;
   execute(context: ToolExecutionContext): Promise<ToolExecutionResult>;
 };
@@ -214,8 +215,15 @@ export function defineTool<TInput, TOutput extends JsonValue>(
           }),
         };
       }
-      const permissionTarget = Object.freeze(tool.permission.resolve(parsed.value));
-      if (permissionTarget.kind !== tool.permission.targetKind) {
+      const resolvedTargets = tool.permission.resolve(parsed.value);
+      const permissionTargets = Object.freeze(
+        (Array.isArray(resolvedTargets) ? resolvedTargets : [resolvedTargets])
+          .map((target) => Object.freeze(target)),
+      );
+      if (
+        permissionTargets.length === 0 ||
+        permissionTargets.some((target) => target.kind !== tool.permission.targetKind)
+      ) {
         return {
           kind: "failure" as const,
           result: toolFailure("execution-failed", "工具权限目标定义无效。"),
@@ -226,7 +234,8 @@ export function defineTool<TInput, TOutput extends JsonValue>(
         call: Object.freeze({
           name: tool.name,
           mutability: tool.mutability,
-          permissionTarget,
+          permissionTarget: permissionTargets[0],
+          permissionTargets,
           fingerprint: fingerprint(parsed.value),
           execute(context: ToolExecutionContext) {
             return executePrepared(

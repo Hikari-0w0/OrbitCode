@@ -5,6 +5,8 @@ import { parse } from "yaml";
 import {
   DEFAULT_AUTOMATIC_RESERVE_TOKENS,
   DEFAULT_CONTEXT_PREVIEW_CHARS,
+  DEFAULT_OPERATIONAL_COMPACTION_TOKENS,
+  DEFAULT_RECENT_TOOL_EXCHANGES,
   DEFAULT_MANUAL_RESERVE_TOKENS,
   DEFAULT_RECENT_MESSAGES_TOKENS,
   DEFAULT_SINGLE_TOOL_RESULT_TOKENS,
@@ -12,7 +14,10 @@ import {
   type ContextPolicyConfig,
 } from "@/core/context/types";
 import type { Environment } from "@/lib/environment";
-import type { ModelThinkingConfig } from "@/models/provider";
+import type {
+  ModelThinkingConfig,
+  ProviderTransportPolicy,
+} from "@/models/provider";
 
 const PROVIDER_FIELDS = new Set([
   "name",
@@ -21,9 +26,16 @@ const PROVIDER_FIELDS = new Set([
   "base_url",
   "api_key",
   "thinking",
+  "transport",
   "context",
 ]);
-const THINKING_FIELDS = new Set(["enabled", "budget_tokens"]);
+const THINKING_FIELDS = new Set(["enabled", "budget_tokens", "api_style"]);
+const TRANSPORT_FIELDS = new Set([
+  "first_byte_timeout_ms",
+  "idle_timeout_ms",
+  "total_timeout_ms",
+  "max_retries",
+]);
 const CONTEXT_FIELDS = new Set([
   "window_tokens",
   "single_tool_result_tokens",
@@ -32,6 +44,8 @@ const CONTEXT_FIELDS = new Set([
   "automatic_reserve_tokens",
   "manual_reserve_tokens",
   "preview_chars",
+  "operational_compaction_tokens",
+  "recent_tool_exchanges",
 ]);
 const ENVIRONMENT_VARIABLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const MAX_CONTEXT_WINDOW_TOKENS = 10_000_000;
@@ -39,6 +53,8 @@ const MAX_CONTEXT_THRESHOLD_TOKENS = 1_000_000;
 const MAX_CONTEXT_PREVIEW_CHARS = 64 * 1024;
 const MIN_THINKING_BUDGET_TOKENS = 128;
 const MAX_THINKING_BUDGET_TOKENS = 32_768;
+const MAX_PROVIDER_TIMEOUT_MS = 30 * 60 * 1_000;
+const MAX_PROVIDER_RETRIES = 3;
 
 export type ProviderConfig = {
   readonly name: string;
@@ -47,6 +63,7 @@ export type ProviderConfig = {
   readonly baseUrl: string;
   readonly apiKeyEnvironmentVariable: string;
   readonly thinking?: ModelThinkingConfig;
+  readonly transport?: ProviderTransportPolicy;
   readonly context: ContextPolicyConfig;
 };
 
@@ -206,6 +223,7 @@ function validateProvider(value: unknown, index: number): ProviderConfig {
     );
   }
   const thinking = validateThinking(value.thinking, `${location}.thinking`);
+  const transport = validateTransport(value.transport, `${location}.transport`);
   const context = validateContext(value.context, `${location}.context`);
 
   return {
@@ -215,8 +233,65 @@ function validateProvider(value: unknown, index: number): ProviderConfig {
     baseUrl,
     apiKeyEnvironmentVariable,
     ...(thinking === undefined ? {} : { thinking }),
+    ...(transport === undefined ? {} : { transport }),
     context,
   };
+}
+
+function validateTransport(
+  value: unknown,
+  location: string,
+): ProviderTransportPolicy | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw invalidConfig(`${location} 必须是对象。`);
+  for (const field of Object.keys(value)) {
+    if (!TRANSPORT_FIELDS.has(field)) {
+      throw invalidConfig(`${location} 包含未知字段：${field}`);
+    }
+  }
+  const firstByteTimeoutMs = requireSafeInteger(
+    value.first_byte_timeout_ms,
+    `${location}.first_byte_timeout_ms`,
+    MAX_PROVIDER_TIMEOUT_MS,
+  );
+  const idleTimeoutMs = requireSafeInteger(
+    value.idle_timeout_ms,
+    `${location}.idle_timeout_ms`,
+    MAX_PROVIDER_TIMEOUT_MS,
+  );
+  const totalTimeoutMs = requireSafeInteger(
+    value.total_timeout_ms,
+    `${location}.total_timeout_ms`,
+    MAX_PROVIDER_TIMEOUT_MS,
+  );
+  const maxRetries = requireNonNegativeInteger(
+    value.max_retries,
+    `${location}.max_retries`,
+    MAX_PROVIDER_RETRIES,
+  );
+  if (firstByteTimeoutMs < 100 || idleTimeoutMs < 100 || totalTimeoutMs < 100) {
+    throw invalidConfig(`${location} 的超时必须至少为 100 毫秒。`);
+  }
+  if (totalTimeoutMs < firstByteTimeoutMs) {
+    throw invalidConfig(`${location}.total_timeout_ms 不能小于首字节超时。`);
+  }
+  return { firstByteTimeoutMs, idleTimeoutMs, totalTimeoutMs, maxRetries };
+}
+
+function requireNonNegativeInteger(
+  value: unknown,
+  field: string,
+  maximum: number,
+): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < 0 ||
+    value > maximum
+  ) {
+    throw invalidConfig(`${field} 必须是 0 到 ${maximum} 之间的整数。`);
+  }
+  return value;
 }
 
 function validateThinking(
@@ -235,8 +310,19 @@ function validateThinking(
   if (typeof value.enabled !== "boolean") {
     throw invalidConfig(`${location}.enabled 必须是布尔值。`);
   }
+  const apiStyle = value.api_style === undefined
+    ? undefined
+    : requireThinkingApiStyle(value.api_style, `${location}.api_style`);
+  if (apiStyle === "deepseek" && value.budget_tokens !== undefined) {
+    throw invalidConfig(
+      `${location}.api_style 为 deepseek 时不能设置 budget_tokens。`,
+    );
+  }
   if (value.budget_tokens === undefined) {
-    return { enabled: value.enabled };
+    return {
+      enabled: value.enabled,
+      ...(apiStyle === undefined ? {} : { apiStyle }),
+    };
   }
   const budgetTokens = requireSafeInteger(
     value.budget_tokens,
@@ -251,7 +337,21 @@ function validateThinking(
   if (!value.enabled) {
     throw invalidConfig(`${location}.enabled 为 false 时不能设置 budget_tokens。`);
   }
-  return { enabled: true, budgetTokens };
+  return {
+    enabled: true,
+    budgetTokens,
+    ...(apiStyle === undefined ? {} : { apiStyle }),
+  };
+}
+
+function requireThinkingApiStyle(
+  value: unknown,
+  field: string,
+): NonNullable<ModelThinkingConfig["apiStyle"]> {
+  if (value !== "siliconflow" && value !== "deepseek") {
+    throw invalidConfig(`${field} 只支持 siliconflow 或 deepseek。`);
+  }
+  return value;
 }
 
 function validateContext(value: unknown, location: string): ContextPolicyConfig {
@@ -305,6 +405,18 @@ function validateContext(value: unknown, location: string): ContextPolicyConfig 
       `${location}.preview_chars`,
       DEFAULT_CONTEXT_PREVIEW_CHARS,
       MAX_CONTEXT_PREVIEW_CHARS,
+    ),
+    operationalCompactionTokens: optionalSafeInteger(
+      value.operational_compaction_tokens,
+      `${location}.operational_compaction_tokens`,
+      DEFAULT_OPERATIONAL_COMPACTION_TOKENS,
+      MAX_CONTEXT_THRESHOLD_TOKENS,
+    ),
+    recentToolExchanges: optionalSafeInteger(
+      value.recent_tool_exchanges,
+      `${location}.recent_tool_exchanges`,
+      DEFAULT_RECENT_TOOL_EXCHANGES,
+      32,
     ),
   };
   if (config.toolResultGroupTokens < config.singleToolResultTokens) {

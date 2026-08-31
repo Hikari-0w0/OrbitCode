@@ -11,6 +11,8 @@ export const DEFAULT_RECENT_MESSAGES_TOKENS = 10_000;
 export const DEFAULT_AUTOMATIC_RESERVE_TOKENS = 13_000;
 export const DEFAULT_MANUAL_RESERVE_TOKENS = 3_000;
 export const DEFAULT_CONTEXT_PREVIEW_CHARS = 2_000;
+export const DEFAULT_OPERATIONAL_COMPACTION_TOKENS = 24_000;
+export const DEFAULT_RECENT_TOOL_EXCHANGES = 4;
 export const SUMMARY_FAILURE_LIMIT = 3;
 
 export type ContextPolicyConfig = {
@@ -21,6 +23,8 @@ export type ContextPolicyConfig = {
   readonly automaticReserveTokens: number;
   readonly manualReserveTokens: number;
   readonly previewChars: number;
+  readonly operationalCompactionTokens?: number;
+  readonly recentToolExchanges?: number;
 };
 
 export type ContextSummary = {

@@ -80,13 +80,19 @@ test("权限配置通过原路径或内部符号链接访问都被保护", async
   }
 });
 
-test("工作区原子创建、覆盖并拒绝快照冲突", async () => {
+test("工作区原子创建嵌套目录、覆盖并拒绝快照冲突", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "orbitcode-write-"));
   try {
     const workspace = await createWorkspaceBoundary(root);
     const created = await workspace.resolveWriteTarget("new.txt");
     await workspace.atomicWrite(created, "first");
     assert.equal(await readFile(path.join(root, "new.txt"), "utf8"), "first");
+    const nested = await workspace.resolveWriteTarget("missing/deep/file.txt");
+    await workspace.atomicWrite(nested, "nested");
+    assert.equal(
+      await readFile(path.join(root, "missing/deep/file.txt"), "utf8"),
+      "nested",
+    );
 
     const snapshot = await workspace.readTextFile("new.txt", { maxBytes: 100 });
     await workspace.replaceSnapshot(snapshot, "second");
@@ -94,9 +100,28 @@ test("工作区原子创建、覆盖并拒绝快照冲突", async () => {
     await assert.rejects(workspace.replaceSnapshot(snapshot, "stale"), /其他进程修改/);
     assert.equal(await readFile(path.join(root, "new.txt"), "utf8"), "second");
     assert.deepEqual((await readdir(root)).filter((name) => name.endsWith(".tmp")), []);
-    await assert.rejects(workspace.resolveWriteTarget("missing/file.txt"), /不存在/);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("嵌套目录在授权后被替换为符号链接时拒绝写出 Workspace", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-write-parent-race-"));
+  const outside = await mkdtemp(path.join(tmpdir(), "orbitcode-write-parent-outside-"));
+  try {
+    const workspace = await createWorkspaceBoundary(root);
+    const target = await workspace.resolveWriteTarget("nested/file.txt");
+    await symlink(outside, path.join(root, "nested"));
+
+    await assert.rejects(
+      workspace.atomicWrite(target, "must-stay-inside"),
+      (error: unknown) =>
+        error instanceof WorkspaceError && error.kind === "conflict",
+    );
+    await assert.rejects(readFile(path.join(outside, "file.txt"), "utf8"), /ENOENT/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
   }
 });
 

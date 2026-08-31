@@ -86,6 +86,10 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 
 .workspaceSection { margin-top: 31px; }
 .providerSection { margin-top: 22px; }
+.conversationActions { display: flex; gap: 6px; margin-top: 8px; }
+.conversationActions button { flex: 1; min-width: 0; padding: 6px 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text-soft); font-size: 10px; }
+.conversationActions button:hover:not(:disabled) { border-color: #3c443e; color: var(--text); }
+.conversationActions button:disabled { opacity: .38; }
 .workspaceSection > label, .providerSection > label { display: block; margin: 0 0 10px 2px; color: var(--text-dim); font: 650 9px/1 ui-monospace, monospace; letter-spacing: .14em; }
 .selectWrap { position: relative; }
 .selectWrap select { width: 100%; height: 42px; padding: 0 38px 0 13px; appearance: none; border: 1px solid var(--line); border-radius: 8px; outline: none; background: var(--panel-raised); font-size: 12px; }
@@ -136,6 +140,10 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .clearButton svg { width: 14px; height: 14px; }
 .clearButton:hover:not(:disabled) { border-color: #3c443e; color: var(--text); }
 .clearButton:disabled { opacity: .38; }
+.exportButton { display: inline-flex; height: 34px; align-items: center; gap: 7px; padding: 0 11px; border: 1px solid rgb(168 240 184 / 18%); border-radius: 7px; background: rgb(168 240 184 / 4%); color: var(--green); font-size: 10px; }
+.exportButton svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.5; }
+.exportButton:hover:not(:disabled) { border-color: rgb(168 240 184 / 38%); background: rgb(168 240 184 / 7%); }
+.exportButton:disabled { opacity: .38; }
 .contextCompression { display: grid; justify-items: end; gap: 4px; }
 .contextCompressionButton { min-height: 34px; padding: 0 11px; border: 1px solid rgb(168 240 184 / 18%); border-radius: 7px; background: rgb(168 240 184 / 4%); color: var(--green); font-size: 10px; }
 .contextCompressionButton:hover:not(:disabled) { border-color: rgb(168 240 184 / 38%); background: rgb(168 240 184 / 7%); }
@@ -160,6 +168,8 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .messageMeta { display: flex; min-height: 30px; align-items: center; gap: 9px; color: var(--text-soft); font-size: 11px; font-weight: 620; }
 .messageState { color: var(--text-dim); font: 500 9px/1 ui-monospace, monospace; }
 .messageText { margin: 7px 0 0; overflow-wrap: anywhere; color: #d7ddd7; font-size: 14px; line-height: 1.82; white-space: pre-wrap; }
+.messageTimeline { display: grid; gap: 12px; margin-top: 12px; }
+.messageTimeline > .messageText, .messageTimeline > .toolExecutionList { margin-top: 0; }
 .message--user .messageText { color: var(--text); }
 .messageDetail { display: inline-flex; margin: 10px 0 0; padding: 6px 9px; border-radius: 6px; font-size: 10px; line-height: 1.45; }
 .messageDetail--failed { background: rgb(241 140 131 / 8%); color: var(--danger); }
@@ -175,12 +185,18 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .agentProgress { margin-top: 9px; padding: 9px 10px; border: 1px solid rgb(168 240 184 / 14%); border-radius: 7px; background: rgb(168 240 184 / 3%); }
 .progressHeader { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--text-dim); font: 500 9px/1.3 ui-monospace, monospace; }
 .progressHeader span:first-child { color: var(--green); }
-.progressTrack { height: 2px; margin-top: 8px; overflow: hidden; border-radius: 99px; background: var(--line); }
+.progressTrack { position: relative; height: 2px; margin-top: 8px; overflow: hidden; border-radius: 99px; background: var(--line); }
 .progressTrack span { display: block; height: 100%; border-radius: inherit; background: var(--green); box-shadow: 0 0 8px rgb(168 240 184 / 50%); transition: width .2s ease; }
+.progressTrack::after { position: absolute; inset: 0 auto 0 -28%; width: 28%; content: ""; background: linear-gradient(90deg, transparent, rgb(168 240 184 / 75%), transparent); animation: agent-progress-scan 1.8s ease-in-out infinite; }
+@keyframes agent-progress-scan { to { transform: translateX(460%); } }
+@media (prefers-reduced-motion: reduce) { .progressTrack::after { animation: none; } }
 .usageLine { max-width: 100%; margin: 11px 0 0; overflow-wrap: anywhere; color: var(--text-dim); font: 500 9px/1.4 ui-monospace, monospace; }
 .stopReason { margin: 8px 0 0; color: var(--text-dim); font: 500 9px/1.4 ui-monospace, monospace; }
 .stopReason--failed { color: var(--danger); }
 .stopReason--cancelled { color: var(--orange); }
+.verificationState { margin: 6px 0 0; color: var(--text-dim); font: 500 9px/1.4 ui-monospace, monospace; }
+.verificationState--verified { color: var(--green); }
+.verificationState--blocked { color: var(--danger); }
 .streamingCursor { display: inline-block; width: 7px; height: 15px; margin: 9px 0 0 2px; vertical-align: -2px; background: var(--green); animation: blink 1s step-end infinite; }
 .toolExecutionList { display: grid; gap: 8px; margin-top: 12px; }
 .toolCard { overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: rgb(255 255 255 / 1.5%); }
@@ -307,6 +323,7 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
   .chatHeader h2 { font-size: 15px; }
   .chatKicker, .connectionState { display: none; }
   .modeBadge { display: none; }
+  .exportButton { width: 34px; padding: 0; justify-content: center; font-size: 0; }
   .clearButton { width: 34px; padding: 0; justify-content: center; font-size: 0; }
   .contextCompressionStatus { display: none; }
   .permissionActions { grid-template-columns: 1fr; }

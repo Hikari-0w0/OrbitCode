@@ -2,6 +2,7 @@ import { ProviderError } from "@/models/provider";
 
 export type RecoverableChatError =
   | { readonly kind: "network"; readonly message: string }
+  | { readonly kind: "timeout"; readonly message: string }
   | {
       readonly kind: "http";
       readonly status: number;
@@ -41,7 +42,7 @@ export function toRecoverableChatError(error: unknown): RecoverableChatError {
     return {
       kind: "http",
       status: error.status ?? 0,
-      requestId: error.requestId,
+      requestId: error.traceId,
       message: error.message,
     };
   }

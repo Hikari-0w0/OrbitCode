@@ -38,7 +38,7 @@ test("注册中心按登记顺序生成定义并拒绝重复名称", () => {
   assert.throws(() => new ToolRegistry([tool, tool]), /工具名称重复/);
 });
 
-test("默认注册中心恰好公开六个核心工具", () => {
+test("默认注册中心公开有界批量写入在内的核心工具", () => {
   const sandbox: CommandSandbox = {
     async probe() {
       return { available: false, message: "测试不执行命令" };
@@ -56,6 +56,7 @@ test("默认注册中心恰好公开六个核心工具", () => {
     [
       "read_file",
       "write_file",
+      "write_files",
       "edit_file",
       "run_command",
       "find_files",
@@ -73,7 +74,8 @@ test("默认注册中心恰好公开六个核心工具", () => {
     ]),
   );
   assert.match(descriptions.get("read_file") ?? "", /优先使用本工具/u);
-  assert.match(descriptions.get("write_file") ?? "", /覆盖已有文件前必须先用 read_file/u);
+    assert.match(descriptions.get("write_file") ?? "", /覆盖已有文件前必须先用 read_file/u);
+  assert.match(descriptions.get("write_files") ?? "", /多个独立文件/u);
   assert.match(descriptions.get("edit_file") ?? "", /调用前必须先用 read_file/u);
   assert.match(descriptions.get("run_command") ?? "", /不得用本工具替代/u);
   assert.match(descriptions.get("find_files") ?? "", /优先于 shell/u);
@@ -97,6 +99,7 @@ test("Context Session 只为对应注册中心追加内部读取工具", () => {
     [
       "read_file",
       "write_file",
+      "write_files",
       "edit_file",
       "run_command",
       "find_files",

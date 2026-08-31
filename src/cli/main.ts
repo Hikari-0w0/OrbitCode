@@ -15,6 +15,10 @@ import {
   type Environment,
 } from "@/lib/environment";
 import {
+  AgentRunExportError,
+  LocalAgentRunExporter,
+} from "@/lib/local-agent-run-exporter";
+import {
   ConfigurationError,
   loadProviderConfig,
 } from "@/models/config";
@@ -45,6 +49,20 @@ export async function runCli({
       output.write(HELP_TEXT);
       return 0;
     }
+    if (argumentsResult.type === "export-run") {
+      const outputPath = path.resolve(
+        cwd,
+        argumentsResult.outputPath ?? `orbitcode-run-${argumentsResult.runId}.json`,
+      );
+      await new LocalAgentRunExporter().exportRun({
+        runId: argumentsResult.runId,
+        outputPath,
+        includeContext: argumentsResult.includeContext,
+      });
+      output.write(`已导出运行记录：${outputPath}\n`);
+      output.write("注意：文件包含完整对话和工具结果，请按敏感数据保管。\n");
+      return 0;
+    }
 
     const mergedEnvironment = await loadLocalEnvironment({
       cwd,
@@ -73,6 +91,7 @@ export async function runCli({
 function startupErrorMessage(error: unknown): string {
   if (
     error instanceof ArgumentError ||
+    error instanceof AgentRunExportError ||
     error instanceof EnvironmentLoadError ||
     error instanceof ConfigurationError
   ) {

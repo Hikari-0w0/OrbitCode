@@ -3,6 +3,8 @@
 import { useEffect, useReducer, useRef, useState } from "react";
 
 import { ChatComposer } from "@/components/chat-composer";
+import { waitForCancelledTurnCheckpoint } from "@/components/cancelled-turn-recovery";
+import { ConversationList } from "@/components/conversation-list";
 import {
   ContextCompressionControl,
   type ContextCompressionUiState,
@@ -15,13 +17,17 @@ import { MessageList } from "@/components/message-list";
 import { PermissionModeControl } from "@/components/permission-mode-control";
 import { WorkspaceSelector } from "@/components/workspace-selector";
 import type { AgentMode } from "@/core/agent-events";
+import type {
+  ConversationSummary,
+} from "@/core/conversations/types";
 import type { PermissionUserDecision } from "@/core/permissions/approval";
 import type { PermissionMode } from "@/core/permissions/types";
 import type { PlainConversationMessage } from "@/models/provider";
 import {
   parseProviderCatalogResponse,
+  parseConversationCatalogResponse,
+  parseConversationDetailResponse,
   parseContextCompressionResponse,
-  parseContextSessionResponse,
   parsePermissionDecisionResponse,
   parsePermissionSessionResponse,
   parseWebApiError,
@@ -29,13 +35,14 @@ import {
   parseWorkspaceCatalogResponse,
   readWebStream,
   type ProviderSummary,
-  type ContextSessionResponse,
+  type ConversationDetailResponse,
   type WebApiError,
   type WebChatRequest,
   type WorkspaceSummary,
 } from "@/web/chat-contract";
 
 const PLAN_EXECUTION_PROMPT = "请按照上述计划开始执行。";
+const PROGRESS_RENDER_INTERVAL_MS = 100;
 
 type CatalogState = "loading" | "ready" | "config-error";
 type UiStatus = "loading" | "ready" | "streaming" | "stopping" | "config-error";
@@ -43,10 +50,7 @@ type PermissionSessionUi =
   | { readonly status: "loading"; readonly mode: PermissionMode }
   | { readonly status: "ready"; readonly id: string; readonly mode: PermissionMode }
   | { readonly status: "error"; readonly mode: PermissionMode; readonly error: string };
-type ContextSessionUi =
-  | { readonly status: "loading" }
-  | ({ readonly status: "ready" } & ContextSessionResponse)
-  | { readonly status: "error"; readonly error: string };
+type ConversationUiState = "loading" | "ready" | "error";
 
 export function ChatWorkspace() {
   const [session, dispatch] = useReducer(
@@ -59,24 +63,24 @@ export function ChatWorkspace() {
   const [catalogError, setCatalogError] = useState<string>();
   const [catalogRevision, setCatalogRevision] = useState(0);
   const [permissionRevision, setPermissionRevision] = useState(0);
-  const [contextRevision, setContextRevision] = useState(0);
+  const [conversationRevision, setConversationRevision] = useState(0);
+  const [conversations, setConversations] = useState<readonly ConversationSummary[]>([]);
+  const [conversationState, setConversationState] = useState<ConversationUiState>("loading");
+  const [conversationError, setConversationError] = useState<string>();
   const [permissionSession, setPermissionSession] = useState<PermissionSessionUi>({
     status: "loading",
     mode: "default",
   });
   const [permissionModeUpdating, setPermissionModeUpdating] = useState(false);
-  const [contextSession, setContextSession] = useState<ContextSessionUi>({
-    status: "loading",
-  });
   const [compressionState, setCompressionState] =
     useState<ContextCompressionUiState>({ status: "idle" });
+  const [conversationExporting, setConversationExporting] = useState(false);
   const activeRequestRef = useRef<AbortController | undefined>(undefined);
+  const manualStopRequestRef = useRef<AbortController | undefined>(undefined);
   const sessionRef = useRef(session);
   const permissionSessionRef = useRef(permissionSession);
-  const contextSessionRef = useRef(contextSession);
   sessionRef.current = session;
   permissionSessionRef.current = permissionSession;
-  contextSessionRef.current = contextSession;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -144,15 +148,14 @@ export function ChatWorkspace() {
           (workspace) =>
             workspace.id === workspaceCatalog.defaultWorkspaceId && workspace.available,
         );
-        if (!availableProvider) {
-          throw new Error("没有可用的模型配置，请检查本地 YAML 与 .env。");
-        }
-        if (!defaultWorkspace) {
-          throw new Error("没有可用的 Workspace，请检查本地授权目录配置。");
-        }
-
         setProviders(providerCatalog.providers);
         setWorkspaces(workspaceCatalog.workspaces);
+
+        const fallbackProvider = availableProvider ?? providerCatalog.providers[0];
+        const fallbackWorkspace = defaultWorkspace ?? workspaceCatalog.workspaces[0];
+        if (!fallbackProvider || !fallbackWorkspace) {
+          throw new Error("没有可用于恢复会话绑定的 Provider 或 Workspace 配置。");
+        }
 
         const current = sessionRef.current;
         const selectedProvider = providerCatalog.providers.some(
@@ -160,13 +163,13 @@ export function ChatWorkspace() {
             provider.name === current.selectedProvider && provider.available,
         )
           ? current.selectedProvider
-          : availableProvider.name;
+          : fallbackProvider.name;
         const selectedWorkspaceId = workspaceCatalog.workspaces.some(
           (workspace) =>
             workspace.id === current.selectedWorkspaceId && workspace.available,
         )
           ? current.selectedWorkspaceId
-          : defaultWorkspace.id;
+          : fallbackWorkspace.id;
 
         if (
           current.selectedWorkspaceId &&
@@ -185,7 +188,12 @@ export function ChatWorkspace() {
           workspaceId: selectedWorkspaceId,
           provider: selectedProvider,
         });
-        dispatch({ type: "notice-set", notice: undefined });
+        dispatch({
+          type: "notice-set",
+          notice: availableProvider && defaultWorkspace
+            ? undefined
+            : "当前运行配置不可用；已保存的会话仍可只读查看。",
+        });
         setCatalogState("ready");
       } catch (error) {
         if (controller.signal.aborted) return;
@@ -203,52 +211,52 @@ export function ChatWorkspace() {
       !session.selectedProvider ||
       !session.selectedWorkspaceId
     ) return;
-
     const controller = new AbortController();
-    async function createContextSession(): Promise<void> {
-      setContextSession({ status: "loading" });
+    async function restoreConversation(): Promise<void> {
+      setConversationState("loading");
+      setConversationError(undefined);
       try {
-        const response = await fetch("/api/context-sessions", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            provider: session.selectedProvider,
-            workspaceId: session.selectedWorkspaceId,
-          }),
+        const response = await fetch("/api/conversations", {
           cache: "no-store",
           signal: controller.signal,
         });
         const value: unknown = await response.json();
         if (!response.ok) {
-          throw new Error(
-            parseWebApiError(value)?.error ?? "无法创建上下文会话。",
-          );
+          throw new Error(parseWebApiError(value)?.error ?? "无法加载本地会话。");
         }
-        const created = parseContextSessionResponse(value);
-        setContextSession({ status: "ready", ...created });
+        const catalog = parseConversationCatalogResponse(value);
+        setConversations(catalog.conversations);
+        const remembered = window.localStorage.getItem("orbitcode.activeConversationId");
+        const selected = catalog.conversations.find((item) => item.id === remembered)
+          ?? catalog.conversations[0];
+        if (selected) {
+          if (!await loadConversation(selected.id, controller.signal, false)) return;
+        } else {
+          if (!await createConversation(
+            session.selectedWorkspaceId,
+            session.selectedProvider,
+            controller.signal,
+            false,
+          )) return;
+        }
+        setConversationState("ready");
       } catch (error) {
         if (controller.signal.aborted) return;
-        setContextSession({
-          status: "error",
-          error: safeErrorMessage(error, "无法创建上下文会话。"),
-        });
+        const detail = safeErrorMessage(error, "无法恢复本地会话。");
+        setConversationState("error");
+        setConversationError(detail);
       }
     }
-    void createContextSession();
+    void restoreConversation();
     return () => controller.abort();
-  }, [
-    catalogState,
-    contextRevision,
-    session.selectedProvider,
-    session.selectedWorkspaceId,
-  ]);
+    // 仅在显式刷新或配置初次就绪时恢复，切换会话由事件处理器完成。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [catalogState, conversationRevision]);
 
   useEffect(() => () => {
     activeRequestRef.current?.abort();
     const current = permissionSessionRef.current;
     if (current.status === "ready") closePermissionSession(current.id);
-    const context = contextSessionRef.current;
-    if (context.status === "ready") closeContextSession(context.sessionId);
   }, []);
 
   const currentProvider = providers.find(
@@ -269,12 +277,14 @@ export function ChatWorkspace() {
   const controlsDisabled =
     catalogState !== "ready" ||
     permissionSession.status !== "ready" ||
-    contextSession.status !== "ready" ||
+    conversationState !== "ready" ||
+    session.conversationAvailability !== "ready" ||
+    !session.conversationId ||
     (isStreaming && !isAwaitingPermission);
   const notice =
     catalogError ??
     (permissionSession.status === "error" ? permissionSession.error : undefined) ??
-    (contextSession.status === "error" ? contextSession.error : undefined) ??
+    conversationError ??
     session.notice;
 
   function selectWorkspace(workspaceId: string): void {
@@ -282,7 +292,7 @@ export function ChatWorkspace() {
     if (!workspaces.some((workspace) => workspace.id === workspaceId && workspace.available)) {
       return;
     }
-    resetServerContext({ workspaceId });
+    void createConversation(workspaceId, sessionRef.current.selectedProvider);
   }
 
   function selectProvider(provider: string): void {
@@ -290,24 +300,260 @@ export function ChatWorkspace() {
     if (!providers.some((candidate) => candidate.name === provider && candidate.available)) {
       return;
     }
-    resetServerContext({ provider });
+    void createConversation(sessionRef.current.selectedWorkspaceId, provider);
   }
 
-  function resetServerContext(selections: {
-    readonly workspaceId?: string;
-    readonly provider?: string;
-  } = {}): void {
+  function resetPermissionSession(): void {
     activeRequestRef.current?.abort();
     const current = permissionSessionRef.current;
     if (current.status === "ready") closePermissionSession(current.id);
-    const context = contextSessionRef.current;
-    if (context.status === "ready") closeContextSession(context.sessionId);
     setPermissionSession((value) => ({ status: "loading", mode: value.mode }));
-    setContextSession({ status: "loading" });
     setCompressionState({ status: "idle" });
-    dispatch({ type: "context-reset", ...selections });
     setPermissionRevision((value) => value + 1);
-    setContextRevision((value) => value + 1);
+  }
+
+  async function loadConversation(
+    conversationId: string,
+    signal?: AbortSignal,
+    renewPermission = true,
+  ): Promise<boolean> {
+    if (activeRequestRef.current) return false;
+    const hadStableConversation = sessionRef.current.conversationId.length > 0;
+    setConversationState("loading");
+    setConversationError(undefined);
+    try {
+      const response = await fetch(`/api/conversations/${conversationId}`, {
+        cache: "no-store",
+        signal,
+      });
+      const value: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(parseWebApiError(value)?.error ?? "无法打开本地会话。");
+      }
+      let detail = parseConversationDetailResponse(value);
+      if (detail.activity.status === "interrupted") {
+        const recovery = await fetch(`/api/conversations/${conversationId}/recover`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ expectedRevision: detail.activity.expectedRevision }),
+          cache: "no-store",
+          signal,
+        });
+        const recoveredValue: unknown = await recovery.json();
+        if (!recovery.ok) {
+          throw new Error(
+            parseWebApiError(recoveredValue)?.error ?? "无法恢复上次中断的会话。",
+          );
+        }
+        detail = parseConversationDetailResponse(recoveredValue);
+      }
+      const activeElsewhere = detail.activity.status === "active";
+      dispatch({
+        type: "conversation-loaded",
+        conversationId: detail.summary.id,
+        revision: detail.summary.revision,
+        workspaceId: detail.summary.workspaceId,
+        provider: detail.summary.providerId,
+        mode: detail.mode,
+        modeTurn: detail.modeTurn,
+        messages: detail.displayMessages,
+        availability: activeElsewhere ? "read-only" : detail.availability,
+        notice: activeElsewhere
+          ? "当前会话正在另一个页面中运行；这里显示最近完整记录。"
+          : detail.unavailableReason,
+      });
+      window.localStorage.setItem("orbitcode.activeConversationId", detail.summary.id);
+      if (renewPermission) resetPermissionSession();
+      setConversationState("ready");
+      return true;
+    } catch (error) {
+      if (signal?.aborted) {
+        setConversationState(hadStableConversation ? "ready" : "error");
+        return false;
+      }
+      setConversationState(hadStableConversation ? "ready" : "error");
+      setConversationError(safeErrorMessage(error, "无法打开本地会话。"));
+      return false;
+    }
+  }
+
+  async function createConversation(
+    workspaceId: string,
+    providerId: string,
+    signal?: AbortSignal,
+    renewPermission = true,
+  ): Promise<boolean> {
+    if (!workspaceId || !providerId || activeRequestRef.current) return false;
+    const hadStableConversation = sessionRef.current.conversationId.length > 0;
+    setConversationState("loading");
+    setConversationError(undefined);
+    try {
+      const response = await fetch("/api/conversations", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId, providerId }),
+        cache: "no-store",
+        signal,
+      });
+      const value: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(parseWebApiError(value)?.error ?? "无法创建本地会话。");
+      }
+      const checkpoint = parseConversationDetailResponse(value);
+      applyCheckpoint(checkpoint);
+      window.localStorage.setItem("orbitcode.activeConversationId", checkpoint.summary.id);
+      setConversations((current) => [checkpoint.summary, ...current]);
+      if (renewPermission) resetPermissionSession();
+      setConversationState("ready");
+      return true;
+    } catch (error) {
+      if (signal?.aborted) {
+        setConversationState(hadStableConversation ? "ready" : "error");
+        return false;
+      }
+      const detail = safeErrorMessage(error, "无法创建本地会话。");
+      setConversationState(hadStableConversation ? "ready" : "error");
+      setConversationError(detail);
+      return false;
+    }
+  }
+
+  function applyCheckpoint(checkpoint: ConversationDetailResponse): void {
+    dispatch({
+      type: "conversation-loaded",
+      conversationId: checkpoint.summary.id,
+      revision: checkpoint.summary.revision,
+      workspaceId: checkpoint.summary.workspaceId,
+      provider: checkpoint.summary.providerId,
+      mode: checkpoint.mode,
+      modeTurn: checkpoint.modeTurn,
+      messages: checkpoint.displayMessages,
+      availability: checkpoint.availability,
+      notice: checkpoint.unavailableReason,
+    });
+  }
+
+  async function refreshConversationList(): Promise<void> {
+    const response = await fetch("/api/conversations", { cache: "no-store" });
+    const value: unknown = await response.json();
+    if (!response.ok) throw new Error(parseWebApiError(value)?.error ?? "无法刷新会话列表。");
+    setConversations(parseConversationCatalogResponse(value).conversations);
+  }
+
+  async function renameConversation(): Promise<void> {
+    const snapshot = sessionRef.current;
+    if (!snapshot.conversationId || snapshot.requestState !== "idle") return;
+    const currentTitle = conversations.find((item) => item.id === snapshot.conversationId)?.title ?? "新对话";
+    const title = window.prompt("输入新的会话标题", currentTitle)?.trim();
+    if (!title || title === currentTitle) return;
+    try {
+      const response = await fetch(`/api/conversations/${snapshot.conversationId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ expectedRevision: snapshot.revision, title }),
+      });
+      const value: unknown = await response.json();
+      if (!response.ok) throw new Error(parseWebApiError(value)?.error ?? "无法重命名会话。");
+      applyCheckpoint(parseConversationDetailResponse(value));
+      await refreshConversationList();
+    } catch (error) {
+      dispatch({ type: "notice-set", notice: safeErrorMessage(error, "无法重命名会话。") });
+    }
+  }
+
+  async function clearConversation(): Promise<void> {
+    const snapshot = sessionRef.current;
+    if (!snapshot.conversationId || snapshot.requestState !== "idle") return;
+    if (!window.confirm("清空当前会话的消息和上下文？会话本身会保留。")) return;
+    try {
+      const response = await fetch(`/api/conversations/${snapshot.conversationId}/clear`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ expectedRevision: snapshot.revision }),
+      });
+      const value: unknown = await response.json();
+      if (!response.ok) throw new Error(parseWebApiError(value)?.error ?? "无法清空会话。");
+      applyCheckpoint(parseConversationDetailResponse(value));
+      await refreshConversationList();
+    } catch (error) {
+      dispatch({ type: "notice-set", notice: safeErrorMessage(error, "无法清空会话。") });
+    }
+  }
+
+  async function deleteConversation(): Promise<void> {
+    const snapshot = sessionRef.current;
+    if (!snapshot.conversationId || snapshot.requestState !== "idle") return;
+    if (!window.confirm("删除当前会话及其本地上下文记录？此操作不可撤销。")) return;
+    try {
+      const response = await fetch(`/api/conversations/${snapshot.conversationId}`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ expectedRevision: snapshot.revision }),
+      });
+      if (!response.ok) {
+        const value: unknown = await response.json().catch(() => undefined);
+        throw new Error(parseWebApiError(value)?.error ?? "无法删除会话。");
+      }
+      window.localStorage.removeItem("orbitcode.activeConversationId");
+      resetPermissionSession();
+      setConversationRevision((value) => value + 1);
+    } catch (error) {
+      dispatch({ type: "notice-set", notice: safeErrorMessage(error, "无法删除会话。") });
+    }
+  }
+
+  async function retryUnsavedTurn(): Promise<void> {
+    const snapshot = sessionRef.current;
+    if (!snapshot.conversationId || snapshot.unsavedExpectedRevision === undefined) return;
+    try {
+      const response = await fetch(`/api/conversations/${snapshot.conversationId}/retry`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ expectedRevision: snapshot.unsavedExpectedRevision }),
+      });
+      const value: unknown = await response.json();
+      if (!response.ok) throw new Error(parseWebApiError(value)?.error ?? "无法重试保存。");
+      applyCheckpoint(parseConversationDetailResponse(value));
+      await refreshConversationList();
+    } catch (error) {
+      dispatch({ type: "notice-set", notice: safeErrorMessage(error, "无法重试保存。") });
+    }
+  }
+
+  async function exportConversation(): Promise<void> {
+    const snapshot = sessionRef.current;
+    if (
+      !snapshot.conversationId ||
+      snapshot.requestState !== "idle" ||
+      conversationExporting
+    ) return;
+    setConversationExporting(true);
+    try {
+      const response = await fetch(
+        `/api/conversations/${snapshot.conversationId}/export`,
+        { method: "POST", cache: "no-store" },
+      );
+      if (!response.ok) {
+        const value: unknown = await response.json().catch(() => undefined);
+        throw new Error(parseWebApiError(value)?.error ?? "无法导出完整对话记录。");
+      }
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = exportFilename(response.headers.get("content-disposition"));
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(objectUrl);
+    } catch (error) {
+      dispatch({
+        type: "notice-set",
+        notice: safeErrorMessage(error, "无法导出完整对话记录。"),
+      });
+    } finally {
+      setConversationExporting(false);
+    }
   }
 
   async function selectPermissionMode(mode: PermissionMode): Promise<void> {
@@ -373,8 +619,9 @@ export function ChatWorkspace() {
       input.length === 0 ||
       !snapshot.selectedProvider ||
       !snapshot.selectedWorkspaceId ||
+      !snapshot.conversationId ||
+      snapshot.conversationAvailability !== "ready" ||
       permissionSessionRef.current.status !== "ready" ||
-      contextSessionRef.current.status !== "ready" ||
       snapshot.requestState !== "idle" ||
       activeRequestRef.current ||
       (requiredPlanMessageId !== undefined &&
@@ -389,10 +636,7 @@ export function ChatWorkspace() {
     const permissionSessionId = permissionSessionRef.current.status === "ready"
       ? permissionSessionRef.current.id
       : undefined;
-    const contextSessionId = contextSessionRef.current.status === "ready"
-      ? contextSessionRef.current.sessionId
-      : undefined;
-    if (!permissionSessionId || !contextSessionId) return;
+    if (!permissionSessionId) return;
     activeRequestRef.current = controller;
     dispatch({
       type: "request-started",
@@ -404,15 +648,17 @@ export function ChatWorkspace() {
     });
 
     let stopped = false;
+    let reconcileCancelledTurn = false;
+    let lastProgressRenderedAt = 0;
+    let lastProgressSignature = "";
     try {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          provider: snapshot.selectedProvider,
-          workspaceId: snapshot.selectedWorkspaceId,
+          conversationId: snapshot.conversationId,
+          revision: snapshot.revision,
           permissionSessionId,
-          contextSessionId,
           mode: requestMode,
           modeTurn,
           input,
@@ -441,7 +687,22 @@ export function ChatWorkspace() {
             text: event.text,
           });
         } else if (event.type === "progress") {
-          dispatch({ type: "progress", assistantId, event });
+          const now = Date.now();
+          const signature = [
+            event.iteration,
+            event.phase,
+            event.model?.stage ?? "",
+            event.model?.attempt ?? "",
+            event.model?.toolName ?? "",
+          ].join(":");
+          if (
+            signature !== lastProgressSignature ||
+            now - lastProgressRenderedAt >= PROGRESS_RENDER_INTERVAL_MS
+          ) {
+            dispatch({ type: "progress", assistantId, event });
+            lastProgressRenderedAt = now;
+            lastProgressSignature = signature;
+          }
         } else if (event.type === "tool-call") {
           dispatch({ type: "tool-call", assistantId, event });
         } else if (event.type === "tool-started") {
@@ -463,15 +724,24 @@ export function ChatWorkspace() {
               userMessage,
               finalMessage: event.finalMessage,
               mode: requestMode,
+              event,
             });
           } else {
             dispatch({ type: "request-stopped", assistantId, event });
+          }
+          if (event.persistence?.status === "saved") {
+            void refreshConversationList().catch(() => undefined);
           }
         }
       }
       if (!stopped) throw new Error("流式响应意外结束，请重试。");
     } catch (error) {
       const cancelled = controller.signal.aborted;
+      reconcileCancelledTurn = cancelled && manualStopRequestRef.current === controller;
+      if (reconcileCancelledTurn) {
+        setConversationState("loading");
+        setConversationError(undefined);
+      }
       const detail = cancelled
         ? "回复已停止，已生成的进度会保留在后续上下文中。"
         : safeErrorMessage(error, "模型请求失败，请重试。");
@@ -489,15 +759,61 @@ export function ChatWorkspace() {
         setCatalogError(detail);
       } else if (
         error instanceof WebRequestError &&
-        error.code === "context-session"
+        error.code?.startsWith("conversation-")
       ) {
-        setContextSession({ status: "error", error: detail });
+        setConversationState("error");
+        setConversationError(detail);
       }
     } finally {
+      if (manualStopRequestRef.current === controller) {
+        manualStopRequestRef.current = undefined;
+      }
       if (activeRequestRef.current === controller) {
         activeRequestRef.current = undefined;
       }
       dispatch({ type: "request-settled" });
+    }
+    if (reconcileCancelledTurn) {
+      await reconcileCancelledConversation(
+        snapshot.conversationId,
+        snapshot.revision,
+      );
+    }
+  }
+
+  async function reconcileCancelledConversation(
+    conversationId: string,
+    previousRevision: number,
+  ): Promise<void> {
+    try {
+      const checkpoint = await waitForCancelledTurnCheckpoint({
+        previousRevision,
+        load: async () => {
+          const response = await fetch(`/api/conversations/${conversationId}`, {
+            cache: "no-store",
+          });
+          const value: unknown = await response.json();
+          if (!response.ok) {
+            throw new Error(
+              parseWebApiError(value)?.error ?? "无法同步停止后的会话记录。",
+            );
+          }
+          return parseConversationDetailResponse(value);
+        },
+      });
+      if (sessionRef.current.conversationId !== conversationId) return;
+      applyCheckpoint(checkpoint);
+      setConversations((current) => [
+        checkpoint.summary,
+        ...current.filter((item) => item.id !== checkpoint.summary.id),
+      ]);
+      setConversationState("ready");
+    } catch (error) {
+      if (sessionRef.current.conversationId !== conversationId) return;
+      setConversationState("error");
+      setConversationError(
+        safeErrorMessage(error, "无法同步停止后的会话记录。"),
+      );
     }
   }
 
@@ -533,9 +849,9 @@ export function ChatWorkspace() {
   }
 
   async function compressContext(): Promise<void> {
-    const current = contextSessionRef.current;
     if (
-      current.status !== "ready" ||
+      !sessionRef.current.conversationId ||
+      sessionRef.current.conversationAvailability !== "ready" ||
       sessionRef.current.requestState !== "idle" ||
       compressionState.status === "compressing"
     ) return;
@@ -543,8 +859,12 @@ export function ChatWorkspace() {
     setCompressionState({ status: "compressing" });
     try {
       const response = await fetch(
-        `/api/context-sessions/${current.sessionId}/compress`,
-        { method: "POST" },
+        `/api/conversations/${sessionRef.current.conversationId}/compress`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ expectedRevision: sessionRef.current.revision }),
+        },
       );
       const value: unknown = await response.json();
       if (!response.ok) {
@@ -553,22 +873,18 @@ export function ChatWorkspace() {
           parseWebApiError(value)?.code,
         );
       }
-      setCompressionState(parseContextCompressionResponse(value));
+      const parsed = parseContextCompressionResponse(value);
+      setCompressionState(parsed);
+      if (parsed.status === "succeeded") {
+        await loadConversation(sessionRef.current.conversationId, undefined, false);
+        await refreshConversationList();
+      }
     } catch (error) {
       setCompressionState({ status: "idle" });
       dispatch({
         type: "notice-set",
         notice: safeErrorMessage(error, "无法压缩上下文。"),
       });
-      if (
-        error instanceof WebRequestError &&
-        error.code === "context-session"
-      ) {
-        setContextSession({
-          status: "error",
-          error: safeErrorMessage(error, "上下文会话已失效。"),
-        });
-      }
     }
   }
 
@@ -577,9 +893,11 @@ export function ChatWorkspace() {
   }
 
   function stopGeneration(): void {
-    if (!activeRequestRef.current || session.requestState !== "streaming") return;
+    const controller = activeRequestRef.current;
+    if (!controller || session.requestState !== "streaming") return;
+    manualStopRequestRef.current = controller;
     dispatch({ type: "request-stopping" });
-    activeRequestRef.current.abort();
+    controller.abort();
   }
 
   return (
@@ -601,6 +919,16 @@ export function ChatWorkspace() {
           <strong>Workspace · Plan · Execute</strong>
           <p>选择授权项目，只读规划，确认后在同一上下文自主执行</p>
         </div>
+
+        <ConversationList
+          conversations={conversations}
+          selectedId={session.conversationId}
+          disabled={isStreaming || conversationState !== "ready" || catalogState !== "ready"}
+          onSelect={(conversationId) => void loadConversation(conversationId)}
+          onCreate={() => void createConversation(session.selectedWorkspaceId, session.selectedProvider)}
+          onRename={() => void renameConversation()}
+          onDelete={() => void deleteConversation()}
+        />
 
         <WorkspaceSelector
           workspaces={workspaces}
@@ -647,7 +975,7 @@ export function ChatWorkspace() {
           <div><span>当前模式</span><strong>{modeLabel(session.mode)}</strong></div>
           <div><span>工具范围</span><strong>{session.mode === "plan" ? "只读三项" : "完整 Workspace"}</strong></div>
           <div><span>权限模式</span><strong>{permissionModeLabel(permissionSession.mode)}</strong></div>
-          <div><span>上下文</span><strong>{contextSessionLabel(contextSession)}</strong></div>
+          <div><span>上下文</span><strong>{conversationContextLabel(session.conversationAvailability)}</strong></div>
         </div>
 
         <div className="sidebarFooter">
@@ -666,10 +994,25 @@ export function ChatWorkspace() {
             <h2>对话工作区</h2>
           </div>
           <div className="headerActions">
+            <button
+              className="exportButton"
+              type="button"
+              aria-label="导出完整对话"
+              onClick={() => void exportConversation()}
+              disabled={
+                conversationExporting ||
+                isStreaming ||
+                conversationState !== "ready" ||
+                !session.conversationId
+              }
+            >
+              <DownloadIcon />
+              {conversationExporting ? "导出中…" : "导出对话"}
+            </button>
             <ContextCompressionControl
               state={compressionState}
               disabled={
-                contextSession.status !== "ready" ||
+                session.conversationAvailability !== "ready" ||
                 isStreaming ||
                 isAwaitingPermission
               }
@@ -684,7 +1027,7 @@ export function ChatWorkspace() {
             <button
               className="clearButton"
               type="button"
-              onClick={() => resetServerContext()}
+              onClick={() => void clearConversation()}
               disabled={!isAwaitingPermission && (isStreaming || (session.messages.length === 0 && session.mode === "do"))}
             >
               <TrashIcon />
@@ -703,9 +1046,14 @@ export function ChatWorkspace() {
                   重新加载
                 </button>
               )}
-              {contextSession.status === "error" && (
-                <button type="button" onClick={() => resetServerContext()}>
-                  清空并重建
+              {conversationState === "error" && (
+                <button type="button" onClick={() => setConversationRevision((value) => value + 1)}>
+                  重新加载会话
+                </button>
+              )}
+              {session.unsavedExpectedRevision !== undefined && (
+                <button type="button" onClick={() => void retryUnsavedTurn()}>
+                  重试保存
                 </button>
               )}
             </div>
@@ -728,7 +1076,8 @@ export function ChatWorkspace() {
           disabled={
             catalogState !== "ready" ||
             permissionSession.status !== "ready" ||
-            contextSession.status !== "ready"
+            conversationState !== "ready" ||
+            session.conversationAvailability !== "ready"
           }
           isStreaming={isStreaming}
           isStopping={session.requestState === "stopping"}
@@ -767,10 +1116,12 @@ function permissionModeLabel(mode: PermissionMode): string {
   return "默认";
 }
 
-function contextSessionLabel(session: ContextSessionUi): string {
-  if (session.status === "loading") return "连接中";
-  if (session.status === "error") return "不可用";
-  return "本地会话";
+function conversationContextLabel(
+  availability: "loading" | "ready" | "read-only",
+): string {
+  if (availability === "loading") return "连接中";
+  if (availability === "read-only") return "只读历史";
+  return "已持久化";
 }
 
 function closePermissionSession(sessionId: string): void {
@@ -780,15 +1131,13 @@ function closePermissionSession(sessionId: string): void {
   }).catch(() => undefined);
 }
 
-function closeContextSession(sessionId: string): void {
-  void fetch(`/api/context-sessions/${sessionId}`, {
-    method: "DELETE",
-    keepalive: true,
-  }).catch(() => undefined);
-}
-
 function safeErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message.length > 0 ? error.message : fallback;
+}
+
+function exportFilename(contentDisposition: string | null): string {
+  const match = /filename="([A-Za-z0-9._-]+)"/.exec(contentDisposition ?? "");
+  return match?.[1] ?? "orbitcode-conversation.json";
 }
 
 function OrbitMark() {
@@ -809,6 +1158,14 @@ function TrashIcon() {
   return (
     <svg viewBox="0 0 20 20" aria-hidden="true">
       <path d="M6.5 6.5v8m3.5-8v8m3.5-8v8M4 4.5h12M8 4.5v-2h4v2m2.8 0-.7 12.5H5.9L5.2 4.5" />
+    </svg>
+  );
+}
+
+function DownloadIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M10 2.5v10m-4-4 4 4 4-4M4 16.5h12" />
     </svg>
   );
 }

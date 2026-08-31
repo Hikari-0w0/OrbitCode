@@ -5,14 +5,21 @@ export type JsonValue =
   | readonly JsonValue[];
 export type JsonObject = { readonly [key: string]: JsonValue };
 
+export const MAX_TOOL_ARGUMENTS_JSON_CHARS = 2 * 1024 * 1024;
+
 export type ToolName =
   | "read_file"
   | "write_file"
+  | "write_files"
   | "edit_file"
   | "run_command"
   | "find_files"
   | "search_code"
-  | "read_context";
+  | "read_context"
+  | "start_process"
+  | "process_status"
+  | "stop_process"
+  | "report_completion";
 
 export type SchemaIssue = {
   readonly path: string;
@@ -158,7 +165,7 @@ export type ToolPermissionTarget =
 
 export type ToolPermissionDescriptor<TInput> = {
   readonly targetKind: ToolPermissionTarget["kind"];
-  resolve(input: TInput): ToolPermissionTarget;
+  resolve(input: TInput): ToolPermissionTarget | readonly ToolPermissionTarget[];
 };
 
 export interface Tool<TInput, TOutput extends JsonValue = JsonValue> {
