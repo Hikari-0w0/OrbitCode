@@ -77,6 +77,7 @@ export function ChatWorkspace() {
   const [conversationExporting, setConversationExporting] = useState(false);
   const activeRequestRef = useRef<AbortController | undefined>(undefined);
   const manualStopRequestRef = useRef<AbortController | undefined>(undefined);
+  const runStartedAtRef = useRef<number | undefined>(undefined);
   const sessionRef = useRef(session);
   const permissionSessionRef = useRef(permissionSession);
   sessionRef.current = session;
@@ -637,6 +638,7 @@ export function ChatWorkspace() {
       ? permissionSessionRef.current.id
       : undefined;
     if (!permissionSessionId) return;
+    runStartedAtRef.current = Date.now();
     activeRequestRef.current = controller;
     dispatch({
       type: "request-started",
@@ -1062,6 +1064,7 @@ export function ChatWorkspace() {
 
         <MessageList
           messages={session.messages}
+          currentRunStartedAtMs={isStreaming ? runStartedAtRef.current : undefined}
           onSuggestion={(draft) => dispatch({ type: "draft-changed", draft })}
           executablePlanMessageId={session.executablePlanMessageId}
           planActionDisabled={controlsDisabled}

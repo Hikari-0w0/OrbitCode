@@ -133,6 +133,7 @@ type RunTrackerOptions = NonNullable<
 
 type MutableToolLog = AgentRunLogEntry["tools"][number] & {
   readonly callId: string;
+  readonly authorizationStartedAtMs?: number;
 };
 
 type MutableModelAttemptLog = NonNullable<
@@ -212,7 +213,42 @@ class AgentRunTracker {
       });
       return;
     }
+    if (event.type === "permission-requested") {
+      const previous = this.#tools.get(event.callId);
+      this.#tools.set(event.callId, {
+        callId: event.callId,
+        name: event.name,
+        status: previous?.status ?? "unfinished",
+        ...(previous?.durationMs === undefined ? {} : { durationMs: previous.durationMs }),
+        ...(previous?.errorKind === undefined ? {} : { errorKind: previous.errorKind }),
+        authorization: { status: "awaiting", waitMs: 0 },
+        authorizationStartedAtMs: this.#now(),
+      });
+      return;
+    }
+    if (event.type === "permission-resolved") {
+      const previous = this.#tools.get(event.callId);
+      const resolvedAtMs = this.#now();
+      this.#tools.set(event.callId, {
+        callId: event.callId,
+        name: event.name,
+        status: previous?.status ?? "unfinished",
+        ...(previous?.durationMs === undefined ? {} : { durationMs: previous.durationMs }),
+        ...(previous?.errorKind === undefined ? {} : { errorKind: previous.errorKind }),
+        authorization: {
+          status: event.status,
+          waitMs: previous?.authorizationStartedAtMs === undefined
+            ? 0
+            : Math.max(0, Math.round(resolvedAtMs - previous.authorizationStartedAtMs)),
+        },
+        ...(previous?.authorizationStartedAtMs === undefined
+          ? {}
+          : { authorizationStartedAtMs: previous.authorizationStartedAtMs }),
+      });
+      return;
+    }
     if (event.type === "tool-result") {
+      const previous = this.#tools.get(event.callId);
       this.#sideEffect = higherSideEffect(this.#sideEffect, event.result.sideEffect);
       this.#tools.set(event.callId, {
         callId: event.callId,
@@ -220,6 +256,12 @@ class AgentRunTracker {
         status: toolLogStatus(event.result),
         durationMs: event.result.meta.durationMs,
         ...(!event.result.ok ? { errorKind: event.result.error.kind } : {}),
+        ...(previous?.authorization === undefined
+          ? {}
+          : { authorization: previous.authorization }),
+        ...(previous?.authorizationStartedAtMs === undefined
+          ? {}
+          : { authorizationStartedAtMs: previous.authorizationStartedAtMs }),
       });
       return;
     }
@@ -290,6 +332,9 @@ class AgentRunTracker {
         status: tool.status,
         ...(tool.durationMs === undefined ? {} : { durationMs: tool.durationMs }),
         ...(tool.errorKind === undefined ? {} : { errorKind: tool.errorKind }),
+        ...(tool.authorization === undefined
+          ? {}
+          : { authorization: { ...tool.authorization } }),
       })),
     });
   }

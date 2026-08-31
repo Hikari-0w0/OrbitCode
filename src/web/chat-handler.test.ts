@@ -358,3 +358,96 @@ test("Web Agent 运行聚合为不含正文和工具载荷的本地日志摘要"
   assert.equal(JSON.stringify(entries).includes("不得写入日志"), false);
   assert.equal(JSON.stringify(entries).includes("secret.ts"), false);
 });
+
+test("本地运行日志记录授权等待时长和终态", async () => {
+  const entries: AgentRunLogEntry[] = [];
+  const agent: AgentSession = {
+    getHistory: () => [],
+    async *streamTurn() {
+      yield {
+        type: "tool-call",
+        iteration: 1,
+        sequence: 0,
+        call: { id: "call-approval", name: "run_command", argumentsJson: "{}" },
+      } as const;
+      yield {
+        type: "permission-requested",
+        iteration: 1,
+        sequence: 0,
+        callId: "call-approval",
+        name: "run_command",
+        prompt: {
+          requestId: "request-1",
+          toolCallId: "call-approval",
+          toolName: "run_command",
+          workspace: { id: "project", name: "Project" },
+          summary: { operation: "执行命令", command: "<redacted>", cwd: "." },
+          risk: { level: "high", message: "命令需要确认。" },
+          source: "mode",
+          persistentLayer: "local",
+          expiresAt: "2026-08-31T06:00:00.000Z",
+        },
+      } as const;
+      yield {
+        type: "permission-resolved",
+        iteration: 1,
+        sequence: 0,
+        callId: "call-approval",
+        name: "run_command",
+        requestId: "request-1",
+        status: "cancelled",
+      } as const;
+      yield {
+        type: "tool-result",
+        iteration: 1,
+        sequence: 0,
+        callId: "call-approval",
+        name: "run_command",
+        result: {
+          ok: false,
+          error: { kind: "cancelled", message: "工具授权等待已取消。", retryable: false },
+          sideEffect: "none",
+          meta: { durationMs: 0, truncated: false, truncatedFields: [] },
+        },
+      } as const;
+      yield {
+        type: "stopped",
+        reason: "cancelled",
+        iterations: 1,
+        durationMs: 2_700,
+        sideEffect: "none",
+        detail: "Agent 轮次已取消。",
+      } as const;
+    },
+  };
+  const times = [1_000, 1_100, 1_200, 3_700, 3_800];
+  const response = streamAgentResponse({
+    request: new Request("http://localhost/api/chat", { method: "POST" }),
+    agent,
+    input: "检查环境",
+    mode: "do",
+    modeTurn: 1,
+    runLog: {
+      sink: { append: async (entry) => { entries.push(entry); } },
+      conversationId: "conversation-approval",
+      revisionBefore: 0,
+      providerId: "test",
+      workspaceId: "project",
+      createRunId: () => "run-approval",
+      now: () => times.shift() ?? 3_800,
+    },
+  });
+  assert.ok(response.body);
+  for await (const event of parseWebChatEvents(readWebStream(response.body))) {
+    assert.ok(event.type.length > 0);
+  }
+
+  assert.deepEqual(entries[0]?.tools, [{
+    name: "run_command",
+    status: "cancelled",
+    durationMs: 0,
+    errorKind: "cancelled",
+    authorization: { status: "cancelled", waitMs: 2_500 },
+  }]);
+  assert.equal(JSON.stringify(entries).includes("<redacted>"), false);
+});

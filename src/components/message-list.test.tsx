@@ -93,7 +93,7 @@ test("助手文字和工具卡按实际发生顺序展示", () => {
 
   assert.ok(markup.indexOf("先读取。") < markup.indexOf("read_file"));
   assert.ok(markup.indexOf("read_file") < markup.indexOf("读取完成。"));
-  assert.match(markup, /运行时间：1 分 5 秒/u);
+  assert.match(markup, /总用时：1 分 5 秒/u);
 });
 
 test("纯换行时间线片段不会撑开连续工具卡", () => {
@@ -155,6 +155,34 @@ test("无限迭代模式显示无穷上限", () => {
   );
 
   assert.match(markup, /迭代 33\/∞/u);
+});
+
+test("运行中进度条位于最新输出下方并显示总用时", () => {
+  const markup = renderToStaticMarkup(
+    <MessageList
+      messages={[{
+        id: "running",
+        role: "assistant",
+        content: "正在检查最新改动。",
+        state: "streaming",
+        progress: {
+          type: "progress",
+          iteration: 2,
+          maxIterations: 20,
+          phase: "tools",
+          completedTools: 1,
+          totalTools: 2,
+        },
+      }]}
+      currentRunStartedAtMs={Date.now() - 12_300}
+      onSuggestion={() => undefined}
+      planActionDisabled={false}
+      onExecutePlan={() => undefined}
+    />,
+  );
+
+  assert.ok(markup.indexOf("正在检查最新改动。") < markup.indexOf("Agent 当前进度"));
+  assert.match(markup, /总用时：/u);
 });
 
 test("模型工具参数进度显示累计字符与耗时", () => {

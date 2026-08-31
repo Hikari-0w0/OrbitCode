@@ -7,6 +7,7 @@ import {
   objectSchema,
   optionalSchema,
   stringSchema,
+  unwrapSingleJsonObjectField,
 } from "@/tools/schema";
 import { emptyResultMeta, toolFailure } from "@/tools/types";
 import type { ToolInputSchema } from "@/tools/types";
@@ -34,7 +35,9 @@ const baseRunCommandSchema = objectSchema({
 const runCommandSchema: ToolInputSchema<RunCommandInput> = {
   jsonSchema: baseRunCommandSchema.jsonSchema,
   parse(value) {
-    const parsed = baseRunCommandSchema.parse(value);
+    const parsed = baseRunCommandSchema.parse(
+      unwrapSingleJsonObjectField(value, "command"),
+    );
     if (!parsed.ok) return parsed;
     const issues = preflightCommand(parsed.value);
     return issues.length === 0

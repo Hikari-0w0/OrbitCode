@@ -46,7 +46,12 @@ test("本地运行日志以脱敏 JSONL 串行追加并收紧文件权限", asyn
       toolName: "read_file",
       toolArgumentsChars: 20,
     }],
-    tools: [{ name: "read_file", status: "succeeded", durationMs: 8 }],
+    tools: [{
+      name: "read_file",
+      status: "succeeded",
+      durationMs: 8,
+      authorization: { status: "allowed", waitMs: 420 },
+    }],
   };
 
   try {
@@ -71,6 +76,10 @@ test("本地运行日志以脱敏 JSONL 串行追加并收紧文件权限", asyn
       false,
     );
     assert.equal((await logger.find("run-2")).runId, "run-2");
+    assert.deepEqual((await logger.find("run-1")).tools[0]?.authorization, {
+      status: "allowed",
+      waitMs: 420,
+    });
     const legacy: Record<string, unknown> = {
       ...entries[0],
       schemaVersion: 3,

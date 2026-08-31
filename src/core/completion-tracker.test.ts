@@ -34,6 +34,272 @@ test("完整报告必须引用最后写入之后的成功验证", () => {
   assert.equal(tracker.assessment().status, "verified");
 });
 
+test("写入成功不能作为 passed 项的验证证据", () => {
+  const tracker = new CompletionTracker();
+  tracker.record({
+    call: { id: "write", name: "write_file", argumentsJson: "{}" },
+    result: successfulToolResult({}, "applied"),
+    iteration: 1,
+    sequence: 0,
+    mutability: "workspace-write",
+  });
+  tracker.record({
+    call: {
+      id: "build",
+      name: "run_command",
+      argumentsJson: '{"command":"npm run build"}',
+    },
+    result: successfulToolResult({ exitCode: 0 }, "possible"),
+    iteration: 2,
+    sequence: 0,
+    mutability: "command",
+  });
+
+  const result = tracker.accept({
+    status: "complete",
+    checks: [
+      {
+        criterion: "目标文件内容正确",
+        status: "passed",
+        evidenceCallIds: ["write"],
+      },
+      {
+        criterion: "npm run build 无编译错误",
+        status: "passed",
+        evidenceCallIds: ["build"],
+      },
+    ],
+    blockers: [],
+  });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.message, /写入成功不能替代验证/u);
+});
+
+test("构建检查不能用启动进程的成功结果冒充", () => {
+  const tracker = new CompletionTracker();
+  tracker.record({
+    call: {
+      id: "build",
+      name: "run_command",
+      argumentsJson: '{"command":"cd kanban && npm run build"}',
+    },
+    result: successfulToolResult({ exitCode: 0 }, "possible"),
+    iteration: 1,
+    sequence: 0,
+    mutability: "command",
+  });
+  tracker.record({
+    call: {
+      id: "server",
+      name: "start_process",
+      argumentsJson: '{"command":"cd kanban && npm run dev","ready_port":3000}',
+    },
+    result: successfulToolResult({ status: "running" }, "possible"),
+    iteration: 2,
+    sequence: 0,
+    mutability: "command",
+  });
+
+  const rejected = tracker.accept({
+    status: "complete",
+    checks: [{
+      criterion: "npm run build 无编译错误",
+      status: "passed",
+      evidenceCallIds: ["server"],
+    }],
+    blockers: [],
+  });
+  assert.equal(rejected.ok, false);
+  if (!rejected.ok) assert.match(rejected.message, /构建证据/u);
+
+  assert.equal(tracker.accept({
+    status: "complete",
+    checks: [{
+      criterion: "npm run build 无编译错误",
+      status: "passed",
+      evidenceCallIds: ["build"],
+    }],
+    blockers: [],
+  }).ok, true);
+});
+
+test("lint 检查必须引用真实的 lint 命令", () => {
+  const tracker = new CompletionTracker();
+  for (const [id, command, iteration] of [
+    ["build", "npm run build", 1],
+    ["lint", "npm run lint", 2],
+  ] as const) {
+    tracker.record({
+      call: { id, name: "run_command", argumentsJson: JSON.stringify({ command }) },
+      result: successfulToolResult({ exitCode: 0 }, "possible"),
+      iteration,
+      sequence: 0,
+      mutability: "command",
+    });
+  }
+
+  assert.equal(tracker.accept({
+    status: "complete",
+    checks: [{
+      criterion: "npm run lint 无错误",
+      status: "passed",
+      evidenceCallIds: ["build"],
+    }],
+    blockers: [],
+  }).ok, false);
+  assert.equal(tracker.accept({
+    status: "complete",
+    checks: [{
+      criterion: "npm run lint 无错误",
+      status: "passed",
+      evidenceCallIds: ["lint"],
+    }],
+    blockers: [],
+  }).ok, true);
+});
+
+test("不能遗漏最后一次仍失败的质量检查后声明 complete", () => {
+  const tracker = new CompletionTracker();
+  tracker.record({
+    call: {
+      id: "lint-failed",
+      name: "run_command",
+      argumentsJson: '{"command":"npm run lint"}',
+    },
+    result: toolFailure("command-failed", "lint 失败"),
+    iteration: 1,
+    sequence: 0,
+    mutability: "command",
+  });
+  tracker.record({
+    call: {
+      id: "build-passed",
+      name: "run_command",
+      argumentsJson: '{"command":"npm run build"}',
+    },
+    result: successfulToolResult({ exitCode: 0 }, "possible"),
+    iteration: 2,
+    sequence: 0,
+    mutability: "command",
+  });
+
+  const omittedFailure = tracker.accept({
+    status: "complete",
+    checks: [{
+      criterion: "npm run build 无编译错误",
+      status: "passed",
+      evidenceCallIds: ["build-passed"],
+    }],
+    blockers: [],
+  });
+  assert.equal(omittedFailure.ok, false);
+  if (!omittedFailure.ok) assert.match(omittedFailure.message, /lint.*仍失败/iu);
+
+  tracker.record({
+    call: {
+      id: "lint-passed",
+      name: "run_command",
+      argumentsJson: '{"command":"npm run lint"}',
+    },
+    result: successfulToolResult({ exitCode: 0 }, "possible"),
+    iteration: 3,
+    sequence: 0,
+    mutability: "command",
+  });
+  assert.equal(tracker.accept({
+    status: "complete",
+    checks: [
+      {
+        criterion: "npm run build 无编译错误",
+        status: "passed",
+        evidenceCallIds: ["build-passed"],
+      },
+      {
+        criterion: "npm run lint 无错误",
+        status: "passed",
+        evidenceCallIds: ["lint-passed"],
+      },
+    ],
+    blockers: [],
+  }).ok, true);
+});
+
+test("不同工作目录的质量检查不能互相覆盖失败状态", () => {
+  const tracker = new CompletionTracker();
+  for (const [id, cwd, ok, iteration] of [
+    ["lint-a-failed", "packages/a", false, 1],
+    ["lint-b-passed", "packages/b", true, 2],
+  ] as const) {
+    tracker.record({
+      call: {
+        id,
+        name: "run_command",
+        argumentsJson: JSON.stringify({ command: "npm run lint", cwd }),
+      },
+      result: ok
+        ? successfulToolResult({ exitCode: 0 }, "possible")
+        : toolFailure("command-failed", "lint 失败"),
+      iteration,
+      sequence: 0,
+      mutability: "command",
+    });
+  }
+
+  const result = tracker.accept({
+    status: "complete",
+    checks: [{
+      criterion: "packages/b 的 npm run lint 无错误",
+      status: "passed",
+      evidenceCallIds: ["lint-b-passed"],
+    }],
+    blockers: [],
+  });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.message, /lint.*仍失败/iu);
+});
+
+test("HTTP 检查不能用其他端口的响应冒充", () => {
+  const tracker = new CompletionTracker();
+  for (const [id, port, iteration] of [
+    ["http-3001", 3001, 1],
+    ["http-3000", 3000, 2],
+  ] as const) {
+    tracker.record({
+      call: {
+        id,
+        name: "run_command",
+        argumentsJson: JSON.stringify({
+          command: `curl -s -o /dev/null -w "%{http_code}" http://localhost:${port}/`,
+        }),
+      },
+      result: successfulToolResult({ stdout: "200", exitCode: 0 }, "possible"),
+      iteration,
+      sequence: 0,
+      mutability: "command",
+    });
+  }
+
+  assert.equal(tracker.accept({
+    status: "complete",
+    checks: [{
+      criterion: "curl localhost:3000 返回 200",
+      status: "passed",
+      evidenceCallIds: ["http-3001"],
+    }],
+    blockers: [],
+  }).ok, false);
+  assert.equal(tracker.accept({
+    status: "complete",
+    checks: [{
+      criterion: "curl localhost:3000 返回 200",
+      status: "passed",
+      evidenceCallIds: ["http-3000"],
+    }],
+    blockers: [],
+  }).ok, true);
+});
+
 test("拒绝伪造证据、失败证据和写入前的完成声明", () => {
   const tracker = new CompletionTracker();
   tracker.record({

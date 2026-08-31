@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
+import { createServer as createHttpServer } from "node:http";
+import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -34,6 +35,16 @@ test("Seatbelt 允许工作区命令并阻断外部、敏感与环境逃逸", as
     assert.equal(allowed.stdout, "inside");
     assert.equal(allowed.stderr, "err");
     assert.equal(allowed.exitCode, 7);
+    const hiddenRuntime = await sandbox.run(
+      {
+        command: "test ! -e .orbitcode-runtime",
+        cwd,
+        timeoutMs: 2_000,
+        outputLimitBytes: 1_024,
+      },
+      { workspace, signal: new AbortController().signal },
+    );
+    assert.equal(hiddenRuntime.exitCode, 0, "沙箱私有运行目录不得污染 Workspace");
 
     for (const command of [
       `cat '${path.join(outside, "outside.txt")}'`,
@@ -61,7 +72,8 @@ test("Seatbelt 允许工作区命令并阻断外部、敏感与环境逃逸", as
 
 test("Seatbelt 允许命令访问网络，同时保持最小环境", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "orbitcode-seatbelt-network-"));
-  const networkServer = createServer((socket) => socket.end());
+  const networkServer = createNetServer((socket) => socket.end());
+  const httpServer = createHttpServer((_request, response) => response.end("ok"));
   const previousSentinel = process.env.ORBITCODE_SANDBOX_SENTINEL;
   process.env.ORBITCODE_SANDBOX_SENTINEL = "must-not-leak";
   try {
@@ -88,6 +100,25 @@ test("Seatbelt 允许命令访问网络，同时保持最小环境", async () =>
 
     assert.equal(result.exitCode, 0, result.stderr);
     assert.match(`${result.stdout}${result.stderr}`, /succeeded/u);
+    await new Promise<void>((resolve, reject) => {
+      httpServer.once("error", reject);
+      httpServer.listen(0, "127.0.0.1", () => resolve());
+    });
+    const httpAddress = httpServer.address();
+    if (typeof httpAddress === "string" || httpAddress === null) {
+      throw new Error("测试 HTTP 服务没有可用端口。");
+    }
+    const curl = await sandbox.run(
+      {
+        command: `/usr/bin/curl -fsS http://127.0.0.1:${httpAddress.port}`,
+        cwd,
+        timeoutMs: 5_000,
+        outputLimitBytes: 1_024,
+      },
+      { workspace, signal: new AbortController().signal },
+    );
+    assert.equal(curl.exitCode, 0, curl.stdout || curl.stderr);
+    assert.equal(curl.stdout, "ok");
     const environment = await sandbox.run(
       {
         command: "test -z \"${ORBITCODE_SANDBOX_SENTINEL:-}\"",
@@ -102,6 +133,7 @@ test("Seatbelt 允许命令访问网络，同时保持最小环境", async () =>
     if (previousSentinel === undefined) delete process.env.ORBITCODE_SANDBOX_SENTINEL;
     else process.env.ORBITCODE_SANDBOX_SENTINEL = previousSentinel;
     await new Promise<void>((resolve) => networkServer.close(() => resolve()));
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
   }
 });

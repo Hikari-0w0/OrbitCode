@@ -55,6 +55,16 @@ export type AgentRunLogEntry = {
       | "unfinished";
     readonly durationMs?: number;
     readonly errorKind?: string;
+    readonly authorization?: {
+      readonly status:
+        | "awaiting"
+        | "allowed"
+        | "denied"
+        | "expired"
+        | "cancelled"
+        | "invalid";
+      readonly waitMs: number;
+    };
   }[];
 };
 
@@ -223,6 +233,9 @@ function toStoredEntry(entry: AgentRunLogEntry): StoredAgentRunLogEntry {
       status: tool.status,
       ...(tool.durationMs === undefined ? {} : { durationMs: tool.durationMs }),
       ...(tool.errorKind === undefined ? {} : { errorKind: tool.errorKind }),
+      ...(tool.authorization === undefined
+        ? {}
+        : { authorization: { ...tool.authorization } }),
     })),
   };
 }
@@ -322,11 +335,25 @@ function isUsage(value: unknown): boolean {
 
 function isToolLog(value: unknown): boolean {
   return isRecord(value) &&
-    hasAllowedFields(value, ["name", "status"], ["durationMs", "errorKind"]) &&
+    hasAllowedFields(
+      value,
+      ["name", "status"],
+      ["durationMs", "errorKind", "authorization"],
+    ) &&
     typeof value.name === "string" &&
     ["succeeded", "failed", "timed-out", "cancelled", "unfinished"].includes(String(value.status)) &&
     (value.durationMs === undefined || isNonNegativeInteger(value.durationMs)) &&
-    (value.errorKind === undefined || typeof value.errorKind === "string");
+    (value.errorKind === undefined || typeof value.errorKind === "string") &&
+    (value.authorization === undefined || isAuthorizationLog(value.authorization));
+}
+
+function isAuthorizationLog(value: unknown): boolean {
+  return isRecord(value) &&
+    hasAllowedFields(value, ["status", "waitMs"], []) &&
+    ["awaiting", "allowed", "denied", "expired", "cancelled", "invalid"].includes(
+      String(value.status),
+    ) &&
+    isNonNegativeInteger(value.waitMs);
 }
 
 function isModelAttemptLog(value: unknown): boolean {

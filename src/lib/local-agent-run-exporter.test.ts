@@ -28,6 +28,11 @@ test("按 runId 导出精确的前后检查点和卸载上下文", async () => {
       content: "完整工具输出",
       signal: new AbortController().signal,
     });
+    const operationalObject = await conversations.write({
+      sessionId: created.summary.id,
+      content: "完整操作交换",
+      signal: new AbortController().signal,
+    });
     const saved = await conversations.save({
       conversationId: created.summary.id,
       expectedRevision: 0,
@@ -63,6 +68,17 @@ test("按 runId 导出精确的前后检查点和卸载上下文", async () => {
                 originalBytes: contextObject.byteLength,
                 estimatedTokens: 4,
               },
+            },
+            {
+              kind: "boundary",
+              content: [
+                "<orbitcode_operational_compaction>",
+                "tools: write_files",
+                `reference: ${operationalObject.reference}`,
+                "status: completed",
+                "较早的完整工具交换已卸载。",
+                "</orbitcode_operational_compaction>",
+              ].join("\n"),
             },
           ],
         },
@@ -100,12 +116,20 @@ test("按 runId 导出精确的前后检查点和卸载上下文", async () => {
 
     assert.equal(result.checkpoints.before.status, "included");
     assert.equal(result.checkpoints.after.status, "included");
-    assert.deepEqual(result.context.objects, [{
-      reference: contextObject.reference,
-      status: "included",
-      byteLength: contextObject.byteLength,
-      content: "完整工具输出",
-    }]);
+    assert.deepEqual(result.context.objects, [
+      {
+        reference: contextObject.reference,
+        status: "included",
+        byteLength: contextObject.byteLength,
+        content: "完整工具输出",
+      },
+      {
+        reference: operationalObject.reference,
+        status: "included",
+        byteLength: operationalObject.byteLength,
+        content: "完整操作交换",
+      },
+    ]);
     assert.equal(result.containsSensitiveContent, true);
     assert.equal((await stat(outputPath)).mode & 0o777, 0o600);
     const disk = JSON.parse(await readFile(outputPath, "utf8")) as {
@@ -124,7 +148,7 @@ test("按 runId 导出精确的前后检查点和卸载上下文", async () => {
       [0, 1],
     );
     assert.deepEqual(conversationExport.runs.map((run) => run.runId), ["run-export"]);
-    assert.equal(conversationExport.context.objects.length, 1);
+    assert.equal(conversationExport.context.objects.length, 2);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
