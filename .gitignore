@@ -79,3 +79,6 @@ next-env.d.ts
 /submission/
 /*.mp4
 /*.zip
+
+# 个人面试准备资料
+/docs/interview/
