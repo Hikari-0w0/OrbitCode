@@ -47,7 +47,7 @@ export function createProcessTools(controller: ManagedProcessController) {
   const startProcessTool = defineTool({
     name: "start_process",
     description:
-      "在严格沙箱中启动本轮临时长驻进程。启动开发服务器等持续服务时使用；可等待指定 loopback 端口就绪，之后用 process_status 查看日志并用 stop_process 停止。",
+      "在严格沙箱中启动本轮临时长驻进程。启动开发服务器等持续服务时使用；可等待指定 loopback 端口就绪。仅当本工具成功返回 processId 后，才可用该 ID 调用 process_status 或 stop_process；失败结果中的调用或证据 ID 不是 process_id。",
     inputSchema: startProcessSchema,
     mutability: "command",
     permission: {
@@ -135,7 +135,10 @@ function processFailure(error: unknown) {
     return toolFailure("invalid-arguments", error.message, { retryable: true });
   }
   if (error.kind === "not-ready") {
-    const failure = toolFailure("timeout", error.message, {
+    const message = error.processAvailable === false
+      ? `${error.message} 进程已回收，没有可用 process_id；请根据日志修复后重新调用 start_process。`
+      : error.message;
+    const failure = toolFailure("timeout", message, {
       retryable: true,
       sideEffect: "possible",
     });

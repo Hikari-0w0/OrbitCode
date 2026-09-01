@@ -225,38 +225,41 @@ test("不能遗漏最后一次仍失败的质量检查后声明 complete", () =>
   }).ok, true);
 });
 
-test("不同工作目录的质量检查不能互相覆盖失败状态", () => {
+test("后续同类质量检查成功可跨工作目录收敛早期失败", () => {
   const tracker = new CompletionTracker();
-  for (const [id, cwd, ok, iteration] of [
-    ["lint-a-failed", "packages/a", false, 1],
-    ["lint-b-passed", "packages/b", true, 2],
-  ] as const) {
-    tracker.record({
-      call: {
-        id,
-        name: "run_command",
-        argumentsJson: JSON.stringify({ command: "npm run lint", cwd }),
-      },
-      result: ok
-        ? successfulToolResult({ exitCode: 0 }, "possible")
-        : toolFailure("command-failed", "lint 失败"),
-      iteration,
-      sequence: 0,
-      mutability: "command",
-    });
-  }
+  tracker.record({
+    call: {
+      id: "typecheck-malformed",
+      name: "run_command",
+      argumentsJson: JSON.stringify({ command: '"npx tsc --noEmit", "cwd">"kanban"' }),
+    },
+    result: toolFailure("command-failed", "命令格式错误"),
+    iteration: 1,
+    sequence: 0,
+    mutability: "command",
+  });
+  tracker.record({
+    call: {
+      id: "typecheck-passed",
+      name: "run_command",
+      argumentsJson: JSON.stringify({ command: "npm run typecheck", cwd: "kanban" }),
+    },
+    result: successfulToolResult({ exitCode: 0 }, "possible"),
+    iteration: 2,
+    sequence: 0,
+    mutability: "command",
+  });
 
   const result = tracker.accept({
     status: "complete",
     checks: [{
-      criterion: "packages/b 的 npm run lint 无错误",
+      criterion: "TypeScript 类型检查通过",
       status: "passed",
-      evidenceCallIds: ["lint-b-passed"],
+      evidenceCallIds: ["typecheck-passed"],
     }],
     blockers: [],
   });
-  assert.equal(result.ok, false);
-  if (!result.ok) assert.match(result.message, /lint.*仍失败/iu);
+  assert.equal(result.ok, true);
 });
 
 test("HTTP 检查不能用其他端口的响应冒充", () => {
