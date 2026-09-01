@@ -262,10 +262,9 @@ function latestFailedQualityGate(
   >();
   for (const record of records) {
     for (const gate of qualityGates(record)) {
-      const key = `${gate}\0${commandWorkingDirectory(record.argumentsJson)}`;
-      const current = latestByGate.get(key);
+      const current = latestByGate.get(gate);
       if (current === undefined || isAfter(record, current.record)) {
-        latestByGate.set(key, { gate, record });
+        latestByGate.set(gate, { gate, record });
       }
     }
   }
@@ -350,15 +349,6 @@ function commandArgument(argumentsJson: string): string | undefined {
       : undefined;
   } catch {
     return undefined;
-  }
-}
-
-function commandWorkingDirectory(argumentsJson: string): string {
-  try {
-    const value: unknown = JSON.parse(argumentsJson);
-    return isRecord(value) && typeof value.cwd === "string" ? value.cwd : ".";
-  } catch {
-    return ".";
   }
 }
 

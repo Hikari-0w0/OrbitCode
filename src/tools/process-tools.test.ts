@@ -58,6 +58,7 @@ test("进程启动失败时直接返回可诊断日志且不返回进程 ID", as
       logs: [{ cursor: 1, stream: "stdout", text: "config-broken" }],
     });
     assert.equal(JSON.stringify(result.output).includes("processId"), false);
+    assert.match(result.error.message, /没有可用 process_id/u);
   } finally {
     controller.start = originalStart;
   }

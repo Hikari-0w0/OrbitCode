@@ -51,6 +51,37 @@ test("受管进程等待本机端口、分页读取日志并可停止", async ()
   }
 });
 
+test("受管进程接受仅监听 IPv6 loopback 的本机服务", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-managed-ipv6-"));
+  const port = await availablePort("::1");
+  const workspace = await createWorkspaceBoundary(root);
+  const controller = new ManagedProcessController(new TestProcessSandbox(), workspace);
+  try {
+    const script = [
+      "const net=require('node:net');",
+      "const server=net.createServer();",
+      `server.listen(${port},'::1',()=>console.log('ready-v6'));`,
+    ].join("");
+    const started = await controller.start({
+      command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`,
+      readyPort: port,
+      readyTimeoutMs: 500,
+      signal: new AbortController().signal,
+    });
+
+    assert.equal(started.status, "running");
+    assert.equal(
+      controller.status(started.processId).logs.some((chunk) =>
+        chunk.text.includes("ready-v6")
+      ),
+      true,
+    );
+  } finally {
+    await controller.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("数量上限、无效 ID 和 close 回收均有界", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "orbitcode-managed-limit-"));
   const workspace = await createWorkspaceBoundary(root);
@@ -146,11 +177,11 @@ function testHandle(child: ChildProcess): SandboxManagedProcess {
   };
 }
 
-async function availablePort(): Promise<number> {
+async function availablePort(host = "127.0.0.1"): Promise<number> {
   const server = createServer();
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
+    server.listen(0, host, resolve);
   });
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("没有可用测试端口");

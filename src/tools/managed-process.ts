@@ -11,6 +11,7 @@ import type { WorkspaceBoundary } from "@/tools/types";
 const DEFAULT_MAX_PROCESSES = 4;
 const DEFAULT_LOG_BYTES = 128 * 1024;
 const CONNECT_TIMEOUT_MS = 150;
+const LOOPBACK_HOSTS = ["127.0.0.1", "::1"] as const;
 
 export type ManagedProcessLogChunk = {
   readonly cursor: number;
@@ -256,9 +257,16 @@ class ProcessLogBuffer {
   }
 }
 
-function canConnect(port: number): Promise<boolean> {
+async function canConnect(port: number): Promise<boolean> {
+  const results = await Promise.all(
+    LOOPBACK_HOSTS.map((host) => canConnectHost(host, port)),
+  );
+  return results.some((connected) => connected);
+}
+
+function canConnectHost(host: string, port: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = createConnection({ host: "127.0.0.1", port });
+    const socket = createConnection({ host, port });
     let settled = false;
     const finish = (connected: boolean): void => {
       if (settled) return;
