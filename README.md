@@ -2,7 +2,17 @@
 
 OrbitCode 是一个使用 TypeScript 自主实现的编程智能体。Web 入口已支持 OpenAI 兼容 Tool Calling 与自主 Agent Loop：模型可以连续调用本地工具、读取结构化结果并调整下一步行动，直到给出最终回复或触发安全停止条件。
 
-## CLI 流式对话
+完整的 Coding Agent 能力由 Web 入口提供；CLI 当前仅用于流式多轮对话。
+
+## 核心架构
+
+- `src/core/`：Agent Loop、会话、上下文管理、终止条件与完成验证
+- `src/models/`：模型请求、SSE 解析与 Tool Calling 适配
+- `src/tools/`：工具定义、参数校验、权限边界与本地执行
+- `src/web/`：Web 会话持久化、恢复与接口编排
+- `src/components/`：界面展示与交互，不承载 Agent 核心逻辑
+
+## 配置
 
 环境要求：Node.js 20.9 或更高版本。
 
@@ -44,29 +54,13 @@ providers:
 
 `thinking` 为可选配置。为兼容既有配置，省略 `api_style` 时使用 SiliconFlow 的 `enable_thinking` 参数；连接 DeepSeek 官方 API 时必须设置 `api_style: deepseek`，此时 OrbitCode 会发送官方的 `thinking.type` 参数，且不接受仅由 SiliconFlow 支持的 `budget_tokens`。
 
-启动单配置：
-
-```bash
-npm run cli -- --config orbitcode.yaml
-```
-
-YAML 包含多个配置时按 `name` 选择：
-
-```bash
-npm run cli -- --config orbitcode.yaml --provider primary
-```
-
-回复会随 OpenAI 兼容服务的 SSE 增量实时显示。当前进程内保留完整多轮历史；输入 `/exit`、按 `Ctrl-D` 或在空闲时按 `Ctrl-C` 可退出，生成期间按 `Ctrl-C` 只取消当前回复。
-
-CLI 当前仍保持纯文本流式对话；本地 Tool Calling 暂由 Web 入口提供。
-
 ## Web 流式对话
 
 ```bash
 npm run dev
 ```
 
-浏览器访问 [http://localhost:3000](http://localhost:3000)。Web 与 CLI 共用项目根目录的 `.env` 和 `orbitcode.yaml`，无需在页面中重复配置密钥或服务地址。Web 可另外从未入库的 `orbitcode.workspaces.yaml` 加载本地授权项目；未创建该文件时，保持以 OrbitCode 启动目录作为唯一默认 Workspace。
+浏览器访问 [http://localhost:3000](http://localhost:3000)。Web 使用项目根目录的 `.env` 和 `orbitcode.yaml`，无需在页面中重复配置密钥或服务地址。Web 可另外从未入库的 `orbitcode.workspaces.yaml` 加载本地授权项目；未创建该文件时，保持以 OrbitCode 启动目录作为唯一默认 Workspace。
 
 ### 选择本地 Workspace
 
@@ -98,8 +92,10 @@ workspaces:
 - 读取、写入和唯一原文替换文件
 - 按受限 Glob 查找文件，以及按字面量搜索代码
 - 在 macOS Seatbelt 文件沙箱中执行命令，并支持联网安装项目依赖
+- 启动、查看和停止本轮临时长驻进程，并等待 IPv4/IPv6 loopback 端口就绪
 - 只读工具分批并发，写文件、修改文件和命令工具按原调用边界串行执行
 - 展示模型文本、迭代进度、工具排队/执行/结果、累计 Token 用量与最终停止原因
+- 基于真实工具证据汇总完成状态，并展示 Agent 总运行时间和验证结果
 - 可跨刷新和服务重启恢复的本地多对话历史
 - 大工具结果本地卸载、`read_context` 按引用重读与结构化历史摘要
 - 手动上下文压缩、压缩前后 Token 估算、失败状态与三次失败熔断
@@ -185,14 +181,14 @@ cp orbitcode.permissions.example.yaml .orbitcode/permissions.yaml
 
 停止生成、清空、切换 Workspace 或 Provider、关闭权限会话，以及等待超时都会终止尚未完成的授权；迟到或跨会话决定无效。项目级与本地级权限文件本身受文件工具和命令沙箱保护。本仓库已忽略自身的 `.orbitcode/permissions.local.yaml`；在其他 Workspace 使用本地规则时，需要由该项目自行加入忽略规则，OrbitCode 不会修改外部项目的 `.gitignore`。
 
-本阶段不实现按域名细分的网络规则、资源配额、审计日志、CLI 工具权限或公网身份认证。联网能力跟随整个 `run_command` 的权限决定，不会单独弹出第二次网络授权。Web API 仍只适合本机使用，不要把开发服务器绑定或暴露到不受信任的网络。
+本阶段不实现按域名细分的网络规则、资源配额、审计日志或公网身份认证。联网能力跟随整个 `run_command` 的权限决定，不会单独弹出第二次网络授权。Web API 仍只适合本机使用，不要把开发服务器绑定或暴露到不受信任的网络。
 
 ## 可用命令
 
 ```bash
 npm run dev       # 启动开发服务器
 npm run cli       # 启动命令行对话（需追加 -- --config ...）
-npm run test      # 运行单元、集成和 CLI 端到端测试
+npm run test      # 运行单元、集成和端到端测试
 npm run build     # 生成生产构建
 npm run start     # 启动生产服务器
 npm run lint      # 运行 ESLint
@@ -202,9 +198,8 @@ npm run check     # 依次执行 lint、类型检查和生产构建
 
 ## 环境变量
 
-复制 `.env.example` 为 `.env`，只填写本地 API Key；模型名和服务地址写在未入库的 `orbitcode.yaml`。CLI 与 Web Route Handler 都只在服务端读取这些文件。任何 API Key 都不得提交到 Git、写入 YAML、作为命令行参数传递或发送到浏览器。`ORBITCODE_MAX_AGENT_ITERATIONS` 只影响 Web Agent Loop；CLI 本阶段仍保持原有纯文本流式多轮对话，不执行工具，也不识别 `/plan`、`/do`。
+复制 `.env.example` 为 `.env`，只填写本地 API Key；模型名和服务地址写在未入库的 `orbitcode.yaml`。这些配置只在服务端读取。任何 API Key 都不得提交到 Git、写入 YAML、作为命令行参数传递或发送到浏览器。`ORBITCODE_MAX_AGENT_ITERATIONS` 只影响 Web Agent Loop。
 
 ## 后续阶段
 
 - 独立 HTTP 工具、按域名网络规则、资源配额与审计日志
-- 将入口无关的 Agent 核心接入 CLI
