@@ -35,9 +35,7 @@ Thumbs.db
 *.code-workspace
 
 # 本地 Agent、提示词与开发规划
-/AGENTS.md
 /CLAUDE.md
-/.agents/
 /.agent/
 /.codex/
 /.claude/
@@ -45,7 +43,6 @@ Thumbs.db
 /.cursorrules
 /prompts/
 /plans/
-/docs/specs/
 
 # 日志
 *.log
