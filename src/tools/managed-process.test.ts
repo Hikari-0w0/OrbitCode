@@ -36,6 +36,8 @@ test("受管进程等待本机端口、分页读取日志并可停止", async ()
       signal: new AbortController().signal,
     });
     assert.equal(started.status, "running");
+    assert.equal(started.lifetime, "current-turn");
+    assert.deepEqual(started.portObservation, { port, scope: "tcp-connectivity-only" });
     await delay(80);
     const first = controller.status(started.processId, 0);
     assert.ok(first.logs.some((chunk) => chunk.text.includes("ready")));
@@ -70,6 +72,8 @@ test("受管进程接受仅监听 IPv6 loopback 的本机服务", async () => {
     });
 
     assert.equal(started.status, "running");
+    assert.equal(started.lifetime, "current-turn");
+    assert.deepEqual(started.portObservation, { port, scope: "tcp-connectivity-only" });
     assert.equal(
       controller.status(started.processId).logs.some((chunk) =>
         chunk.text.includes("ready-v6")
@@ -135,6 +139,50 @@ test("等待就绪前退出时保留诊断日志且不暴露失效进程 ID", as
   } finally {
     await controller.close();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+for (const host of ["127.0.0.1", "::1"]) {
+  test(`已占用的 ${host} 端口不能作为新进程就绪证据`, async () => {
+    const server = createServer((socket) => socket.end());
+    await new Promise<void>((resolve) => server.listen(0, host, resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const workspace = await createWorkspaceBoundary(process.cwd());
+    let starts = 0;
+    const sandbox = new TestProcessSandbox();
+    const original = sandbox.start.bind(sandbox);
+    sandbox.start = async (request) => { starts += 1; return original(request); };
+    const controller = new ManagedProcessController(sandbox, workspace);
+    try {
+      await assert.rejects(controller.start({
+        command: "sleep 5",
+        readyPort: address.port,
+        signal: new AbortController().signal,
+      }), /端口.*已被占用/u);
+      assert.equal(starts, 0);
+    } finally {
+      await controller.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+}
+
+test("预先取消不会启动子进程", async () => {
+  const workspace = await createWorkspaceBoundary(process.cwd());
+  const sandbox = new TestProcessSandbox();
+  let starts = 0;
+  const original = sandbox.start.bind(sandbox);
+  sandbox.start = async (request) => { starts += 1; return original(request); };
+  const controller = new ManagedProcessController(sandbox, workspace);
+  const abort = new AbortController();
+  abort.abort();
+  try {
+    await assert.rejects(controller.start({ command: "sleep 5", signal: abort.signal }),
+      (error: unknown) => error instanceof ManagedProcessError && error.kind === "cancelled");
+    assert.equal(starts, 0);
+  } finally {
+    await controller.close();
   }
 });
 

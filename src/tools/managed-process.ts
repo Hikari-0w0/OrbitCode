@@ -20,6 +20,8 @@ export type ManagedProcessLogChunk = {
 };
 
 export type ManagedProcessSnapshot = {
+  readonly lifetime: "current-turn";
+  readonly portObservation: { readonly port: number; readonly scope: "tcp-connectivity-only" } | null;
   readonly processId: string;
   readonly status: "running" | "exited" | "failed";
   readonly pid: number;
@@ -35,11 +37,12 @@ type ProcessRecord = {
   readonly logs: ProcessLogBuffer;
   status: ManagedProcessSnapshot["status"];
   exit?: ManagedCommandExit;
+  portObservation: ManagedProcessSnapshot["portObservation"];
 };
 
 export class ManagedProcessError extends Error {
   constructor(
-    readonly kind: "limit" | "unavailable" | "invalid-id" | "start" | "not-ready",
+    readonly kind: "limit" | "unavailable" | "invalid-id" | "start" | "not-ready" | "port-in-use" | "cancelled",
     message: string,
     diagnostic: {
       readonly processAvailable: false;
@@ -89,6 +92,12 @@ export class ManagedProcessController {
       throw new ManagedProcessError("unavailable", "当前命令沙箱不支持长驻进程。");
     }
     const cwd = await this.workspace.resolveExistingDirectory(input.cwd);
+    if (input.signal.aborted) throw new ManagedProcessError("cancelled", "进程启动已取消。");
+    // 拒绝把启动前已有的监听者当成新进程就绪；连接探测不证明监听者归属。
+    if (input.readyPort !== undefined && await canConnect(input.readyPort)) {
+      throw new ManagedProcessError("port-in-use", `端口 ${input.readyPort} 已被占用，未启动进程。请选择空闲端口并同步调整启动命令和 ready_port。`);
+    }
+    if (input.signal.aborted) throw new ManagedProcessError("cancelled", "进程启动已取消。");
     let handle: SandboxManagedProcess;
     try {
       handle = await this.sandbox.start(
@@ -107,6 +116,7 @@ export class ManagedProcessController {
       handle,
       logs: new ProcessLogBuffer(this.#logBytes),
       status: "running",
+      portObservation: null,
     };
     handle.stdout?.on("data", (chunk: Buffer | string) =>
       record.logs.push("stdout", chunk)
@@ -133,6 +143,7 @@ export class ManagedProcessController {
           input.readyTimeoutMs ?? 10_000,
           input.signal,
         );
+        record.portObservation = { port: input.readyPort, scope: "tcp-connectivity-only" };
       } else if (input.signal.aborted) {
         throw new ManagedProcessError("not-ready", "启动受管进程已取消。");
       }
@@ -155,6 +166,8 @@ export class ManagedProcessController {
     const record = this.#require(processId);
     const logs = record.logs.read(cursor);
     return {
+      lifetime: "current-turn",
+      portObservation: record.portObservation,
       processId,
       status: record.status,
       pid: record.handle.pid,
@@ -196,7 +209,12 @@ export class ManagedProcessController {
       if (record.status !== "running") {
         throw new ManagedProcessError("not-ready", "进程在端口就绪前已经退出。");
       }
-      if (await canConnect(port)) return;
+      if (await canConnect(port)) {
+        if (signal.aborted || record.status !== "running") {
+          throw new ManagedProcessError("not-ready", "端口检查期间进程已退出或等待已取消。");
+        }
+        return;
+      }
       if (Date.now() >= deadline) {
         throw new ManagedProcessError("not-ready", "进程未在限定时间内监听本机端口。");
       }
@@ -281,6 +299,7 @@ function canConnectHost(host: string, port: number): Promise<boolean> {
 }
 
 function abortableDelay(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(new ManagedProcessError("not-ready", "等待进程就绪已取消。"));
   return new Promise((resolve, reject) => {
     const abort = (): void => {
       clearTimeout(timeout);

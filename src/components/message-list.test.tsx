@@ -215,3 +215,20 @@ test("模型工具参数进度显示累计字符与耗时", () => {
 
   assert.match(markup, /生成 write_files 参数 19,368 字符 · 12\.3s/u);
 });
+
+test("验证标签只说明所列检查通过，不宣称全部需求完成", () => {
+  const markup = renderToStaticMarkup(<MessageList
+    messages={[{ id: "scope", role: "assistant", content: "构建完成", state: "complete",
+      toolExecutions: [{ iteration: 1, sequence: 0, callId: "process", name: "start_process", argumentsJson: "{}", state: "succeeded" }],
+      verification: { status: "verified", checks: [{ criterion: "构建成功", status: "passed", evidenceCallIds: ["build"] }], blockers: [] },
+    }]}
+    planActionDisabled={false}
+    onExecutePlan={() => undefined}
+    onSuggestion={() => undefined}
+    onPermissionDecision={() => undefined}
+  />);
+  assert.match(markup, /所列检查通过/u);
+  assert.match(markup, /不代表全部需求已验收/u);
+  assert.match(markup, /构建成功/u);
+  assert.match(markup, /结束后自动回收/u);
+});

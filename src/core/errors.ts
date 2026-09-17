@@ -12,10 +12,6 @@ export type RecoverableChatError =
   | { readonly kind: "protocol"; readonly message: string }
   | { readonly kind: "stream"; readonly message: string };
 
-export type RecoverableAgentError =
-  | RecoverableChatError
-  | { readonly kind: "agent"; readonly message: string };
-
 export class ConversationStateError extends Error {
   constructor(message: string) {
     super(message);
@@ -58,12 +54,4 @@ export function toRecoverableChatError(error: unknown): RecoverableChatError {
     kind: error.kind,
     message: error.message,
   };
-}
-
-export function toRecoverableAgentError(error: unknown): RecoverableAgentError {
-  if (error instanceof ProviderError) return toRecoverableChatError(error);
-  if (error instanceof ConversationStateError) {
-    return { kind: "agent", message: error.message };
-  }
-  return { kind: "agent", message: "Agent 执行发生未知错误，请重试。" };
 }
