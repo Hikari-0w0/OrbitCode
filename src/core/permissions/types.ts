@@ -1,6 +1,5 @@
 export type PermissionMode = "strict" | "default" | "permissive";
 export type PermissionDecision = "allow" | "ask" | "deny";
-export type PermissionToolKind = "read" | "write" | "command";
 export type PermissionRuleLayer = "user" | "project" | "local";
 export type PermissionTargetKind = "path" | "command";
 export type PermissionRiskLevel = "low" | "medium" | "high";

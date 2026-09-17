@@ -10,7 +10,7 @@ import {
   optionalSchema,
   stringSchema,
 } from "@/tools/schema";
-import { toolFailure, type ToolInputSchema } from "@/tools/types";
+import { toolFailure, type ToolExecutionResult, type ToolInputSchema } from "@/tools/types";
 import { WORKSPACE_RELATIVE_PATH_DESCRIPTION } from "@/tools/workspace-path";
 
 type StartProcessInput = {
@@ -47,7 +47,7 @@ export function createProcessTools(controller: ManagedProcessController) {
   const startProcessTool = defineTool({
     name: "start_process",
     description:
-      "在严格沙箱中启动本轮临时长驻进程。启动开发服务器等持续服务时使用；可等待指定 loopback 端口就绪。仅当本工具成功返回 processId 后，才可用该 ID 调用 process_status 或 stop_process；失败结果中的调用或证据 ID 不是 process_id。",
+      "在严格沙箱中启动本轮临时进程；本轮完成、取消或失败后会自动关闭，不能承诺最终回复后预览仍可访问。ready_port 在启动前已被占用时拒绝启动；启动后的端口探测仅证明 loopback TCP 可连接，不证明进程归属、HTTP 内容或应用功能。应根据实际任务选择后续验证。仅成功返回的 processId 可用于 process_status/stop_process，调用或证据 ID 不是 process_id。",
     inputSchema: startProcessSchema,
     mutability: "command",
     permission: {
@@ -119,7 +119,7 @@ export function createProcessTools(controller: ManagedProcessController) {
   return [startProcessTool, processStatusTool, stopProcessTool] as const;
 }
 
-function processFailure(error: unknown) {
+function processFailure(error: unknown): ToolExecutionResult {
   if (!(error instanceof ManagedProcessError)) {
     return toolFailure("execution-failed", "受管进程操作失败。", {
       sideEffect: "possible",
@@ -127,6 +127,15 @@ function processFailure(error: unknown) {
   }
   if (error.kind === "unavailable") {
     return toolFailure("sandbox-unavailable", error.message);
+  }
+  if (error.kind === "cancelled") {
+    return toolFailure("cancelled", error.message);
+  }
+  if (error.kind === "port-in-use") {
+    return {
+      ...toolFailure("execution-failed", error.message, { retryable: true, sideEffect: "none" }),
+      output: { processAvailable: false, reason: "port-in-use" },
+    };
   }
   if (error.kind === "limit") {
     return toolFailure("limit-exceeded", error.message, { retryable: true });

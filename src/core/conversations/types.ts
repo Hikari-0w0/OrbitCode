@@ -5,7 +5,7 @@ import type {
 } from "@/core/agent-events";
 import type { ManagedContextMessage } from "@/core/context/types";
 import type { CompletionAssessment } from "@/core/completion-tracker";
-import type { SideEffectState, ToolExecutionResult } from "@/tools/types";
+import type { ToolExecutionResult } from "@/tools/types";
 
 export const CONVERSATION_SCHEMA_VERSION = 1;
 export const MAX_CONVERSATION_TITLE_LENGTH = 120;
@@ -139,12 +139,3 @@ export interface ConversationRepository {
     readonly expectedRevision: number;
   }): Promise<void>;
 }
-
-export type PersistedTerminal = {
-  readonly reason: AgentStopReason;
-  readonly iterations: number;
-  readonly durationMs: number;
-  readonly sideEffect: SideEffectState;
-  readonly detail?: string;
-  readonly verification?: CompletionAssessment;
-};

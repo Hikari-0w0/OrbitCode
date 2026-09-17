@@ -31,7 +31,7 @@ export function createReportCompletionTool(tracker: CompletionTracker) {
   return defineTool({
     name: "report_completion",
     description:
-      "在最终回复前提交结构化完成检查。evidence_call_ids 必须逐字复制工具结果中的 evidence_call_id，passed 须引用成功的只读或命令验证，写入成功本身不算验证。证据必须直接证明 criterion：文件列表只证明存在，HTTP 响应不证明客户端交互，build、lint 等检查必须引用对应命令。已失败的质量门禁须修复并重跑成功，否则只能报告 partial/blocked；存在写入时，complete 还必须引用最后写入后的验证结果。",
+      "在最终回复前提交结构化完成检查。根据用户目标列出验收项，包括未验证的需求（not-run），不要只列已经通过的命令。运行时 verified 仅表示所列检查通过证据规则，不保证需求覆盖完整。evidence_call_ids 必须逐字复制工具结果中的 evidence_call_id，passed 须引用成功的只读或命令验证，写入成功本身不算验证。证据必须直接证明 criterion：文件列表只证明存在，HTTP 响应不证明客户端交互，build、lint 等检查必须引用对应命令。已失败的质量门禁须修复并重跑成功，否则只能报告 partial/blocked；存在写入时，complete 还必须引用最后写入后的验证结果。",
     inputSchema: reportSchema,
     // 报告本身无副作用，但必须在此前工具全部收敛后串行评估。
     mutability: "workspace-write",

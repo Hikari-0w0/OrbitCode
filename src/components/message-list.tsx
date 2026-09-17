@@ -197,9 +197,23 @@ export function MessageList({
                     </p>
                   )}
                   {message.verification && (
-                    <p className={`verificationState verificationState--${message.verification.status}`}>
-                      验证状态：{verificationLabel(message.verification.status)}
-                    </p>
+                    <>
+                      <p className={`verificationState verificationState--${message.verification.status}`}>
+                        验证状态：{verificationLabel(message.verification.status)}
+                      </p>
+                      <p className="usageLine">仅覆盖所列检查，不代表全部需求已验收。</p>
+                      {message.verification.checks.length > 0 && (
+                        <details>
+                          <summary>查看检查范围</summary>
+                          <ul>{message.verification.checks.map((check, index) => (
+                            <li key={index}>{check.criterion}：{check.status === "passed" ? "通过" : check.status === "failed" ? "失败" : "未执行"}</li>
+                          ))}</ul>
+                        </details>
+                      )}
+                    </>
+                  )}
+                  {message.toolExecutions?.some((tool) => tool.name === "start_process" && tool.state === "succeeded") && (
+                    <p className="usageLine">临时服务仅用于本轮验证，结束后自动回收；预览地址不保证在回复后可用。</p>
                   )}
                   {message.detail && (
                     <p className={`messageDetail messageDetail--${message.state}`}>
@@ -505,7 +519,7 @@ function stopReasonLabel(reason: StoppedEvent["reason"]): string {
 }
 
 function verificationLabel(status: CompletionAssessment["status"]): string {
-  if (status === "verified") return "已验证";
+  if (status === "verified") return "所列检查通过";
   if (status === "partial") return "部分验证";
   if (status === "blocked") return "存在阻塞";
   return "未验证";

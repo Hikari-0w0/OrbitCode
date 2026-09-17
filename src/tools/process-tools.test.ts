@@ -63,3 +63,23 @@ test("进程启动失败时直接返回可诊断日志且不返回进程 ID", as
     controller.start = originalStart;
   }
 });
+
+
+test("端口冲突返回可恢复且无副作用的失败，不暴露进程 ID", async () => {
+  const workspace = await createWorkspaceBoundary(process.cwd());
+  const sandbox: CommandSandbox = {
+    async probe() { return { available: true }; },
+    async run() { throw new Error("unused"); },
+  };
+  const controller = new ManagedProcessController(sandbox, workspace);
+  controller.start = async () => { throw new ManagedProcessError("port-in-use", "端口已被占用"); };
+  const [start] = createProcessTools(controller);
+  const result = await start.execute({ command: "service", ready_port: 3000 }, {
+    workspace, signal: new AbortController().signal, deadlineMs: Date.now() + 1000,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.sideEffect, "none");
+  if (result.ok) assert.fail("应拒绝冲突端口");
+  assert.equal(result.error.retryable, true);
+  assert.deepEqual(result.output, { processAvailable: false, reason: "port-in-use" });
+});
