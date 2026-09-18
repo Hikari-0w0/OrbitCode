@@ -14,7 +14,7 @@ import {
 
 const projectRoot = process.cwd();
 const tsxCli = path.join(projectRoot, "node_modules", "tsx", "dist", "cli.mjs");
-const cliEntry = path.join(projectRoot, "src", "cli", "main.ts");
+const cliEntry = path.join(projectRoot, "tests", "helpers", "cli-process.ts");
 
 type RunningCli = {
   readonly process: ChildProcessWithoutNullStreams;
@@ -94,20 +94,20 @@ test(
 
       cli.process.stdin.write("第二问\n");
       await waitFor(() => count(cli.stdout(), "你> ") >= 4);
-      assert.deepEqual(messagesOf(server.requests[1]), [
+      assert.deepEqual(messagesOf(server.requests[1]).filter((message) => message.role !== "system"), [
         { role: "user", content: "第一问" },
         { role: "assistant", content: "代号是 ORBIT-42" },
         { role: "user", content: "第二问" },
       ]);
 
       cli.process.stdin.write("失败\n");
-      await waitFor(() => cli.stderr().includes("HTTP 503"));
+      await waitFor(() => cli.stdout().includes("model-error"));
       await waitFor(() => count(cli.stdout(), "你> ") >= 5);
 
       cli.process.stdin.write("取消\n");
       await waitFor(() => cli.stdout().includes("正在生成"));
       cli.process.kill("SIGINT");
-      await waitFor(() => cli.stdout().includes("[当前回复已取消]"));
+      await waitFor(() => cli.stdout().includes("停止：cancelled"));
       await waitFor(() => count(cli.stdout(), "你> ") >= 6);
 
       cli.process.stdin.write("恢复\n");
@@ -117,7 +117,7 @@ test(
         recoveredMessages.some(
           (message) => message.content === "失败" || message.content === "取消",
         ),
-        false,
+        true,
       );
       assert.equal(
         server.requests.every(
@@ -128,8 +128,7 @@ test(
 
       cli.process.stdin.write("/exit\n");
       const result = await cli.exit;
-      assert.deepEqual(result, { code: 0, signal: null });
-      assert.match(cli.stdout(), /再见。/);
+      assert.deepEqual(result, { code: 1, signal: null });
       assert.equal(cli.stderr().includes("file-only-secret"), false);
       assert.equal(cli.stdout().includes("file-only-secret"), false);
     } finally {

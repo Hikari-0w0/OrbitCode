@@ -272,6 +272,7 @@ export class LocalConversationStore implements ConversationRepository, ContextSt
       checkpoint: {
         ...current,
         summary: summaryForSave(current.summary, undefined),
+        mode: "do",
         modeTurn: 0,
         displayMessages: [],
         context: { messages: [], consecutiveSummaryFailures: 0 },

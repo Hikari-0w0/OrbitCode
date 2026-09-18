@@ -1,3 +1,4 @@
+import { webConversationService } from "@/web/agent-runtime";
 import { ConfigurationError } from "@/models/config";
 import {
   parseConversationCreateRequest,
@@ -9,7 +10,6 @@ import {
 } from "@/web/conversation-http";
 import {
   cleanupLegacyContextSessions,
-  localConversationStore,
 } from "@/web/conversation-store";
 import { assertSameOrigin, readPermissionJsonBody } from "@/web/request-security";
 import {
@@ -27,7 +27,7 @@ export async function GET(): Promise<Response> {
   try {
     await cleanupLegacyContextSessions().catch(() => undefined);
     const response: ConversationCatalogResponse = {
-      conversations: await localConversationStore.list(),
+      conversations: await webConversationService.list(),
     };
     return Response.json(response, { headers: { "cache-control": "no-store" } });
   } catch (error) {
@@ -45,7 +45,7 @@ export async function POST(request: Request): Promise<Response> {
     ]);
     resolveWebProvider(providerContext, body.providerId);
     await resolveWorkspaceBoundary(workspaceCatalog, body.workspaceId);
-    const checkpoint = await localConversationStore.create({
+    const checkpoint = await webConversationService.create({
       providerId: body.providerId,
       workspaceId: body.workspaceId,
       ...(body.title === undefined ? {} : { title: body.title }),

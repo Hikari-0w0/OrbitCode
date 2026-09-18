@@ -74,6 +74,11 @@ test("受管进程接受仅监听 IPv6 loopback 的本机服务", async () => {
     assert.equal(started.status, "running");
     assert.equal(started.lifetime, "current-turn");
     assert.deepEqual(started.portObservation, { port, scope: "tcp-connectivity-only" });
+    // TCP 就绪与 stdout 到达是独立事件，等待日志而不是假定二者同步。
+    const logDeadline = Date.now() + 1_000;
+    while (!controller.status(started.processId).logs.some((chunk) => chunk.text.includes("ready-v6")) && Date.now() < logDeadline) {
+      await delay(10);
+    }
     assert.equal(
       controller.status(started.processId).logs.some((chunk) =>
         chunk.text.includes("ready-v6")

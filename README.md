@@ -2,14 +2,16 @@
 
 OrbitCode 是一个使用 TypeScript 自主实现的编程智能体。Web 入口已支持 OpenAI 兼容 Tool Calling 与自主 Agent Loop：模型可以连续调用本地工具、读取结构化结果并调整下一步行动，直到给出最终回复或触发安全停止条件。
 
-完整的 Coding Agent 能力由 Web 入口提供；CLI 提供流式多轮对话和本地运行记录导出。
+Web 与 CLI 共用本地 Agent 运行时：工具执行、权限、Plan/Do、上下文管理、会话持久化和完成验证保持相同核心语义。CLI 可独立启动，无需先运行 Web 服务。
 
 ## 核心架构
 
 - `src/core/`：Agent Loop、会话、上下文管理、终止条件与完成验证
 - `src/models/`：模型请求、SSE 解析与 Tool Calling 适配
 - `src/tools/`：工具定义、参数校验、权限边界与本地执行
-- `src/web/`：Web 会话持久化、恢复与接口编排
+- `src/runtime/`：两端共用的配置、Agent 编排、会话操作与运行记录
+- `src/web/`：HTTP/SSE 适配与 Web 实例组合
+- `src/cli/`：终端输入、审批、会话命令与文本展示
 - `src/components/`：界面展示与交互，不承载 Agent 核心逻辑
 
 ## 配置
@@ -187,11 +189,41 @@ cp orbitcode.permissions.example.yaml .orbitcode/permissions.yaml
 
 本阶段不实现按域名细分的网络规则、资源配额、审计日志或公网身份认证。联网能力跟随整个 `run_command` 的权限决定，不会单独弹出第二次网络授权。Web API 仍只适合本机使用，不要把开发服务器绑定或暴露到不受信任的网络。
 
+## CLI 编程智能体
+
+```bash
+npm run cli
+npm run cli -- --config orbitcode.yaml --provider primary --workspace my-app
+npm run cli -- --resume <conversation-id>
+npm run cli -- export-conversation <conversation-id> --output conversation.json
+npm run cli -- export-run <run-id> --output run.json
+```
+
+存在多个 Provider 时通过 `--provider` 明确选择。默认从启动目录读取 `.env`、`orbitcode.yaml` 和 Workspace 配置；选择 Workspace 不改变凭据来源。`--resume` 恢复原绑定，不能同时指定 Provider 或 Workspace 覆盖参数。两端使用相同配置根和配置标识时，可先后继续 `~/.orbitcode/conversations-v1` 中同一会话；并发写入由写租约和 revision 保护。
+
+| 终端操作 | 命令 |
+| --- | --- |
+| 帮助、状态、取消、退出 | `/help`、`/status`、`/cancel`、`/exit` |
+| 模型与项目 | `/providers`、`/provider <name>`、`/workspaces`、`/workspace <id>` |
+| 规划与执行 | `/plan`、`/do`、`/execute-plan` |
+| 权限模式 | `/permissions strict`、`/permissions default`、`/permissions permissive` |
+| 审批 | `/approve <request-id> once`，最后一项也可为 `session`、`permanent` 或 `deny` |
+| 会话 | `/new`、`/conversations`、`/resume <id>`、`/history`、`/rename <title>` |
+| 清空、删除 | `/clear`、`/delete <id>`，再用提示中的 `/confirm <token>` 确认 |
+| 上下文与恢复 | `/compress`、`/retry-save`、`/recover` |
+| 工具详情与导出 | `/tool <call-id>`、`/export <path>` |
+
+生成期间仍能输入审批或取消；Ctrl-C 取消当前操作，空闲时退出。管线输入逐行执行，遇到人工审批立即拒绝，不把下一条业务文本当作授权。只有独立 `/plan` 和 `/do` 切换模式；`//` 可发送以 `/` 开头的普通消息。文本输出会过滤终端控制序列，长工具结果可通过 `/tool` 查看。
+
+`/retry-save` 只重试当前进程持有的未保存结果，不重新运行模型或工具。重启后 `/recover` 恢复已有磁盘检查点和中断标记，不能回滚文件或自动重放命令。会话授权不跨进程恢复，切换 Provider/Workspace 会新建 Do 会话。命令工具仍要求现有严格沙箱可用，不支持时明确拒绝。
+
+导出文件可能包含完整对话与代码，拒绝覆盖已有路径。未保存状态下 `/export` 导出进程内检查点以便人工保留，格式为 `orbitcode-unsaved-checkpoint`，不等同于已保存的完整会话导出。
+
 ## 可用命令
 
 ```bash
 npm run dev       # 启动开发服务器
-npm run cli       # 启动命令行对话（需追加 -- --config ...）
+npm run cli       # 使用默认 orbitcode.yaml 启动命令行 Agent
 npm run test      # 运行单元、集成和端到端测试
 npm run build     # 生成生产构建
 npm run start     # 启动生产服务器
@@ -202,7 +234,7 @@ npm run check     # 依次执行 lint、类型检查和生产构建
 
 ## 环境变量
 
-复制 `.env.example` 为 `.env`，只填写本地 API Key；模型名和服务地址写在未入库的 `orbitcode.yaml`。这些配置只在服务端读取。任何 API Key 都不得提交到 Git、写入 YAML、作为命令行参数传递或发送到浏览器。`ORBITCODE_MAX_AGENT_ITERATIONS` 只影响 Web Agent Loop。
+复制 `.env.example` 为 `.env`，只填写本地 API Key；模型名和服务地址写在未入库的 `orbitcode.yaml`。这些配置只在服务端读取。任何 API Key 都不得提交到 Git、写入 YAML、作为命令行参数传递或发送到浏览器。`ORBITCODE_MAX_AGENT_ITERATIONS` 和 `ORBITCODE_MAX_AGENT_RUNTIME_MINUTES` 同时影响 Web 与 CLI Agent Loop。
 
 ## 后续阶段
 

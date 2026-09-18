@@ -395,3 +395,46 @@ test("为模型提供短证据 ID，并在新运行开始时清空旧证据", ()
     blockers: [],
   }).ok, false);
 });
+
+test("真实模型报告同时定位失败证据与仅写入证据，修正后可接受", () => {
+  const tracker = new CompletionTracker();
+  tracker.record({ call: { id: "before", name: "run_command", argumentsJson: '{"command":"node sum.test.mjs"}' },
+    result: toolFailure("command-failed", "Reduce of empty array"), iteration: 1, sequence: 0, mutability: "command" });
+  tracker.record({ call: { id: "edit", name: "edit_file", argumentsJson: '{}' },
+    result: successfulToolResult({}, "applied"), iteration: 2, sequence: 0, mutability: "workspace-write" });
+  tracker.record({ call: { id: "after", name: "run_command", argumentsJson: '{"command":"node sum.test.mjs"}' },
+    result: successfulToolResult({ exitCode: 0 }), iteration: 3, sequence: 0, mutability: "command" });
+  const result = tracker.accept({ status: "complete", blockers: [], checks: [
+    { criterion: "复现原有失败", status: "passed", evidenceCallIds: ["before", "after"] },
+    { criterion: "修改后内容正确", status: "passed", evidenceCallIds: ["edit"] },
+    { criterion: "测试通过", status: "passed", evidenceCallIds: ["after"] },
+  ] });
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.deepEqual(result.issues.map((issue) => issue.path), [
+    "checks[0].evidence_call_ids[0]", "checks[1].evidence_call_ids",
+  ]);
+  assert.match(result.issues[0].message, /before.*失败/);
+  assert.match(result.issues[1].message, /写入成功不能替代验证/);
+  assert.equal(tracker.assessment().status, "unverified");
+  assert.equal(tracker.accept({ status: "complete", blockers: [], checks: [
+    { criterion: "修复后空数组和含负数数组测试通过", status: "passed", evidenceCallIds: ["after"] },
+  ] }).ok, true);
+});
+
+test("缺失证据与写入后验证不足一次反馈，不捏造后续检查状态", () => {
+  const tracker = new CompletionTracker();
+  tracker.record({ call: { id: "edit", name: "edit_file", argumentsJson: '{}' },
+    result: successfulToolResult({}, "applied"), iteration: 1, sequence: 0, mutability: "workspace-write" });
+  const result = tracker.accept({ status: "complete", blockers: [], checks: [
+    { criterion: "测试通过", status: "passed", evidenceCallIds: ["missing"] },
+    { criterion: "未测试", status: "not-run", evidenceCallIds: ["edit"] },
+  ] });
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.deepEqual(result.issues.map((issue) => issue.path), [
+    "checks[0].evidence_call_ids[0]", "checks[1].evidence_call_ids", "status",
+  ]);
+  assert.match(result.issues[2].message, /最后写入之后/);
+  assert.equal(tracker.assessment().status, "unverified");
+});

@@ -40,7 +40,7 @@ test("解析配置路径和可选 Provider 名称", () => {
 
 test("拒绝缺失、未知、重复和冲突参数", () => {
   const invalidArguments = [
-    [],
+    ["--resume", "id", "--provider", "primary"],
     ["--unknown"],
     ["--config"],
     ["--provider", "primary", "--config", "config.yaml", "--provider", "other"],
@@ -54,4 +54,9 @@ test("拒绝缺失、未知、重复和冲突参数", () => {
   for (const argv of invalidArguments) {
     assert.throws(() => parseCliArguments(argv), ArgumentError);
   }
+});
+
+test("默认配置与恢复参数", () => {
+  assert.deepEqual(parseCliArguments([]), { type: "run", configPath: "orbitcode.yaml", providerName: undefined });
+  assert.equal(parseCliArguments(["--resume", "id"]).type, "run");
 });

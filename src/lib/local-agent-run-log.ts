@@ -16,7 +16,7 @@ export const DEFAULT_AGENT_RUN_LOG_DIRECTORY = path.join(
 
 export type AgentRunLogEntry = {
   readonly runId: string;
-  readonly source: "web";
+  readonly source: "web" | "cli";
   readonly conversationId: string;
   readonly revisionBefore: number;
   readonly persistence:
@@ -268,7 +268,7 @@ function parseStoredEntry(value: unknown): StoredAgentRunLogEntry {
       optionalCommon,
     ) ||
     typeof value.runId !== "string" ||
-    value.source !== "web" ||
+    (value.source !== "web" && value.source !== "cli") ||
     typeof value.conversationId !== "string" ||
     typeof value.providerId !== "string" ||
     typeof value.workspaceId !== "string" ||
