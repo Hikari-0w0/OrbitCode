@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type { ModelToolCall } from "@/models/provider";
 import type {
+  SchemaIssue,
   ToolExecutionResult,
   ToolMutability,
 } from "@/tools/types";
@@ -90,47 +91,51 @@ export class CompletionTracker {
 
   accept(report: CompletionReportInput):
     | { readonly ok: true; readonly assessment: CompletionAssessment }
-    | { readonly ok: false; readonly message: string } {
+    | { readonly ok: false; readonly message: string; readonly issues: readonly SchemaIssue[] } {
+    const issues: SchemaIssue[] = [];
     const unresolvedQualityGate = latestFailedQualityGate(this.#evidence.values());
     if (report.status === "complete" && unresolvedQualityGate !== undefined) {
-      return {
-        ok: false,
+      issues.push({
+        path: "status",
         message: `${unresolvedQualityGate} 质量检查最后一次执行仍失败，不能声明 complete；请修复后重跑，或如实报告 partial/blocked。`,
-      };
+      });
     }
-    for (const check of report.checks) {
+    for (const [index, check] of report.checks.entries()) {
+      const evidencePath = `checks[${index}].evidence_call_ids`;
       const records = check.evidenceCallIds.map((id) => this.#resolveEvidence(id));
-      if (records.some((record) => record === undefined)) {
-        return {
-          ok: false,
-          message: "完成报告引用了本轮不存在的证据；请复制工具结果中的 evidence_call_id。",
-        };
-      }
-      if (check.status === "passed") {
-        if (records.length === 0 || records.some((record) => !record?.ok)) {
-          return { ok: false, message: "通过项必须引用至少一个成功工具结果。" };
-        }
-        if (!records.some((record) => record !== undefined && isVerification(record))) {
-          return {
-            ok: false,
-            message: "通过项必须引用成功的只读或命令验证结果；写入成功不能替代验证。",
-          };
-        }
-        if (requiresBuildEvidence(check.criterion) && !records.some(isBuildEvidence)) {
-          return { ok: false, message: "构建证据必须来自成功的 build 命令。" };
-        }
-        if (requiresLintEvidence(check.criterion) && !records.some(isLintEvidence)) {
-          return { ok: false, message: "Lint 证据必须来自成功的 lint 命令。" };
-        }
-        if (
-          requiresHttpEvidence(check.criterion) &&
-          !records.some((record) => isHttpEvidence(record, check.criterion))
-        ) {
-          return { ok: false, message: "HTTP 证据必须来自对声明目标的成功请求。" };
+      for (const [evidenceIndex, record] of records.entries()) {
+        const id = check.evidenceCallIds[evidenceIndex];
+        if (record === undefined) {
+          issues.push({ path: `${evidencePath}[${evidenceIndex}]`,
+            message: `证据 ${id} 不属于本轮；请逐字复制本轮工具结果中的 evidence_call_id。` });
+        } else if (check.status === "passed" && !record.ok) {
+          issues.push({ path: `${evidencePath}[${evidenceIndex}]`,
+            message: `证据 ${id} 来自失败工具结果；passed 项的所有引用都必须成功。已修复的历史失败可在最终回复中说明，最终验收引用修复后的验证；若复现失败本身是验收要求，请用断言预期错误的验证脚本产生成功证据。不得省略仍失败的需求。` });
         }
       }
       if (check.status === "not-run" && records.length > 0) {
-        return { ok: false, message: "未运行项不能携带工具证据。" };
+        issues.push({ path: evidencePath, message: "未运行项不能携带工具证据；请根据实际执行情况修正状态或引用。" });
+      }
+      if (check.status !== "passed") continue;
+      if (records.length === 0) {
+        issues.push({ path: evidencePath, message: "通过项必须引用至少一个成功的只读或命令验证结果；请先执行匹配的验证。" });
+        continue;
+      }
+      // 引用本身无效时不推导语义错误，其他检查项仍独立校验。
+      if (records.some((record) => !record?.ok)) continue;
+      if (!records.some((record) => record !== undefined && isVerification(record))) {
+        issues.push({ path: evidencePath,
+          message: "通过项必须引用成功的只读或命令验证结果；写入成功不能替代验证。请补充读取或运行与该验收项匹配的检查，并引用其证据。" });
+        continue;
+      }
+      if (requiresBuildEvidence(check.criterion) && !records.some(isBuildEvidence)) {
+        issues.push({ path: evidencePath, message: "构建证据必须来自成功的 build 命令。" });
+      }
+      if (requiresLintEvidence(check.criterion) && !records.some(isLintEvidence)) {
+        issues.push({ path: evidencePath, message: "Lint 证据必须来自成功的 lint 命令。" });
+      }
+      if (requiresHttpEvidence(check.criterion) && !records.some((record) => isHttpEvidence(record, check.criterion))) {
+        issues.push({ path: evidencePath, message: "HTTP 证据必须来自对声明目标的成功请求。" });
       }
     }
 
@@ -147,6 +152,11 @@ export class CompletionTracker {
     const hasPostWriteVerification = lastWrite === undefined || passedEvidence.some(
       (record) => record.ok && isAfter(record, lastWrite) && isVerification(record),
     );
+    if (report.status === "complete" && !hasPostWriteVerification) {
+      issues.push({ path: "status",
+        message: "complete 必须引用最后写入之后的成功验证；请补充与目标匹配的验证，无法验证时如实报告 partial/blocked。" });
+    }
+    if (issues.length > 0) return rejectedReport(issues);
     const hasIncompleteChecks = report.checks.some(
       (check) => check.status !== "passed",
     );
@@ -163,10 +173,9 @@ export class CompletionTracker {
         ? "blocked"
         : "partial";
     if (report.status !== expectedClaim) {
-      return {
-        ok: false,
-        message: "完成报告的声明状态与检查结果或写入后验证不一致。",
-      };
+      return rejectedReport([{ path: "status",
+        message: `完成报告的声明状态与检查结果或写入后验证不一致；当前检查对应 ${expectedClaim}，请如实修正声明，不要删除未满足的需求。`,
+      }]);
     }
     this.#assessment = {
       status,
@@ -190,6 +199,18 @@ export class CompletionTracker {
     const evidenceId = this.#evidenceIdByCallId.get(id);
     return evidenceId === undefined ? undefined : this.#evidence.get(evidenceId);
   }
+}
+
+function rejectedReport(issues: readonly SchemaIssue[]): {
+  readonly ok: false;
+  readonly message: string;
+  readonly issues: readonly SchemaIssue[];
+} {
+  return {
+    ok: false,
+    message: issues.map((issue) => `${issue.path}: ${issue.message}`).join("\n"),
+    issues,
+  };
 }
 
 function createEvidenceRunId(factory: () => string): string {

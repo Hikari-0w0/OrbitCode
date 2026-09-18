@@ -1,3 +1,4 @@
+import type { ProviderSummary, WorkspaceSummary } from "@/runtime/types";
 import type {
   AgentEvent,
   AgentIterationLimit,
@@ -116,22 +117,13 @@ export type WebChatEvent =
       readonly persistence?: WebPersistenceState;
     });
 
-export type ProviderSummary = {
-  readonly name: string;
-  readonly model: string;
-  readonly available: boolean;
-};
+export type { ProviderSummary } from "@/runtime/types";
 
 export type ProviderCatalogResponse = {
   readonly providers: readonly ProviderSummary[];
 };
 
-export type WorkspaceSummary = {
-  readonly id: string;
-  readonly name: string;
-  readonly available: boolean;
-  readonly isDefault: boolean;
-};
+export type { WorkspaceSummary } from "@/runtime/types";
 
 export type WorkspaceCatalogResponse = {
   readonly workspaces: readonly WorkspaceSummary[];

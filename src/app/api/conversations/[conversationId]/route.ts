@@ -11,7 +11,7 @@ import {
   conversationOperationGuard,
   localConversationStore,
 } from "@/web/conversation-store";
-import type { GuardedConversationOperation } from "@/web/conversation-operation-guard";
+import { webConversationService } from "@/web/agent-runtime";
 import { assertSameOrigin, readPermissionJsonBody } from "@/web/request-security";
 import { loadWebProviderContext, summarizeProviders } from "@/web/server-config";
 import { loadWorkspaceCatalog } from "@/web/workspace-config";
@@ -57,49 +57,21 @@ export async function GET(
   }
 }
 
-export async function PATCH(
-  request: Request,
-  context: RouteContext,
-): Promise<Response> {
-  let operation: GuardedConversationOperation | undefined;
+export async function PATCH(request: Request, context: RouteContext): Promise<Response> {
   try {
     assertSameOrigin(request);
     const { conversationId } = await context.params;
     const body = parseConversationRenameRequest(await readPermissionJsonBody(request));
-    operation = await conversationOperationGuard.begin(conversationId, "rename");
-    const result = await localConversationStore.rename({ conversationId, ...body });
-    if (result.status === "conflict") {
-      return Response.json(
-        { error: "会话已在其他页面更新，请刷新后重试。", code: "conversation-conflict" },
-        { status: 409 },
-      );
-    }
-    return Response.json(
-      toConversationDetailResponse(result.checkpoint, { availability: "ready" }),
-      { headers: { "cache-control": "no-store" } },
-    );
-  } catch (error) {
-    return conversationApiErrorResponse(error);
-  } finally {
-    await operation?.finish().catch(() => undefined);
-  }
+    const result = await webConversationService.rename({ conversationId, ...body });
+    return Response.json(toConversationDetailResponse(result, { availability: "ready" }));
+  } catch (error) { return conversationApiErrorResponse(error); }
 }
-
-export async function DELETE(
-  request: Request,
-  context: RouteContext,
-): Promise<Response> {
-  let operation: GuardedConversationOperation | undefined;
+export async function DELETE(request: Request, context: RouteContext): Promise<Response> {
   try {
     assertSameOrigin(request);
     const { conversationId } = await context.params;
     const body = parseConversationMutationRequest(await readPermissionJsonBody(request));
-    operation = await conversationOperationGuard.begin(conversationId, "delete");
-    await localConversationStore.delete({ conversationId, ...body });
+    await webConversationService.delete({ conversationId, ...body });
     return new Response(null, { status: 204 });
-  } catch (error) {
-    return conversationApiErrorResponse(error);
-  } finally {
-    await operation?.finish().catch(() => undefined);
-  }
+  } catch (error) { return conversationApiErrorResponse(error); }
 }

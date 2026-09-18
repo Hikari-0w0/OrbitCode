@@ -1,6 +1,6 @@
 # Agent 运行评估工作流
 
-当前阶段：整理现有能力，未新增自动评估服务、日志字段或 Agent 功能。流程复用现有日志、检查点与 CLI 导出；Codex 按用户请求执行诊断，不自动修改代码。
+本流程复用 Web 与 CLI 共用的运行日志、检查点和导出，不提供自动评估服务。日志 `source` 区分 `web` 与 `cli`，既有 Web 记录继续可读；Codex 按用户请求执行诊断，不自动修改代码。
 
 已完成一次真实历史运行的取证演练、维护检查及验收归类，见 [2026-09-16 检查结果](maintenance-review-2026-09-16.md)。该记录包含已证实问题和未复现风险，不代表已实施修复。
 
@@ -35,7 +35,7 @@
 
 按用户指定 runId，或在指定 Workspace/会话内筛选已结束记录并按 finishedAt 排序。先只读取必要摘要字段；不用整份日志、配置或全部会话正文填充分析上下文。
 
-报告 runId、conversationId、Workspace、开始/结束时间、停止原因及所选范围。能唯一定位时直接继续；存在多个合理候选时展示候选，请用户选择。没有记录时报告缺失，不自动启动任务。只有运行结束才落盘的摘要不能证明不存在正在运行的任务，也不能排除进程崩溃导致的日志缺失。
+报告 runId、source、conversationId、Workspace、开始/结束时间、停止原因及所选范围。能唯一定位时直接继续；存在多个合理候选时展示候选，请用户选择。没有记录时报告缺失，不自动启动任务。只有运行结束才落盘的摘要不能证明不存在正在运行的任务，也不能排除进程崩溃导致的日志缺失。
 
 ### 2. 按需读取证据
 
@@ -45,6 +45,8 @@
 mkdir -p tmp/agent-evals
 npm run cli -- export-run <run-id> --output tmp/agent-evals/<run-id>.json --without-context
 ```
+
+完整会话也可通过 `npm run cli -- export-conversation <conversation-id> --output <path>` 导出，无需 Web 服务或有效模型配置。
 
 上述尖括号是待替换占位符。第一次省略卸载的上下文对象，仍会包含检查点和正文，不能把 `--without-context` 当成脱敏开关。
 

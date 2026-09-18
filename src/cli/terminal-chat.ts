@@ -1,116 +1,64 @@
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
+import type { SessionController } from "@/cli/session-controller";
 
-import type { ConversationSession, TurnEvent } from "@/core/conversation";
-
-type RegisterInterrupt = (listener: () => void) => () => void;
-
-type TerminalChatOptions = {
-  readonly session: ConversationSession;
+export async function runTerminalChat(options: {
+  readonly session: Pick<SessionController, "busy" | "exitRequested" | "handleLine" | "cancel" | "close"> & { exitCode?: number };
   readonly input: Readable;
   readonly output: Writable;
   readonly errorOutput: Writable;
   readonly terminal: boolean;
-  readonly registerInterrupt?: RegisterInterrupt;
-};
-
-export async function runTerminalChat({
-  session,
-  input,
-  output,
-  errorOutput,
-  terminal,
-  registerInterrupt = registerProcessInterrupt,
-}: TerminalChatOptions): Promise<void> {
+  readonly registerInterrupt?: (listener: () => void) => () => void;
+}): Promise<void> {
+  const { session, input, output, terminal } = options;
   const readline = createInterface({ input, output, terminal });
-  let activeController: AbortController | undefined;
-  let exiting = false;
-  const handleInterrupt = (): void => {
-    if (activeController) {
-      activeController.abort();
-      return;
-    }
-    exiting = true;
-    output.write("\n");
-    readline.close();
+  const running = new Set<Promise<void>>();
+  let serial = Promise.resolve();
+  let closed = false;
+  const prompt = () => { if (!closed && !session.exitRequested) output.write("你> "); };
+  const interrupt = () => {
+    if (session.busy) session.cancel();
+    else { session.close(); readline.close(); }
   };
-  const removeInterrupt = registerInterrupt(handleInterrupt);
-  // TTY 模式下 readline 会消费 Ctrl-C 并发出自身的 SIGINT 事件，
-  // 因此不能只监听 process，否则交互终端中的当前回复无法取消。
-  readline.on("SIGINT", handleInterrupt);
-
-  output.write("OrbitCode 已启动。输入 /exit 或按 Ctrl-D 退出。\n");
-  writePrompt(output);
-
+  const removeInterrupt = (options.registerInterrupt ?? ((listener) => {
+    const processInterrupt = () => {
+      if (!session.busy) session.exitCode = 130;
+      listener();
+    };
+    process.on("SIGINT", processInterrupt);
+    return () => process.off("SIGINT", processInterrupt);
+  }))(interrupt);
+  readline.on("SIGINT", interrupt);
+  output.write("OrbitCode 已启动。输入 /help 查看命令，/exit 或 Ctrl-D 退出。\n");
+  prompt();
   try {
-    for await (const line of readline) {
-      if (exiting) {
-        break;
-      }
-      const normalized = line.trim();
-      if (normalized === "/exit") {
-        output.write("再见。\n");
-        break;
-      }
-      if (normalized.length === 0) {
-        writePrompt(output);
-        continue;
-      }
-
-      activeController = new AbortController();
-      output.write("助手> ");
-      try {
-        for await (const event of session.streamTurn(
-          line,
-          activeController.signal,
-        )) {
-          writeTurnEvent(event, output, errorOutput);
-        }
-      } catch {
-        output.write("\n");
-        errorOutput.write("错误：对话轮次发生未知错误，请重试。\n");
-      } finally {
-        activeController = undefined;
-      }
-
-      if (!exiting) {
-        writePrompt(output);
-      }
-    }
+    await new Promise<void>((resolve) => {
+      readline.on("line", (line) => {
+        const execute = async () => {
+          if (session.exitRequested) return;
+          await session.handleLine(line);
+          if (session.exitRequested) readline.close();
+          else if (!session.busy) prompt();
+        };
+        if (terminal) {
+          const work = execute();
+          running.add(work);
+          void work.finally(() => running.delete(work));
+        } else serial = serial.then(execute);
+      });
+      readline.once("close", () => {
+        closed = true;
+        // 管线 EOF 不丢弃已读取的完整行；交互 EOF 必须中止等待中的审批。
+        if (terminal) session.cancel();
+        resolve();
+      });
+    });
+    await serial;
+    await Promise.allSettled(running);
   } finally {
-    activeController?.abort();
-    readline.off("SIGINT", handleInterrupt);
+    session.close();
+    readline.off("SIGINT", interrupt);
     removeInterrupt();
     readline.close();
   }
-}
-
-function writeTurnEvent(
-  event: TurnEvent,
-  output: Writable,
-  errorOutput: Writable,
-): void {
-  switch (event.type) {
-    case "text-delta":
-      output.write(event.text);
-      return;
-    case "completed":
-      output.write("\n");
-      return;
-    case "cancelled":
-      output.write("\n[当前回复已取消]\n");
-      return;
-    case "failed":
-      output.write("\n");
-      errorOutput.write(`错误：${event.error.message}\n`);
-  }
-}
-
-function writePrompt(output: Writable): void {
-  output.write("你> ");
-}
-
-function registerProcessInterrupt(listener: () => void): () => void {
-  process.on("SIGINT", listener);
-  return () => process.off("SIGINT", listener);
 }

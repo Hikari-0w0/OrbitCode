@@ -1,3 +1,4 @@
+import { executablePlanId } from "@/core/conversations/plan-execution";
 import type {
   VisibleMessage,
   VisibleMessagePart,
@@ -352,7 +353,7 @@ export function chatSessionReducer(
       ...next,
       history: [...state.history, action.userMessage, action.finalMessage],
       executablePlanMessageId:
-        action.mode === "plan" ? action.assistantId : undefined,
+        executablePlanId(action.mode, "final-response", action.assistantId),
       revision: action.event?.persistence?.status === "saved"
         ? action.event.persistence.revision
         : state.revision,

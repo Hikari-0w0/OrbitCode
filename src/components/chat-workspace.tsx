@@ -1,5 +1,7 @@
 "use client";
 
+import { PLAN_EXECUTION_PROMPT, matchesExecutablePlan } from "@/core/conversations/plan-execution";
+
 import { useEffect, useReducer, useRef, useState } from "react";
 
 import { ChatComposer } from "@/components/chat-composer";
@@ -41,7 +43,7 @@ import {
   type WorkspaceSummary,
 } from "@/web/chat-contract";
 
-const PLAN_EXECUTION_PROMPT = "请按照上述计划开始执行。";
+
 const PROGRESS_RENDER_INTERVAL_MS = 100;
 
 type CatalogState = "loading" | "ready" | "config-error";
@@ -626,7 +628,7 @@ export function ChatWorkspace() {
       snapshot.requestState !== "idle" ||
       activeRequestRef.current ||
       (requiredPlanMessageId !== undefined &&
-        snapshot.executablePlanMessageId !== requiredPlanMessageId)
+        !matchesExecutablePlan(snapshot.executablePlanMessageId, requiredPlanMessageId))
     ) return;
 
     const userMessage: PlainConversationMessage = { role: "user", content: input };

@@ -1,5 +1,6 @@
 export type CliArguments =
   | { readonly type: "help" }
+  | { readonly type: "export-conversation"; readonly conversationId: string; readonly outputPath?: string }
   | {
       readonly type: "export-run";
       readonly runId: string;
@@ -10,6 +11,8 @@ export type CliArguments =
       readonly type: "run";
       readonly configPath: string;
       readonly providerName?: string;
+      readonly workspaceId?: string;
+      readonly resumeId?: string;
     };
 
 export class ArgumentError extends Error {
@@ -22,11 +25,14 @@ export class ArgumentError extends Error {
 export const HELP_TEXT = `OrbitCode CLI
 
 用法：
-  npm run cli -- --config <path> [--provider <name>]
+  npm run cli -- [--config <path>] [--provider <name>] [--workspace <id>] [--resume <id>]
+  npm run cli -- export-conversation <id> [--output <path>]
   npm run cli -- export-run <run-id> [--output <path>] [--without-context]
 
 选项：
-  --config <path>     YAML 模型配置文件
+  --config <path>     YAML 模型配置文件（默认 orbitcode.yaml）
+  --workspace <id>    授权 Workspace ID
+  --resume <id>       继续已保存会话（不覆盖原绑定）
   --provider <name>   多配置时选择配置名称
   --output <path>     导出 JSON 路径；默认写入当前目录
   --without-context   不包含卸载的完整工具上下文
@@ -34,13 +40,30 @@ export const HELP_TEXT = `OrbitCode CLI
 `;
 
 export function parseCliArguments(argv: readonly string[]): CliArguments {
+  if (argv[0] === "export-conversation") {
+    const parsed = parseExportRunArguments(argv.slice(1));
+    if (parsed.type !== "export-run" || !parsed.includeContext) throw new ArgumentError("会话导出不支持 --without-context。");
+    return { type: "export-conversation", conversationId: parsed.runId, ...(parsed.outputPath ? { outputPath: parsed.outputPath } : {}) };
+  }
   if (argv[0] === "export-run") return parseExportRunArguments(argv.slice(1));
   let configPath: string | undefined;
   let providerName: string | undefined;
   let help = false;
+  let workspaceId: string | undefined;
+  let resumeId: string | undefined;
 
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
+    if (argument === "--workspace" || argument === "--resume") {
+      if (argument === "--workspace") {
+        if (workspaceId !== undefined) throw new ArgumentError("--workspace 不能重复。");
+        workspaceId = requireValue(argv, ++index, argument);
+      } else {
+        if (resumeId !== undefined) throw new ArgumentError("--resume 不能重复。");
+        resumeId = requireValue(argv, ++index, argument);
+      }
+      continue;
+    }
     if (argument === "--help") {
       if (help) {
         throw new ArgumentError("--help 不能重复指定。");
@@ -66,15 +89,14 @@ export function parseCliArguments(argv: readonly string[]): CliArguments {
   }
 
   if (help) {
-    if (configPath !== undefined || providerName !== undefined) {
+    if (configPath !== undefined || providerName !== undefined || workspaceId !== undefined || resumeId !== undefined) {
       throw new ArgumentError("--help 不能与其他参数同时使用。");
     }
     return { type: "help" };
   }
-  if (configPath === undefined) {
-    throw new ArgumentError("缺少必填参数 --config。");
-  }
-  return { type: "run", configPath, providerName };
+  if (resumeId && (providerName || workspaceId)) throw new ArgumentError("--resume 不能覆盖 Provider 或 Workspace。");
+  return { type: "run", configPath: configPath ?? "orbitcode.yaml", providerName,
+    ...(workspaceId ? { workspaceId } : {}), ...(resumeId ? { resumeId } : {}) };
 }
 
 function parseExportRunArguments(argv: readonly string[]): CliArguments {

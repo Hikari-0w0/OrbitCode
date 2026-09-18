@@ -141,7 +141,8 @@ test("自动重量压缩使用无工具摘要并在同一 Agent 轮继续", asyn
     const context = new ContextManager({
       sessionId: "heavy-session",
       config: policy({
-        windowTokens: 8_000,
+        // 压缩前由旧历史触发阈值，压缩后为固定提示的正常增长保留余量。
+        windowTokens: 10_000,
         recentMessagesTokens: 100,
         automaticReserveTokens: 1_000,
         manualReserveTokens: 300,
@@ -150,7 +151,7 @@ test("自动重量压缩使用无工具摘要并在同一 Agent 轮继续", asyn
       provider,
       initialHistory: Array.from({ length: 14 }, (_, index) => index % 2 === 0
         ? { role: "user" as const, content: `用户原文-${index}` }
-        : { role: "assistant" as const, content: `旧助手-${index}-${"x".repeat(700)}` }),
+        : { role: "assistant" as const, content: `旧助手-${index}-${"x".repeat(2_000)}` }),
     });
     const workspace = await createWorkspaceBoundary(workspaceDirectory);
     const registry = new ToolRegistry([readFileTool]);
