@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import type { McpInitializationRecord } from "@/core/mcp-events";
 import { PermissionRequestCard } from "@/components/permission-request-card";
 import type { PermissionUserDecision } from "@/core/permissions/approval";
 import type { CompletionAssessment } from "@/core/completion-tracker";
@@ -63,6 +64,8 @@ export type VisibleMessagePart =
     };
 
 export type VisibleMessage = {
+  readonly initialization?: readonly McpInitializationRecord[];
+  readonly runtimePermissions?: readonly VisiblePermissionRequest[];
   readonly id: string;
   readonly role: "user" | "assistant";
   readonly content: string;
@@ -157,6 +160,12 @@ export function MessageList({
                     <span>{message.role === "assistant" ? "OrbitCode" : "你"}</span>
                     <MessageState state={message.state} />
                   </div>
+                  {message.runtimePermissions?.map((request) => (
+                    <PermissionRequestCard key={request.prompt.requestId} request={request} onDecision={onPermissionDecision} />
+                  ))}
+                  {message.initialization?.map((record) => (
+                    <p className="usageLine" key={record.serverName}>MCP {record.serverName}：{record.detail}</p>
+                  ))}
                   {message.parts && message.parts.length > 0 ? (
                     <MessageTimeline
                       message={message}
@@ -199,9 +208,9 @@ export function MessageList({
                   {message.verification && (
                     <>
                       <p className={`verificationState verificationState--${message.verification.status}`}>
-                        验证状态：{verificationLabel(message.verification.status)}
+                        {message.verification.status === "observed" ? "运行证据" : "验证状态"}：{verificationLabel(message.verification.status)}
                       </p>
-                      <p className="usageLine">仅覆盖所列检查，不代表全部需求已验收。</p>
+                      <p className="usageLine">{message.verification.status === "observed" ? "仅记录外部工具调用结果，答复内容未验收。" : "仅覆盖所列检查，不代表全部需求已验收。"}</p>
                       {message.verification.checks.length > 0 && (
                         <details>
                           <summary>查看检查范围</summary>
@@ -520,6 +529,7 @@ function stopReasonLabel(reason: StoppedEvent["reason"]): string {
 
 function verificationLabel(status: CompletionAssessment["status"]): string {
   if (status === "verified") return "所列检查通过";
+  if (status === "observed") return "外部调用结果已记录";
   if (status === "partial") return "部分验证";
   if (status === "blocked") return "存在阻塞";
   return "未验证";

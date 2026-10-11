@@ -1,3 +1,4 @@
+import type { RuntimeInitializationEvent } from "@/core/mcp-events";
 import { executablePlanId } from "@/core/conversations/plan-execution";
 import type {
   VisibleMessage,
@@ -37,6 +38,7 @@ export type ChatSessionState = {
 };
 
 export type ChatSessionAction =
+  | { readonly type: "initialization"; readonly assistantId: string; readonly event: RuntimeInitializationEvent }
   | {
       readonly type: "catalogs-ready";
       readonly workspaceId: string;
@@ -285,6 +287,18 @@ export function chatSessionReducer(
       ),
     }));
   }
+  if (action.type === "initialization") {
+    const event = action.event;
+    return updateMessage(state, action.assistantId, (message) => {
+      if (event.type === "mcp-status") {
+        const { type: _type, ...record } = event;
+        void _type;
+        return { ...message, initialization: [...(message.initialization ?? []).filter((item) => item.serverName !== record.serverName), record] };
+      }
+      if (event.type === "runtime-permission-requested") return { ...message, runtimePermissions: [...(message.runtimePermissions ?? []), { prompt: event.prompt, state: "awaiting" }] };
+      return { ...message, runtimePermissions: message.runtimePermissions?.map((item) => item.prompt.requestId === event.requestId ? { ...item, state: event.status, scope: event.scope, error: undefined } : item) };
+    });
+  }
   if (action.type === "permission-requested") {
     return updateMessage(state, action.assistantId, (message) => ({
       ...message,
@@ -375,6 +389,7 @@ export function chatSessionReducer(
       durationMs: action.event.durationMs,
       verification: action.event.verification,
       progress: undefined,
+      runtimePermissions: message.runtimePermissions?.map((item) => ["awaiting", "submitting", "submitted"].includes(item.state) ? { ...item, state: "cancelled" } : item),
       toolExecutions: settleInterruptedTools(message.toolExecutions ?? []),
     }));
     return {
@@ -397,6 +412,7 @@ export function chatSessionReducer(
       state: action.cancelled ? "cancelled" : "failed",
       detail: action.detail,
       progress: undefined,
+      runtimePermissions: message.runtimePermissions?.map((item) => ["awaiting", "submitting", "submitted"].includes(item.state) ? { ...item, state: "cancelled" } : item),
       toolExecutions: settleInterruptedTools(message.toolExecutions ?? []),
     }));
     return {
@@ -575,8 +591,9 @@ function updatePermissionRequest(
     ...state,
     messages: state.messages.map((message) => ({
       ...message,
+      runtimePermissions: message.runtimePermissions?.map((item) => item.prompt.requestId === requestId && isPendingPermission(item) ? { ...item, ...update } : item),
       toolExecutions: message.toolExecutions?.map((execution) =>
-        execution.permission?.prompt.requestId === requestId
+        execution.permission?.prompt.requestId === requestId && isPendingPermission(execution.permission)
           ? {
               ...execution,
               permission: { ...execution.permission, ...update },
@@ -585,6 +602,11 @@ function updatePermissionRequest(
       ),
     })),
   };
+}
+
+function isPendingPermission(request: VisiblePermissionRequest): boolean {
+  // SSE 终态可能先于审批 HTTP 响应到达，迟到的提交状态不得覆盖终态。
+  return ["awaiting", "submitting", "submitted"].includes(request.state);
 }
 
 function settleInterruptedTools(

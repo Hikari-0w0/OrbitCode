@@ -1,3 +1,4 @@
+import { webMcpHost } from "@/runtime/mcp-host";
 import { AgentRuntime } from "@/runtime/agent-runtime";
 import { ConversationService } from "@/runtime/conversation-service";
 import { MacOsSeatbeltCommandSandbox } from "@/tools/macos-seatbelt-sandbox";
@@ -8,6 +9,7 @@ import { loadWebProviderContext } from "@/web/server-config";
 import { loadWorkspaceCatalog } from "@/web/workspace-config";
 
 export const webAgentRuntime = new AgentRuntime({
+  mcpConnections: webMcpHost(),
   store: localConversationStore, manager: conversationRuntimeManager,
   guard: conversationOperationGuard, permissions: permissionSessionManager,
   sandbox: new MacOsSeatbeltCommandSandbox(), log: localAgentRunLog,

@@ -10,7 +10,7 @@ import {
   createReadContextTool,
   type ContextContentReader,
 } from "@/tools/read-context";
-import { ToolRegistry } from "@/tools/registry";
+import { ToolRegistry, type RegisteredTool } from "@/tools/registry";
 import { createRunCommandTool } from "@/tools/run-command";
 import { searchCodeTool } from "@/tools/search-code";
 import { writeFileTool } from "@/tools/write-file";
@@ -21,6 +21,7 @@ export function createDefaultToolRegistry(
   contextReader?: ContextContentReader,
   processController?: ManagedProcessController,
   completionTracker?: CompletionTracker,
+  externalTools: readonly RegisteredTool[] = [],
 ): ToolRegistry {
   return new ToolRegistry([
     readFileTool,
@@ -33,5 +34,6 @@ export function createDefaultToolRegistry(
     findFilesTool,
     searchCodeTool,
     ...(contextReader ? [createReadContextTool(contextReader)] : []),
+    ...externalTools,
   ]);
 }

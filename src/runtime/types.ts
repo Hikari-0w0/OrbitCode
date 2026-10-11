@@ -1,3 +1,4 @@
+import type { RuntimeInitializationEvent } from "@/core/mcp-events";
 import type { AgentEvent } from "@/core/agent-events";
 
 export type ProviderSummary = {
@@ -17,6 +18,7 @@ export type PersistenceState =
   | { readonly status: "saved"; readonly revision: number }
   | { readonly status: "failed"; readonly detail: string };
 export type RuntimeTurnEvent =
+  | { readonly type: "initialization"; readonly event: RuntimeInitializationEvent }
   | { readonly type: "agent"; readonly event: Exclude<AgentEvent, { type: "stopped" }> }
   | { readonly type: "warning"; readonly kind: "run-log" | "cleanup"; readonly detail: string }
   | { readonly type: "finished"; readonly stopped: Extract<AgentEvent, { type: "stopped" }>; readonly persistence: PersistenceState };

@@ -161,7 +161,7 @@ export class SessionController {
         this.options.renderer.event(item);
         if (item.type === "agent" && item.event.type === "tool-result")
           this.latestResults.set(item.event.callId, JSON.stringify(item.event.result, null, 2));
-        if (item.type === "agent" && item.event.type === "permission-requested" && !this.options.terminal) {
+        if (((item.type === "agent" && item.event.type === "permission-requested") || (item.type === "initialization" && item.event.type === "runtime-permission-requested")) && !this.options.terminal) {
           this.options.renderer.notice("非交互输入无法审批，本次拒绝。");
           this.options.permissions.resolveDecision(this.permissionId, item.event.prompt.requestId, "deny");
         }

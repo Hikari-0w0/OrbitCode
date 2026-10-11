@@ -2,7 +2,7 @@ import type {
   PermissionPromptSummary,
 } from "@/core/permissions/approval";
 import type { PermissionSubject } from "@/core/permissions/types";
-import type { PreparedToolCall } from "@/tools/registry";
+import type { PreparedToolCall, PermissionOperation } from "@/tools/registry";
 import {
   toolFailure,
   type ToolExecutionResult,
@@ -17,10 +17,13 @@ const SENSITIVE_FLAG = /(--?(?:api[-_]?key|token|secret|password|passwd|authoriz
 const BEARER_TOKEN = /\bBearer\s+[^\s]+/giu;
 
 export async function resolvePermissionSubject(
-  call: PreparedToolCall,
+  call: PermissionOperation,
   workspace: WorkspaceBoundary,
 ): Promise<PermissionSubject> {
   const target = call.permissionTarget;
+  if (target.kind === "mcp") {
+    return { kind: "mcp", toolName: call.name, toolKind: "external", operation: target.operation, serverName: target.serverName, configurationId: target.configurationId, toolIdentity: target.toolIdentity };
+  }
   if (target.kind === "command") {
     const cwd = await workspace.resolveExistingDirectory(target.cwd);
     const command = target.command.trim();
@@ -53,6 +56,7 @@ export function summarizePermissionSubject(
   subject: PermissionSubject,
   target?: ToolPermissionTarget,
 ): PermissionPromptSummary {
+  if (subject.kind === "mcp") return target?.kind === "mcp" ? target.summary : { serverName: subject.serverName, operation: subject.operation };
   if (subject.kind === "path") {
     const summary: PermissionPromptSummary = {
       operation: subject.toolKind === "read" ? "读取" : "写入",

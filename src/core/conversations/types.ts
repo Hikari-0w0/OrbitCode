@@ -1,3 +1,4 @@
+import type { McpInitializationRecord } from "@/core/mcp-events";
 import type {
   AgentMode,
   AgentStopReason,
@@ -44,6 +45,7 @@ export type PersistedToolExecution = {
 };
 
 export type PersistedDisplayMessage = {
+  readonly initialization?: readonly McpInitializationRecord[];
   readonly id: string;
   readonly role: "user" | "assistant";
   readonly content: string;

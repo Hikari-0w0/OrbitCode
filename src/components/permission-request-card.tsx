@@ -101,6 +101,12 @@ function riskLabel(level: VisiblePermissionRequest["prompt"]["risk"]["level"]): 
 }
 
 function summaryLabel(key: string): string {
+  if (key === "serverName") return "Server";
+  if (key === "toolName") return "外部工具";
+  if (key === "transport") return "传输方式";
+  if (key === "target") return "连接目标";
+  if (key === "arguments") return "调用参数";
+  if (key === "boundary") return "权限边界";
   if (key === "operation") return "操作";
   if (key === "path") return "路径";
   if (key === "command") return "命令";

@@ -1,3 +1,4 @@
+import { isMcpInitializationRecord, type RuntimeInitializationEvent } from "@/core/mcp-events";
 import type { ProviderSummary, WorkspaceSummary } from "@/runtime/types";
 import type {
   AgentEvent,
@@ -112,6 +113,7 @@ export type WebPersistenceState =
   | { readonly status: "failed"; readonly detail: string };
 
 export type WebChatEvent =
+  | RuntimeInitializationEvent
   | Exclude<AgentEvent, { type: "stopped" }>
   | (Extract<AgentEvent, { type: "stopped" }> & {
       readonly persistence?: WebPersistenceState;
@@ -440,7 +442,7 @@ export function parsePermissionDecisionResponse(
 
 export function encodeWebChatEvent(event: WebChatEvent): Uint8Array {
   const data = `data: ${JSON.stringify(event)}\n\n`;
-  if (event.type !== "permission-requested") {
+  if (event.type !== "permission-requested" && event.type !== "runtime-permission-requested") {
     return new TextEncoder().encode(data);
   }
   // 授权事件后服务端会立即停下等待人工决定，用 SSE 注释撑过常见的小分块缓冲阈值。
@@ -591,6 +593,7 @@ function parseWebChatEvent(value: unknown): WebChatEvent {
   if (!isRecord(value) || typeof value.type !== "string") {
     throw invalidEvent();
   }
+  if (["mcp-status", "runtime-permission-requested", "runtime-permission-resolved"].includes(value.type)) return parseInitializationEvent(value);
   if (value.type === "progress") return parseProgressEvent(value);
   if (value.type === "text-delta") return parseTextEvent(value);
   if (value.type === "tool-call") return parseToolCallEvent(value);
@@ -600,6 +603,26 @@ function parseWebChatEvent(value: unknown): WebChatEvent {
   if (value.type === "tool-result") return parseToolResultEvent(value);
   if (value.type === "token-usage") return parseTokenUsageEvent(value);
   if (value.type === "stopped") return parseStoppedEvent(value);
+  throw invalidEvent();
+}
+
+function parseInitializationEvent(value: Record<string, unknown>): RuntimeInitializationEvent {
+  if (typeof value.serverName !== "string" || value.serverName.length > 128) throw invalidEvent();
+  if (value.type === "mcp-status") {
+    const { type: _type, ...record } = value;
+    void _type;
+    if (!isMcpInitializationRecord(record)) throw invalidEvent();
+    return { type: "mcp-status", ...record };
+  }
+  if (value.type === "runtime-permission-requested" && hasExactFields(value, ["type", "serverName", "prompt"])) {
+    return { type: "runtime-permission-requested", serverName: value.serverName, prompt: parsePermissionPrompt(value.prompt) };
+  }
+  if (value.type === "runtime-permission-resolved" && hasExactFields(value, ["type", "serverName", "requestId", "status", ...(value.scope === undefined ? [] : ["scope"])]) &&
+      isSafePermissionId(value.requestId, MAX_PERMISSION_REQUEST_ID_LENGTH) &&
+      (value.scope === undefined || value.scope === "once" || value.scope === "session" || value.scope === "permanent") &&
+      (value.status === "allowed" || value.status === "denied" || value.status === "expired" || value.status === "cancelled" || value.status === "invalid")) {
+    return { type: "runtime-permission-resolved", serverName: value.serverName, requestId: value.requestId, status: value.status, ...(value.scope === undefined ? {} : { scope: value.scope }) };
+  }
   throw invalidEvent();
 }
 
@@ -1271,6 +1294,9 @@ function isSideEffectState(value: unknown): value is SideEffectState {
 }
 
 const TOOL_ERROR_KINDS = new Set<ToolErrorKind>([
+  "mcp-transport",
+  "mcp-protocol",
+  "mcp-tool-error",
   "invalid-arguments",
   "unknown-tool",
   "not-found",

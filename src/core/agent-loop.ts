@@ -31,6 +31,7 @@ import type {
   PromptEnvironment,
 } from "@/core/system-prompt/types";
 import type { ToolAccess } from "@/tools/mode-policy";
+import { mcpResultForModel } from "@/tools/mcp-result";
 import type { PermissionGateway } from "@/tools/permission-gateway";
 import {
   toolFailure,
@@ -119,11 +120,14 @@ export class AgentLoop implements AgentSession {
       throw new ConversationStateError("Agent 模式无效。");
     }
 
-    const systemMessages = buildSystemPromptMessages({
+    const baseSystemMessages = buildSystemPromptMessages({
       environment: this.promptEnvironment,
       optional: this.optionalPromptContext,
       session: { mode: options.mode, modeTurn: options.modeTurn },
     });
+    const systemMessages = /\p{Script=Han}/u.test(options.input)
+      ? [...baseSystemMessages, { role: "system" as const, content: "本轮用户使用中文。所有面向用户的过程说明和最终回复都使用中文；工具调用前如需说明动作，也先用中文，不要以英文开场。工具名、代码和原始返回保持原样。" }]
+      : baseSystemMessages;
     const startedAt = this.now();
     const durationMs = (): number =>
       Math.max(0, Math.round(this.now() - startedAt));
@@ -141,11 +145,7 @@ export class AgentLoop implements AgentSession {
       userMessage,
     ];
     const access = this.toolAccessForMode(options.mode);
-    const toolDefinitions = access.definitions();
-    const promptEnvelope = {
-      systemMessages,
-      tools: toolDefinitions,
-    } as const;
+    const availableTools = access.definitions();
     const permissionGateway = this.permissionGatewayForMode?.(options.mode);
     let completedIterations = 0;
     let consecutiveUnknownIterations = 0;
@@ -154,6 +154,7 @@ export class AgentLoop implements AgentSession {
     let cumulativeUsage: TokenUsage | undefined;
     let contextTurnActive = false;
     let partialAssistantContent = "";
+    let hasLocalToolResult = false;
     let interruption:
       | {
           readonly reason: Exclude<AgentStopReason, "final-response">;
@@ -198,6 +199,10 @@ export class AgentLoop implements AgentSession {
           phase: "model",
         };
 
+        const toolDefinitions = hasLocalToolResult
+          ? availableTools
+          : availableTools.filter((tool) => tool.function.name !== "report_completion");
+        const promptEnvelope = { systemMessages, tools: toolDefinitions } as const;
         const modelMessages = this.contextManager
           ? (await this.contextManager.prepareForModel(
               promptEnvelope,
@@ -400,6 +405,7 @@ export class AgentLoop implements AgentSession {
             };
           } else if (event.type === "result") {
             const decision = access.classify(event.call.name);
+            if (event.call.name !== "report_completion" && event.call.name !== "read_context" && decision.kind === "allowed" && decision.mutability !== "external") hasLocalToolResult = true;
             this.completionTracker.record({
               call: event.call,
               result: event.result,
@@ -500,6 +506,7 @@ export class AgentLoop implements AgentSession {
                 item.result,
                 budgetGuidance.get(item.call.id),
                 this.completionTracker.evidenceId(item.call.id),
+                item.call.name,
               ),
             });
           }
@@ -787,7 +794,7 @@ function toContextToolResult(
 } {
   return {
     toolCallId: item.call.id,
-    content: serializeToolResult(item.result, guidance, evidenceId),
+    content: serializeToolResult(item.result, guidance, evidenceId, item.call.name),
   };
 }
 
@@ -795,9 +802,11 @@ function serializeToolResult(
   result: ToolCallResult["result"],
   guidance?: string,
   evidenceId?: string,
+  toolName?: string,
 ): string {
+  const modelResult = toolName?.startsWith("mcp__") ? mcpResultForModel(result) : result;
   return JSON.stringify({
-    ...result,
+    ...modelResult,
     ...(evidenceId === undefined ? {} : { evidence_call_id: evidenceId }),
     ...(guidance === undefined
       ? {}

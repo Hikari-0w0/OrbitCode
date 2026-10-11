@@ -232,3 +232,18 @@ test("验证标签只说明所列检查通过，不宣称全部需求完成", ()
   assert.match(markup, /构建成功/u);
   assert.match(markup, /结束后自动回收/u);
 });
+
+test("外部调用结果只显示运行证据，不显示任务已验证", () => {
+  const markup = renderToStaticMarkup(<MessageList
+    messages={[{ id: "external", role: "assistant", content: "查到两项", state: "complete",
+      verification: { status: "observed", checks: [{ scope: "external-call", criterion: "外部工具调用结果：search", status: "passed", evidenceCallIds: ["external-1"] }], blockers: [] },
+    }]}
+    planActionDisabled={false}
+    onExecutePlan={() => undefined}
+    onSuggestion={() => undefined}
+    onPermissionDecision={() => undefined}
+  />);
+  assert.match(markup, /运行证据：外部调用结果已记录/u);
+  assert.match(markup, /答复内容未验收/u);
+  assert.doesNotMatch(markup, /验证状态：所列检查通过/u);
+});

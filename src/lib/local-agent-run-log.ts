@@ -1,3 +1,4 @@
+import { isMcpInitializationRecord, type McpInitializationRecord } from "@/core/mcp-events";
 import { createReadStream } from "node:fs";
 import { appendFile, chmod, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -15,6 +16,7 @@ export const DEFAULT_AGENT_RUN_LOG_DIRECTORY = path.join(
 );
 
 export type AgentRunLogEntry = {
+  readonly initialization?: readonly McpInitializationRecord[];
   readonly runId: string;
   readonly source: "web" | "cli";
   readonly conversationId: string;
@@ -46,6 +48,7 @@ export type AgentRunLogEntry = {
     | { readonly availability: "unavailable" };
   readonly modelAttempts?: readonly AgentModelAttemptLog[];
   readonly tools: readonly {
+    readonly mcp?: { readonly serverName: string; readonly toolName: string };
     readonly name: string;
     readonly status:
       | "succeeded"
@@ -83,7 +86,7 @@ export interface AgentRunLogSink {
 }
 
 export type StoredAgentRunLogEntry = AgentRunLogEntry & {
-  readonly schemaVersion: 3 | 4;
+  readonly schemaVersion: 3 | 4 | 5;
 };
 
 export class AgentRunLogError extends Error {
@@ -168,7 +171,7 @@ export class LocalAgentRunLog implements AgentRunLogSink {
         }
         if (
           !isRecord(value) ||
-          (value.schemaVersion !== 3 && value.schemaVersion !== 4)
+          (value.schemaVersion !== 3 && value.schemaVersion !== 4 && value.schemaVersion !== 5)
         ) continue;
         yield parseStoredEntry(value);
       }
@@ -186,7 +189,8 @@ export class LocalAgentRunLog implements AgentRunLogSink {
 
 function toStoredEntry(entry: AgentRunLogEntry): StoredAgentRunLogEntry {
   return {
-    schemaVersion: 4,
+    schemaVersion: entry.initialization?.length ? 5 : 4,
+    ...(entry.initialization?.length ? { initialization: entry.initialization } : {}),
     runId: entry.runId,
     source: entry.source,
     conversationId: entry.conversationId,
@@ -230,6 +234,7 @@ function toStoredEntry(entry: AgentRunLogEntry): StoredAgentRunLogEntry {
     })),
     tools: entry.tools.map((tool) => ({
       name: tool.name,
+      ...(tool.mcp ? { mcp: { ...tool.mcp } } : {}),
       status: tool.status,
       ...(tool.durationMs === undefined ? {} : { durationMs: tool.durationMs }),
       ...(tool.errorKind === undefined ? {} : { errorKind: tool.errorKind }),
@@ -243,7 +248,7 @@ function toStoredEntry(entry: AgentRunLogEntry): StoredAgentRunLogEntry {
 function parseStoredEntry(value: unknown): StoredAgentRunLogEntry {
   if (
     !isRecord(value) ||
-    (value.schemaVersion !== 3 && value.schemaVersion !== 4)
+    (value.schemaVersion !== 3 && value.schemaVersion !== 4 && value.schemaVersion !== 5)
   ) {
     throw invalidRunLog();
   }
@@ -254,6 +259,7 @@ function parseStoredEntry(value: unknown): StoredAgentRunLogEntry {
   ];
   const optionalCommon = [
     "firstModelOutputMs",
+    ...(value.schemaVersion === 5 ? ["initialization"] : []),
     ...(value.schemaVersion === 3 ? ["modelAttempts"] : []),
   ];
   const versionFields = ["conversationId", "revisionBefore", "persistence"];
@@ -263,7 +269,7 @@ function parseStoredEntry(value: unknown): StoredAgentRunLogEntry {
       [
         ...requiredCommon,
         ...versionFields,
-        ...(value.schemaVersion === 4 ? ["modelAttempts"] : []),
+        ...(value.schemaVersion !== 3 ? ["modelAttempts"] : []),
       ],
       optionalCommon,
     ) ||
@@ -289,6 +295,7 @@ function parseStoredEntry(value: unknown): StoredAgentRunLogEntry {
     (value.modelAttempts !== undefined &&
       (!Array.isArray(value.modelAttempts) ||
         !value.modelAttempts.every(isModelAttemptLog))) ||
+    (value.initialization !== undefined && (!Array.isArray(value.initialization) || value.initialization.length > 128 || !value.initialization.every(isMcpInitializationRecord))) ||
     !Array.isArray(value.tools) ||
     !value.tools.every(isToolLog)
   ) throw invalidRunLog();
@@ -338,9 +345,12 @@ function isToolLog(value: unknown): boolean {
     hasAllowedFields(
       value,
       ["name", "status"],
-      ["durationMs", "errorKind", "authorization"],
+      ["durationMs", "errorKind", "authorization", "mcp"],
     ) &&
     typeof value.name === "string" &&
+    (value.mcp === undefined || (isRecord(value.mcp) && hasAllowedFields(value.mcp, ["serverName", "toolName"], []) &&
+      typeof value.mcp.serverName === "string" && value.mcp.serverName.length <= 64 &&
+      typeof value.mcp.toolName === "string" && value.mcp.toolName.length <= 1024)) &&
     ["succeeded", "failed", "timed-out", "cancelled", "unfinished"].includes(String(value.status)) &&
     (value.durationMs === undefined || isNonNegativeInteger(value.durationMs)) &&
     (value.errorKind === undefined || typeof value.errorKind === "string") &&

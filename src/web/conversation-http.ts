@@ -1,3 +1,4 @@
+import { WorkspaceCatalogError } from "@/runtime/workspace-config";
 import { ConversationRepositoryError } from "@/core/conversations/types";
 import type { ConversationCheckpoint } from "@/core/conversations/types";
 import { ConversationRuntimeError } from "@/web/conversation-runtime-manager";
@@ -22,6 +23,16 @@ export function conversationApiErrorResponse(error: unknown): Response {
     response = {
       error: error.message,
       code: error.kind === "forbidden-origin" ? "forbidden" : "invalid-request",
+    };
+  } else if (error instanceof WorkspaceCatalogError) {
+    status = error.kind === "unknown-workspace" ? 400 : 503;
+    response = {
+      error: error.message,
+      code: error.kind === "unknown-workspace"
+        ? "workspace-unknown"
+        : error.kind === "workspace-unavailable"
+          ? "workspace-unavailable"
+          : "workspace-config",
     };
   } else if (error instanceof ConversationRuntimeError) {
     status = 409;
