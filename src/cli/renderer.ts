@@ -26,11 +26,23 @@ export class TerminalRenderer {
       this.notice(`停止：${item.stopped.reason}；${item.stopped.iterations} 轮；${item.stopped.durationMs} ms；副作用：${item.stopped.sideEffect}`);
       if (item.stopped.detail) this.notice(item.stopped.detail);
       if (item.stopped.verification) {
-        this.notice("完成验证（仅覆盖所列检查）：");
+        this.notice(item.stopped.verification.status === "observed"
+          ? "外部调用结果（答复内容未验收）："
+          : "完成验证（仅覆盖所列检查）：");
         this.content(JSON.stringify(item.stopped.verification, null, 2));
       }
       if (item.persistence.status === "saved") this.notice(`已保存 revision ${item.persistence.revision}`);
       else this.error(item.persistence.detail);
+      return;
+    }
+    if (item.type === "initialization") {
+      const event = item.event;
+      if (event.type === "mcp-status") this.notice(`MCP ${event.serverName}：${event.detail}`);
+      else if (event.type === "runtime-permission-requested") {
+        this.notice(`需要授权连接 MCP ${event.serverName}`);
+        this.content(JSON.stringify(event.prompt.summary, null, 2));
+        this.notice(`/approve ${event.prompt.requestId} <once|session|permanent|deny>（${event.prompt.expiresAt} 到期）`);
+      } else this.notice(`MCP 授权 ${event.requestId}：${event.status}`);
       return;
     }
     const event = item.event;

@@ -7,6 +7,7 @@ import { evaluatePermission } from "@/core/permissions/evaluator";
 import { formatExactPermissionExpression } from "@/core/permissions/rules";
 import {
   permissionTargetValue,
+  permissionRuleName,
   type PermissionMode,
   type PermissionRule,
   type PermissionSubject,
@@ -17,7 +18,7 @@ import {
   resolvePermissionSubject,
   summarizePermissionSubject,
 } from "@/tools/permission-target";
-import type { PreparedToolCall } from "@/tools/registry";
+import type { PermissionOperation } from "@/tools/registry";
 import {
   toolFailure,
   type ToolExecutionResult,
@@ -35,7 +36,7 @@ export type PermissionGatewayOptions = {
 
 export type PermissionExecutable = {
   readonly kind: "allowed";
-  readonly call: PreparedToolCall;
+  readonly call: PermissionOperation;
   readonly subject: PermissionSubject;
   readonly approvalScope?: "once" | "session" | "permanent";
   revalidate(signal: AbortSignal): Promise<ToolExecutionResult | undefined>;
@@ -61,8 +62,13 @@ type Confirmation = "policy" | "session" | "human";
 export class PermissionGateway {
   constructor(private readonly options: PermissionGatewayOptions) {}
 
+  async authorizeConnection(call: PermissionOperation, requestId: string, signal: AbortSignal): Promise<PermissionAuthorization> {
+    if (call.permissionTarget.kind !== "mcp" || call.permissionTarget.operation !== "connect") return denied(approvalInvalid("连接授权目标无效。"));
+    return this.authorize(call, requestId, signal);
+  }
+
   async authorize(
-    call: PreparedToolCall,
+    call: PermissionOperation,
     toolCallId: string,
     signal: AbortSignal,
     permissionTarget = call.permissionTarget,
@@ -75,7 +81,7 @@ export class PermissionGateway {
       return denied(
         toolFailure(
           "permission-denied",
-          "Plan 模式不允许写入 Workspace 或执行命令。",
+          scopedCall.mutability === "external" ? "Plan 模式不允许连接或调用外部 MCP Server。" : "Plan 模式不允许写入 Workspace 或执行命令。",
           { retryable: true },
         ),
       );
@@ -129,7 +135,7 @@ export class PermissionGateway {
   }
 
   #allowed(
-    call: PreparedToolCall,
+    call: PermissionOperation,
     subject: PermissionSubject,
     confirmation: Confirmation,
     approvalScope?: PermissionExecutable["approvalScope"],
@@ -146,7 +152,7 @@ export class PermissionGateway {
   }
 
   async #resolveApproval(
-    call: PreparedToolCall,
+    call: PermissionOperation,
     subject: PermissionSubject,
     expectedFingerprint: string,
     outcomePromise: ReturnType<PermissionApprovalBroker["request"]>["outcome"],
@@ -179,7 +185,7 @@ export class PermissionGateway {
       try {
         await this.options.persistAllow(
           formatExactPermissionExpression(
-            subject.toolName,
+            permissionRuleName(subject),
             permissionTargetValue(subject),
           ),
         );
@@ -201,13 +207,15 @@ export class PermissionGateway {
   }
 
   async #revalidate(
-    call: PreparedToolCall,
+    call: PermissionOperation,
     expectedSubject: PermissionSubject,
     expectedFingerprint: string,
     confirmation: Confirmation,
     signal: AbortSignal,
   ): Promise<ToolExecutionResult | undefined> {
     if (signal.aborted) return cancelledFailure();
+    const externalFailure = await call.revalidate?.(signal);
+    if (externalFailure) return externalFailure;
     if (this.options.agentMode === "plan" && call.mutability !== "read-only") {
       return approvalInvalid("Agent 模式已不再允许这次工具调用。");
     }
@@ -238,7 +246,7 @@ export class PermissionGateway {
   }
 
   async #resolveSubject(
-    call: PreparedToolCall,
+    call: PermissionOperation,
   ): Promise<
     | { readonly ok: true; readonly value: PermissionSubject }
     | { readonly ok: false; readonly result: ToolExecutionResult }
@@ -293,7 +301,7 @@ function dangerousFailure(
 }
 
 function preliminaryDangerousFailure(
-  call: PreparedToolCall,
+  call: PermissionOperation,
 ): ToolExecutionResult | undefined {
   const target = call.permissionTarget;
   if (target.kind !== "command") return undefined;
@@ -318,6 +326,7 @@ function sameSubject(
   ) {
     return false;
   }
+  if (left.kind === "mcp" && right.kind === "mcp") return permissionTargetValue(left) === permissionTargetValue(right) && left.operation === right.operation;
   if (left.kind === "path" && right.kind === "path") {
     return left.canonicalRelativePath === right.canonicalRelativePath;
   }

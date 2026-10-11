@@ -304,7 +304,7 @@ function executionContext(
     signal: options.signal,
     deadlineMs:
       Date.now() +
-      (mutability === "command" ? COMMAND_TOOL_TIMEOUT_MS : FILE_TOOL_TIMEOUT_MS),
+      (mutability === "external" ? 60_000 : mutability === "command" ? COMMAND_TOOL_TIMEOUT_MS : FILE_TOOL_TIMEOUT_MS),
   };
 }
 

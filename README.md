@@ -189,6 +189,41 @@ cp orbitcode.permissions.example.yaml .orbitcode/permissions.yaml
 
 本阶段不实现按域名细分的网络规则、资源配额、审计日志或公网身份认证。联网能力跟随整个 `run_command` 的权限决定，不会单独弹出第二次网络授权。Web API 仍只适合本机使用，不要把开发服务器绑定或暴露到不受信任的网络。
 
+### MCP 外部工具
+
+Web 与 CLI 通过 `src/runtime/` 共用 MCP 工具接入。独立的 `src/mcp/` 实现 JSON-RPC、stdio 和 Streamable HTTP，当前协议版本为 `2025-11-25`。未引入 MCP SDK、Agent 框架或新的运行时依赖。
+
+在 `~/.orbitcode/mcp.yaml` 或 `<Workspace>/.orbitcode/mcp.yaml` 声明 Server；参考 [配置示例](.orbitcode/mcp.example.yaml)：
+
+```yaml
+mcpServers:
+  local-demo:
+    type: stdio
+    command: node
+    args: [./your-mcp-server.mjs]
+    env:
+      DEMO_TOKEN: ${DEMO_TOKEN}
+  remote-demo:
+    type: http
+    url: https://example.com/mcp
+    headers:
+      Authorization: Bearer ${DEMO_TOKEN}
+```
+
+两层按 Server 名合并，同名时项目级完整覆盖用户级，包含 args、env 和 headers。只在 env、headers 中展开 `${VAR}`；变量缺失会禁用对应 Server，空值保留、不递归展开。stdio 的工作目录为所选 Workspace，直接启动 command，不经过 Shell；只继承 PATH、HOME、TMPDIR、LANG、LC_ALL，其余变量必须显式提供。项目根配置损坏会禁用该工作区的 MCP；单个 Server 错误不影响其余 Server 和本地工具。
+
+读取配置不会授权启动进程或联网。Do 回合先通过现有 Web 卡片／CLI `/approve` 审批连接，再发现工具；调用工具时仍需独立授权。严格和默认权限模式对未知 MCP 操作默认询问；用户主动选择放行模式后，MCP 连接和调用默认允许，显式 ask／deny 规则仍优先，外部 Server 的只读注解不能降低风险。Plan 不连接、刷新或暴露 MCP 工具。外部 Server **不受本地文件沙箱保证**，上述本地路径边界和命令黑名单不能约束它的内部行为；OrbitCode 控制的是连接及调用授权。
+
+规则使用 `mcp_connect(目标)`、`mcp_call(目标)`，与模型可见的 `mcp__…` 命名分开。审批生成的精确目标绑定 Server／配置摘要，调用还绑定原工具名、定义和参数摘要；配置或参数变化会重新授权，`deny > ask > allow` 保持不变。建议由审批生成精确规则，避免手写宽泛允许。
+
+工具使用 Server 命名空间与摘要避免重名，执行前验证并冻结参数。支持受限 JSON Schema 2020-12：基本类型、enum/const、对象属性与必填项、additionalProperties、数组 items/数量/唯一性、Unicode 字符串长度、数值上下界、allOf/anyOf/oneOf/not，以及 `$defs` 中无环的本地 `$ref`。根 Schema 必须为 object；pattern、format、远程或循环引用、条件约束及未知关键字会拒绝注册，不做类型转换、补默认值或删除属性。未支持的输出 Schema 会标注为未验证。
+
+文本和结构化结果进入现有上下文卸载、会话与运行记录流程；模型视图会在确认两者完全重复时只保留一份，持久化结果仍保留脱敏后的两种表示。媒体仅保留占位，不自动读取资源链接。已知配置秘密会在描述、审批摘要和结果中脱敏，HTTP 会话头与子进程 stderr 不展示。凭据应通过环境变量或未入库本地配置提供，不要放入命令参数；本仓库已忽略 `.orbitcode/mcp.yaml`，其他项目需自行加入忽略规则。
+
+连接按进程内 Workspace／有效配置缓存，跨回合复用但不共享会话授权；配置改变会淘汰旧连接。工具列表分页完整完成后才注册，列表变化通知在下一个获准 Do 回合刷新。失败连接不自动重连或重试；修改配置或重启应用后可重新建立。正常退出和信号退出释放连接，stdio 以进程组有界终止。硬限额包括 32 个 Server、单 Server 128 个工具／32 页、工作区 256 个工具／512 KiB 定义、单消息 2 MiB、Schema 64 KiB、32 个在途请求和 128 个缓存连接；MCP 调用最长 60 秒且受回合总时限约束。
+
+本阶段只接入工具，不提供资源发现、提示词、采样、tasks、健康检查或自动重连。外部工具成功不自动成为 CompletionTracker 的只读／命令验证证据。仅确认外部调用返回时，完成检查使用 scope: external-call，并且只引用一次成功的外部调用；此范围不证明外部副作用或本地变更。
+
 ## CLI 编程智能体
 
 ```bash

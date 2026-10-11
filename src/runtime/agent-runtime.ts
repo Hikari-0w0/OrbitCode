@@ -1,3 +1,7 @@
+import { loadMcpConfig, type McpConfigSnapshot } from "@/runtime/mcp-config";
+import { McpConnectionManager, type McpConnectionLease } from "@/runtime/mcp-connections";
+import { initializeMcpWorkspace } from "@/runtime/mcp-initialization";
+import type { RegisteredTool } from "@/tools/registry";
 import { AgentLoop } from "@/core/agent-loop";
 import { ContextManager } from "@/core/context/context-manager";
 import { CompletionTracker } from "@/core/completion-tracker";
@@ -42,10 +46,14 @@ export type AgentRuntimeOptions = {
   readonly log: AgentRunLogSink;
   readonly loadConfig: () => Promise<ProviderContext>;
   readonly loadWorkspaces: () => Promise<WorkspaceCatalog>;
+  readonly mcpConnections?: McpConnectionManager;
+  readonly loadMcp?: (workspaceRoot: string) => Promise<McpConfigSnapshot>;
   readonly createProvider?: (config: ResolvedProviderConfig) => ChatProvider;
 };
 export class AgentRuntime {
-  constructor(private readonly options: AgentRuntimeOptions) {}
+  private readonly mcp: McpConnectionManager;
+  constructor(private readonly options: AgentRuntimeOptions) { this.mcp = options.mcpConnections ?? new McpConnectionManager(); }
+  close(): Promise<void> { return this.mcp.close(); }
   async *streamTurn(input: RunTurnInput) {
     const turn = await this.prepare(input);
     yield* runAgentTurn({ ...turn, signal: input.signal });
@@ -55,8 +63,10 @@ export class AgentRuntime {
     let activeConversation: GuardedConversationOperation | undefined;
     let managedProcesses: ManagedProcessController | undefined;
     let savedTurn = false;
+    const mcpLeases: McpConnectionLease[] = [];
     const cleanup = async () => {
       const outcomes = await Promise.allSettled([
+        ...mcpLeases.map((lease) => lease.release()),
         Promise.resolve().then(async () => {
           if (savedTurn && activeConversation) {
             await this.options.store.clearTurnMarker(input.conversationId, activeConversation.lease.ownerToken);
@@ -146,17 +156,7 @@ export class AgentRuntime {
         turnId: turn.id,
       };
       const toolTargets = registry.permissionTargets();
-      const agent = new AgentLoop(
-        provider,
-        (mode) => createModeToolPolicy(registry, mode),
-        workspace,
-        {
-          maxIterations: context.maxIterations,
-          maxRuntimeMs: context.maxRuntimeMs,
-          promptEnvironment: createPromptEnvironment({
-            workspace: { id: workspaceEntry.id, name: workspaceEntry.name },
-          }),
-          permissionGatewayForMode: (agentMode) => new PermissionGateway({
+      const gatewayForMode = (agentMode: AgentMode) => new PermissionGateway({
             agentMode,
             permissionMode: () =>
               this.options.permissions.getSession(input.permissionSessionId).mode,
@@ -174,11 +174,17 @@ export class AgentRuntime {
                 expression,
               });
             },
-          }),
-          contextManager,
-          completionTracker,
-        },
-      );
+          });
+      const toolIdentities = new Map<string, NonNullable<RegisteredTool["externalIdentity"]>>();
+      const buildAgent = (externalTools: readonly RegisteredTool[], deadlineMs: number) => {
+        for (const tool of externalTools) if (tool.externalIdentity) toolIdentities.set(tool.name, tool.externalIdentity);
+        const combinedRegistry = createDefaultToolRegistry(this.options.sandbox, readContext, managedProcesses, completionTracker, externalTools);
+        return new AgentLoop(provider, (mode) => createModeToolPolicy(combinedRegistry, mode), workspace, {
+          maxIterations: context.maxIterations, maxRuntimeMs: Math.max(1, Math.min(context.maxRuntimeMs, deadlineMs - Date.now())),
+          promptEnvironment: createPromptEnvironment({ workspace: binding.workspace }),
+          permissionGatewayForMode: gatewayForMode, contextManager, completionTracker,
+        });
+      };
       await this.options.store.markTurnStarted({
         conversationId: input.conversationId,
         expectedRevision: input.expectedRevision,
@@ -187,10 +193,17 @@ export class AgentRuntime {
         modeTurn: input.modeTurn,
         ownerToken: conversationOperation.lease.ownerToken,
       });
+      const mcpManager = this.mcp;
+      const loadMcp = () => this.options.loadMcp?.(workspace.root) ?? this.options.loadConfig().then((current) => loadMcpConfig({ workspaceRoot: workspace.root, environment: current.environment }));
       return {
-        agent, input: input.input, mode: input.mode, modeTurn: input.modeTurn,
+        initialize: async function* (signal, deadlineMs) {
+          const externalTools = yield* initializeMcpWorkspace({ workspaceRoot: workspace.root, mode: input.mode, signal, deadlineMs,
+            load: loadMcp, manager: mcpManager, gateway: gatewayForMode(input.mode), leases: mcpLeases });
+          return buildAgent(externalTools, deadlineMs);
+        },
+        maxRuntimeMs: context.maxRuntimeMs, input: input.input, mode: input.mode, modeTurn: input.modeTurn,
         operationSignal: conversationOperation.signal,
-        persistTurn: async (events) => {
+        persistTurn: async (events, initialization) => {
           const terminal = events.findLast(
             (event) => event.type === "stopped",
           );
@@ -216,6 +229,7 @@ export class AgentRuntime {
                 previous: checkpoint.displayMessages,
                 userInput: input.input,
                 events,
+                initialization,
               }),
               context: contextManager.persistentSnapshot(),
             },
@@ -229,7 +243,7 @@ export class AgentRuntime {
           savedTurn = true;
           return { status: "saved", revision: result.checkpoint.summary.revision };
         },
-        runLog: { sink: this.options.log, source: input.source,
+        runLog: { sink: this.options.log, source: input.source, toolIdentities,
           conversationId: input.conversationId, revisionBefore: input.expectedRevision,
           providerId: checkpoint.summary.providerId, workspaceId: checkpoint.summary.workspaceId },
         onFinished: cleanup,
@@ -251,4 +265,3 @@ function checkpointSummaryForSave(
     ...(summary.lastStopReason === undefined ? {} : { lastStopReason: summary.lastStopReason }),
   };
 }
-

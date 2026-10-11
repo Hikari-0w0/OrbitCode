@@ -7,7 +7,8 @@ export type JsonObject = { readonly [key: string]: JsonValue };
 
 export const MAX_TOOL_ARGUMENTS_JSON_CHARS = 2 * 1024 * 1024;
 
-export type ToolName =
+export type ToolName = LocalToolName | `mcp__${string}`;
+export type LocalToolName =
   | "read_file"
   | "write_file"
   | "write_files"
@@ -36,6 +37,9 @@ export interface ToolInputSchema<T> {
 }
 
 export type ToolErrorKind =
+  | "mcp-transport"
+  | "mcp-protocol"
+  | "mcp-tool-error"
   | "invalid-arguments"
   | "unknown-tool"
   | "not-found"
@@ -57,7 +61,7 @@ export type ToolErrorKind =
   | "execution-failed";
 
 export type SideEffectState = "none" | "possible" | "applied";
-export type ToolMutability = "read-only" | "workspace-write" | "command";
+export type ToolMutability = "read-only" | "workspace-write" | "command" | "external";
 
 export type ToolResultMeta = {
   readonly durationMs: number;
@@ -147,6 +151,14 @@ export type ToolPathResolution =
   | "write-target";
 
 export type ToolPermissionTarget =
+  | {
+      readonly kind: "mcp";
+      readonly operation: "connect" | "call";
+      readonly serverName: string;
+      readonly configurationId: string;
+      readonly toolIdentity?: { readonly originalName: string; readonly schemaId: string; readonly argumentsId: string };
+      readonly summary: Readonly<Record<string, string | number | boolean | null>>;
+    }
   | {
       readonly kind: "path";
       readonly requestedPath: string;

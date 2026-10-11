@@ -1,5 +1,7 @@
 "use client";
 
+import { resolveNewConversationBinding } from "./conversation-binding";
+
 import { PLAN_EXECUTION_PROMPT, matchesExecutablePlan } from "@/core/conversations/plan-execution";
 
 import { useEffect, useReducer, useRef, useState } from "react";
@@ -277,6 +279,11 @@ export function ChatWorkspace() {
     : catalogState === "ready"
       ? "ready"
       : catalogState;
+  const bindingControlsDisabled =
+    catalogState !== "ready" ||
+    permissionSession.status !== "ready" ||
+    conversationState !== "ready" ||
+    isStreaming;
   const controlsDisabled =
     catalogState !== "ready" ||
     permissionSession.status !== "ready" ||
@@ -291,7 +298,7 @@ export function ChatWorkspace() {
     session.notice;
 
   function selectWorkspace(workspaceId: string): void {
-    if (controlsDisabled) return;
+    if (bindingControlsDisabled) return;
     if (!workspaces.some((workspace) => workspace.id === workspaceId && workspace.available)) {
       return;
     }
@@ -299,7 +306,7 @@ export function ChatWorkspace() {
   }
 
   function selectProvider(provider: string): void {
-    if (controlsDisabled) return;
+    if (bindingControlsDisabled) return;
     if (!providers.some((candidate) => candidate.name === provider && candidate.available)) {
       return;
     }
@@ -386,7 +393,12 @@ export function ChatWorkspace() {
     signal?: AbortSignal,
     renewPermission = true,
   ): Promise<boolean> {
-    if (!workspaceId || !providerId || activeRequestRef.current) return false;
+    if (activeRequestRef.current) return false;
+    const binding = resolveNewConversationBinding(workspaceId, providerId, workspaces, providers);
+    if (!binding) {
+      setConversationError("没有可用的 Workspace 或 Provider，无法新建会话。");
+      return false;
+    }
     const hadStableConversation = sessionRef.current.conversationId.length > 0;
     setConversationState("loading");
     setConversationError(undefined);
@@ -394,7 +406,7 @@ export function ChatWorkspace() {
       const response = await fetch("/api/conversations", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ workspaceId, providerId }),
+        body: JSON.stringify(binding),
         cache: "no-store",
         signal,
       });
@@ -683,7 +695,9 @@ export function ChatWorkspace() {
       if (!response.body) throw new Error("模型服务没有返回响应流。");
 
       for await (const event of parseWebChatEvents(readWebStream(response.body))) {
-        if (event.type === "text-delta") {
+        if (event.type === "mcp-status" || event.type === "runtime-permission-requested" || event.type === "runtime-permission-resolved") {
+          dispatch({ type: "initialization", assistantId, event });
+        } else if (event.type === "text-delta") {
           dispatch({
             type: "text-delta",
             assistantId,
@@ -937,7 +951,7 @@ export function ChatWorkspace() {
         <WorkspaceSelector
           workspaces={workspaces}
           selectedWorkspaceId={session.selectedWorkspaceId}
-          disabled={controlsDisabled}
+          disabled={bindingControlsDisabled}
           onChange={selectWorkspace}
         />
 
@@ -948,10 +962,13 @@ export function ChatWorkspace() {
               id="provider-select"
               aria-label="MODEL PROVIDER"
               value={session.selectedProvider}
-              disabled={controlsDisabled}
+              disabled={bindingControlsDisabled}
               onChange={(event) => selectProvider(event.target.value)}
             >
               {providers.length === 0 && <option value="">等待配置</option>}
+              {session.selectedProvider && !currentProvider && (
+                <option value={session.selectedProvider} disabled>{session.selectedProvider}（不可用）</option>
+              )}
               {providers.map((provider) => (
                 <option key={provider.name} value={provider.name} disabled={!provider.available}>
                   {provider.name}{provider.available ? "" : "（不可用）"}

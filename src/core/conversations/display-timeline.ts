@@ -1,3 +1,4 @@
+import type { McpInitializationRecord } from "@/core/mcp-events";
 import { randomUUID } from "node:crypto";
 
 import type { AgentEvent } from "@/core/agent-events";
@@ -18,6 +19,7 @@ export function appendPersistedTurn(input: {
   readonly previous: readonly PersistedDisplayMessage[];
   readonly userInput: string;
   readonly events: readonly AgentEvent[];
+  readonly initialization?: readonly McpInitializationRecord[];
   readonly createId?: () => string;
 }): readonly PersistedDisplayMessage[] {
   const terminal = input.events.findLast(
@@ -114,6 +116,7 @@ export function appendPersistedTurn(input: {
     {
       id: createId(),
       role: "assistant",
+      ...(input.initialization?.length ? { initialization: input.initialization } : {}),
       content,
       state: assistantState,
       ...(terminal.detail === undefined ? {} : { detail: terminal.detail }),

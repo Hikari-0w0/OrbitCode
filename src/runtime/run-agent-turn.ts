@@ -1,16 +1,19 @@
+import type { RuntimeInitializationEvent, McpInitializationRecord } from "@/core/mcp-events";
 import type { AgentEvent, AgentMode } from "@/core/agent-events";
 import type { AgentSession } from "@/core/agent-loop";
 import { AgentRunTracker, type RunLogOptions } from "@/runtime/agent-run-tracker";
 import type { PersistenceState, RuntimeTurnEvent } from "@/runtime/types";
 
 export type PreparedAgentTurn = {
-  readonly agent: AgentSession;
+  readonly agent?: AgentSession;
+  readonly initialize?: (signal: AbortSignal, deadlineMs: number) => AsyncGenerator<RuntimeInitializationEvent, AgentSession | undefined>;
+  readonly maxRuntimeMs?: number;
   readonly input: string;
   readonly mode: AgentMode;
   readonly modeTurn: number;
   readonly operationSignal?: AbortSignal;
   readonly onFinished?: () => void | Promise<void>;
-  readonly persistTurn?: (events: readonly AgentEvent[]) => Promise<PersistenceState>;
+  readonly persistTurn?: (events: readonly AgentEvent[], initialization: readonly McpInitializationRecord[]) => Promise<PersistenceState>;
   readonly runLog?: RunLogOptions;
 };
 
@@ -19,6 +22,11 @@ export async function* runAgentTurn(
 ): AsyncIterable<RuntimeTurnEvent> {
   const started = Date.now();
   const controller = new AbortController();
+  let timedOut = false;
+  const deadlineMs = started + (options.maxRuntimeMs ?? 86_400_000);
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, deadlineMs - started);
+  const initialization: McpInitializationRecord[] = [];
+  let startupSideEffect = false;
   const signal = AbortSignal.any([
     controller.signal, options.signal,
     ...(options.operationSignal ? [options.operationSignal] : []),
@@ -33,7 +41,28 @@ export async function* runAgentTurn(
   const warnings: Extract<RuntimeTurnEvent, { type: "warning" }>[] = [];
   try {
     try {
-      for await (const event of options.agent.streamTurn({
+      let agent = options.agent;
+      if (options.initialize) {
+        const generator = options.initialize(signal, deadlineMs);
+        try {
+          for (;;) {
+            const next = await generator.next();
+            if (next.done) { agent = next.value; break; }
+            const event = next.value;
+            if (event.type === "mcp-status") {
+              const { type: _type, ...record } = event;
+              void _type;
+              const previous = initialization.findIndex((item) => item.serverName === record.serverName);
+              if (previous < 0) initialization.push(record);
+              else initialization[previous] = record;
+              if (event.phase === "connecting") startupSideEffect = true;
+            }
+            yield { type: "initialization", event };
+          }
+        } finally { await generator.return(undefined); }
+      }
+      if (!agent || signal.aborted) throw new Error("运行初始化未完成。");
+      for await (const event of agent.streamTurn({
         input: options.input, mode: options.mode, modeTurn: options.modeTurn, signal,
       })) {
         if (terminal) break;
@@ -47,19 +76,24 @@ export async function* runAgentTurn(
     }
   } finally {
     const cancelled = signal.aborted;
+    clearTimeout(timer);
     controller.abort();
     terminal ??= {
-      type: "stopped", reason: cancelled ? "cancelled" : "agent-error",
+      type: "stopped", reason: timedOut ? "max-runtime" : cancelled ? "cancelled" : "agent-error",
       iterations: events.reduce((maximum, event) => "iteration" in event ? Math.max(maximum, event.iteration) : maximum, 0),
       durationMs: Date.now() - started,
       sideEffect: events.some((event) => event.type === "tool-result" && event.result.sideEffect === "applied")
         ? "applied" : events.some((event) => event.type === "tool-started") ? "possible" : "none",
-      detail: "Agent 执行发生未知错误，请重试。",
+      detail: timedOut ? "本轮已达到总运行时限。" : cancelled ? "本轮运行已取消。" : "Agent 执行发生未知错误，请重试。",
     };
-    if (!events.some((event) => event.type === "stopped")) events.push(terminal);
+    if (startupSideEffect && terminal.sideEffect === "none") terminal = { ...terminal, sideEffect: "possible" };
+    if (timedOut) terminal = { ...terminal, reason: "max-runtime" };
+    const terminalIndex = events.findIndex((event) => event.type === "stopped");
+    if (terminalIndex >= 0) events[terminalIndex] = terminal; else events.push(terminal);
+    tracker?.setInitialization(initialization);
     tracker?.observe(terminal);
     try {
-      if (options.persistTurn) persistence = await options.persistTurn(events);
+      if (options.persistTurn) persistence = await options.persistTurn(events, initialization);
     } catch (error) {
       persistence = { status: "failed", detail: error instanceof Error && error.message ? error.message : "本轮未保存，请重试保存。" };
     }

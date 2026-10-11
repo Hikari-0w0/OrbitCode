@@ -16,6 +16,7 @@ import {
 } from "@/tools/types";
 
 export type RegisteredTool = {
+  readonly externalIdentity?: { readonly serverName: string; readonly toolName: string };
   readonly name: ToolName;
   readonly description: string;
   readonly inputSchema: ToolInputSchema<unknown>;
@@ -37,8 +38,11 @@ export type PreparedToolCall = {
   readonly permissionTarget: ToolPermissionTarget;
   readonly permissionTargets?: readonly ToolPermissionTarget[];
   readonly fingerprint: string;
+  readonly revalidate?: (signal: AbortSignal) => Promise<ToolExecutionResult | undefined>;
   execute(context: ToolExecutionContext): Promise<ToolExecutionResult>;
 };
+
+export type PermissionOperation = Omit<PreparedToolCall, "name" | "execute"> & { readonly name: string };
 
 export type ToolPreparationResult =
   | { readonly kind: "ready"; readonly call: PreparedToolCall }

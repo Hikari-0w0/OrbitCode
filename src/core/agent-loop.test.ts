@@ -760,6 +760,8 @@ test("结构化完成报告引用真实写入后证据时标记为已验证", as
     modeTurn: 1,
     signal: new AbortController().signal,
   }));
+  assert.ok(!provider.requests[0]?.toolNames.includes("report_completion"));
+  assert.ok(provider.requests[1]?.toolNames.includes("report_completion"));
   const terminal = result.at(-1);
   assert.equal(terminal?.type, "stopped");
   if (terminal?.type === "stopped") {
@@ -795,6 +797,43 @@ test("工具结果向后续模型请求公开可复制的完成证据 ID", async
   const payload = JSON.parse(toolMessage?.content ?? "null") as unknown;
   assert.ok(isRecord(payload));
   assert.equal(payload.evidence_call_id, "e_test_run_1");
+});
+
+test("仅外部工具返回时记录调用证据，不补报或重复调用", async () => {
+  const tracker = new CompletionTracker({ createRunId: () => "mcp_recovery" });
+  const mcpName = "mcp__demo__echo__recovery" as const;
+  let externalCalls = 0;
+  const tools = new ToolRegistry([
+    defineTool({
+      name: mcpName,
+      description: "测试外部查询",
+      inputSchema: objectSchema({ label: stringSchema({ minLength: 1 }) }),
+      mutability: "external",
+      permission: { targetKind: "context", resolve: () => ({ kind: "context", reference: "test-mcp" }) },
+      async execute() { externalCalls += 1; return successfulToolResult({ items: ["一", "二"] }, "possible"); },
+    }),
+    createReportCompletionTool(tracker),
+  ]);
+  const provider = new ScriptedProvider([
+    [{ type: "tool-call", call: call("mcp-read", mcpName, "查询") }, { type: "done", finishReason: "tool-call" }],
+    [{ type: "text-delta", text: "查到两项。" }, { type: "done", finishReason: "stop" }],
+  ]);
+  const agent = createAgent(provider, tools, 5, tracker);
+  const result = await collect(agent.streamTurn({ input: "请用中文查询", mode: "do", modeTurn: 1, signal: new AbortController().signal }));
+  assert.equal(externalCalls, 1);
+  assert.equal(provider.requests.length, 2);
+  assert.ok(provider.requests.every((request) => !request.toolNames.includes("report_completion")));
+  assert.ok(provider.requests[0]?.messages.some((message) => message.role === "system" && message.content.includes("本轮用户使用中文")));
+  assert.ok(provider.requests[0]?.messages.some((message) => message.role === "system" && message.content.includes("工具调用前如需说明动作，也先用中文")));
+  assert.equal(result.filter((event) => event.type === "text-delta").length, 1);
+  assert.equal(result.filter((event) => event.type === "tool-result" && event.name === "report_completion").length, 0);
+  const terminal = result.at(-1);
+  assert.equal(terminal?.type, "stopped");
+  if (terminal?.type === "stopped") {
+    assert.equal(terminal.verification?.status, "observed");
+    assert.deepEqual(terminal.verification?.checks.map((check) => [check.scope, check.status, check.evidenceCallIds]), [["external-call", "passed", ["e_mcp_recovery_1"]]]);
+    assert.equal(terminal.finalMessage?.content, "查到两项。");
+  }
 });
 
 test("约三十个文件的批量变更在三十次迭代内完成并验证", async () => {

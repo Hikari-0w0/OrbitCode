@@ -1,3 +1,4 @@
+import { loadMcpConfig } from "@/runtime/mcp-config";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -33,6 +34,7 @@ export async function runtimeFixture(responder: (request: MockRequest) => MockRe
   const guard = new ConversationOperationGuard(manager, store);
   const permissions = new PermissionSessionManager();
   const runtime = new AgentRuntime({ store, manager, guard, permissions, log,
+    loadMcp: async (workspaceRoot) => loadMcpConfig({ workspaceRoot, userHome: path.join(root, ".home"), environment: (await loadConfig()).environment }),
     loadConfig, loadWorkspaces, sandbox: new MacOsSeatbeltCommandSandbox() });
   const conversations = new ConversationService(store, manager, guard, loadConfig);
   let output = "";
@@ -46,7 +48,7 @@ export async function runtimeFixture(responder: (request: MockRequest) => MockRe
   return { root, server, store, log, manager, guard, permissions, runtime, conversations, controller,
     output: () => output, errors: () => errors,
     async checkpoint() { const entries = await store.list(); return store.load(entries[0].id); },
-    async close() { controller.close(); await server.close(); await rm(root, { recursive: true, force: true }); } };
+    async close() { controller.close(); await runtime.close(); await server.close(); await rm(root, { recursive: true, force: true }); } };
 }
 export async function waitUntil(predicate: () => boolean, timeout = 3000): Promise<void> {
   const end = Date.now() + timeout;

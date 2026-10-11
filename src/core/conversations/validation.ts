@@ -1,3 +1,4 @@
+import { isMcpInitializationRecord } from "@/core/mcp-events";
 import {
   CONVERSATION_SCHEMA_VERSION,
   ConversationRepositoryError,
@@ -119,7 +120,7 @@ function validateToolTranscript(messages: readonly unknown[]): void {
 }
 
 function validateDisplayMessage(value: unknown): void {
-  const optional = ["detail", "parts", "toolExecutions", "usage", "cumulativeUsage", "stopReason", "durationMs", "verification"];
+  const optional = ["initialization", "detail", "parts", "toolExecutions", "usage", "cumulativeUsage", "stopReason", "durationMs", "verification"];
   if (
     !isRecord(value) ||
     !hasAllowedFields(value, ["id", "role", "content", "state"], optional) ||
@@ -128,6 +129,7 @@ function validateDisplayMessage(value: unknown): void {
     typeof value.content !== "string" ||
     !["complete", "cancelled", "failed"].includes(String(value.state))
   ) throw invalidStoredConversation();
+  if (value.initialization !== undefined && (!Array.isArray(value.initialization) || value.initialization.length > 128 || !value.initialization.every(isMcpInitializationRecord))) throw invalidStoredConversation();
   if (value.role === "user" && value.state !== "complete") throw invalidStoredConversation();
   if (value.detail !== undefined && typeof value.detail !== "string") throw invalidStoredConversation();
   if (value.stopReason !== undefined && !STOP_REASONS.has(String(value.stopReason))) throw invalidStoredConversation();

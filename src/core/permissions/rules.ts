@@ -1,5 +1,6 @@
 import {
   permissionTargetValue,
+  permissionRuleName,
   type MatchedPermissionRule,
   type PermissionDecision,
   type PermissionRule,
@@ -40,7 +41,7 @@ export function parsePermissionRule(options: {
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(toolName)) {
     throw new PermissionRuleError("权限规则包含无效工具名。");
   }
-  const targetKind = options.toolTargets.get(toolName);
+  const targetKind = toolName === "mcp_connect" || toolName === "mcp_call" ? "mcp" : options.toolTargets.get(toolName);
   if (!targetKind) {
     throw new PermissionRuleError(`权限规则引用未知工具：${toolName}`);
   }
@@ -67,7 +68,7 @@ export function findMatchingPermissionRules(
 ): readonly PermissionRule[] {
   const target = permissionTargetValue(subject);
   return rules.filter((rule) => {
-    if (rule.toolName !== subject.toolName || rule.targetKind !== subject.kind) {
+    if (rule.toolName !== permissionRuleName(subject) || rule.targetKind !== subject.kind) {
       return false;
     }
     if (rule.matchKind === "exact") return decodePattern(rule.pattern) === target;
@@ -117,7 +118,7 @@ function validatePattern(
   targetKind: PermissionTargetKind,
   analysis: PatternAnalysis,
 ): void {
-  if (targetKind === "command") {
+  if (targetKind === "command" || targetKind === "mcp") {
     if (pattern.length > 8 * 1024) {
       throw new PermissionRuleError("命令权限模式过长。");
     }

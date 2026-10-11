@@ -438,3 +438,47 @@ test("缺失证据与写入后验证不足一次反馈，不捏造后续检查�
   assert.match(result.issues[2].message, /最后写入之后/);
   assert.equal(tracker.assessment().status, "unverified");
 });
+
+test("外部调用范围只确认一次成功返回，不能冒充本地验证或写入后验证", () => {
+  const tracker = new CompletionTracker();
+  tracker.record({ call: { id: "external", name: "mcp__demo__echo", argumentsJson: "{}" }, result: successfulToolResult({}, "possible"), iteration: 1, sequence: 0, mutability: "external" });
+  const check = { criterion: "声称已完成构建", status: "passed" as const, evidenceCallIds: ["external"] };
+  assert.equal(tracker.accept({ status: "complete", checks: [check], blockers: [] }).ok, false);
+  const scoped = { ...check, scope: "external-call" as const };
+  assert.equal(tracker.accept({ status: "complete", checks: [scoped], blockers: [] }).ok, true);
+  assert.equal(tracker.assessment().status, "observed");
+  assert.match(tracker.assessment().checks[0].criterion, /仅确认调用返回/u);
+  assert.doesNotMatch(tracker.assessment().checks[0].criterion, /构建/u);
+  tracker.record({ call: { id: "print", name: "run_command", argumentsJson: JSON.stringify({ command: "printf '固定文本'" }) }, result: successfulToolResult({}, "possible"), iteration: 2, sequence: 0, mutability: "command" });
+  assert.equal(tracker.accept({ status: "complete", checks: [{ ...check, evidenceCallIds: ["external", "print"] }], blockers: [] }).ok, false);
+  assert.equal(tracker.accept({ status: "complete", checks: [{ ...scoped, evidenceCallIds: ["print"] }], blockers: [] }).ok, false);
+  tracker.record({ call: { id: "write", name: "write_file", argumentsJson: "{}" }, result: successfulToolResult({}, "applied"), iteration: 3, sequence: 0, mutability: "workspace-write" });
+  assert.equal(tracker.accept({ status: "complete", checks: [scoped], blockers: [] }).ok, false);
+});
+
+test("没有模型完成报告时，外部工具成功和失败均只记录调用结果", () => {
+  const tracker = new CompletionTracker({ createRunId: () => "external_observation" });
+  tracker.record({ call: { id: "ok", name: "mcp__demo__search", argumentsJson: "{}" },
+    result: successfulToolResult({}, "possible"), iteration: 1, sequence: 0, mutability: "external" });
+  tracker.record({ call: { id: "failed", name: "mcp__demo__search", argumentsJson: "{}" },
+    result: toolFailure("mcp-tool-error", "查询失败", { retryable: true }), iteration: 2, sequence: 0, mutability: "external" });
+  assert.deepEqual(tracker.assessment(), {
+    status: "observed", blockers: [], checks: [
+      { scope: "external-call", criterion: "外部工具调用结果：mcp__demo__search（仅记录调用返回，不验证答复内容）", status: "passed", evidenceCallIds: ["e_external_observation_1"] },
+      { scope: "external-call", criterion: "外部工具调用结果：mcp__demo__search（仅记录调用返回，不验证答复内容）", status: "failed", evidenceCallIds: ["e_external_observation_2"] },
+    ],
+  });
+});
+
+test("读取外部结果的上下文引用不抹去有限的外部调用观察状态", () => {
+  const tracker = new CompletionTracker({ createRunId: () => "external_context" });
+  tracker.record({ call: { id: "search", name: "mcp__docs__search", argumentsJson: "{}" },
+    result: successfulToolResult({}, "possible"), iteration: 1, sequence: 0, mutability: "external" });
+  tracker.record({ call: { id: "page", name: "read_context", argumentsJson: "{}" },
+    result: successfulToolResult({}, "none"), iteration: 2, sequence: 0, mutability: "read-only" });
+  assert.deepEqual(tracker.assessment(), {
+    status: "observed", blockers: [], checks: [
+      { scope: "external-call", criterion: "外部工具调用结果：mcp__docs__search（仅记录调用返回，不验证答复内容）", status: "passed", evidenceCallIds: ["e_external_context_1"] },
+    ],
+  });
+});

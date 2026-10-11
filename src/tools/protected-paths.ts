@@ -10,6 +10,7 @@ const PROTECTED_NAMES = new Set([
 ]);
 const PROTECTED_EXTENSIONS = new Set([".pem", ".key", ".p12", ".pfx"]);
 const PROTECTED_RELATIVE_PATHS = new Set([
+  ".orbitcode/mcp.yaml",
   ".orbitcode/permissions.yaml",
   ".orbitcode/permissions.local.yaml",
 ]);

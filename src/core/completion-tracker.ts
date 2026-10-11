@@ -9,11 +9,13 @@ import type {
 
 export type VerificationStatus =
   | "verified"
+  | "observed"
   | "partial"
   | "unverified"
   | "blocked";
 
 export type CompletionCheck = {
+  readonly scope?: "external-call";
   readonly criterion: string;
   readonly status: "passed" | "failed" | "not-run";
   readonly evidenceCallIds: readonly string[];
@@ -123,9 +125,15 @@ export class CompletionTracker {
       }
       // 引用本身无效时不推导语义错误，其他检查项仍独立校验。
       if (records.some((record) => !record?.ok)) continue;
+      if (check.scope === "external-call") {
+        if (records.length !== 1 || records[0]?.mutability !== "external") {
+          issues.push({ path: evidencePath, message: "外部调用检查必须且只能引用一次成功的外部工具调用；不要重复调用，也不要补充打印固定文本的命令。" });
+        }
+        continue;
+      }
       if (!records.some((record) => record !== undefined && isVerification(record))) {
         issues.push({ path: evidencePath,
-          message: "通过项必须引用成功的只读或命令验证结果；写入成功不能替代验证。请补充读取或运行与该验收项匹配的检查，并引用其证据。" });
+          message: "通过项必须引用成功的只读或命令验证结果；写入成功不能替代验证。若目标仅是调用外部工具并查看返回，请使用 scope=external-call 且只引用该次调用；不要重复执行外部工具。其他目标需补充真正匹配的验证，不能打印固定文本充当验证。" });
         continue;
       }
       if (requiresBuildEvidence(check.criterion) && !records.some(isBuildEvidence)) {
@@ -165,9 +173,11 @@ export class CompletionTracker {
       : hasIncompleteChecks
         ? "partial"
         : report.checks.length > 0 && hasPostWriteVerification
-          ? "verified"
+          ? report.checks.every((check) => check.scope === "external-call")
+            ? "observed"
+            : "verified"
           : "unverified";
-    const expectedClaim = status === "verified"
+    const expectedClaim = status === "verified" || status === "observed"
       ? "complete"
       : status === "blocked"
         ? "blocked"
@@ -180,7 +190,10 @@ export class CompletionTracker {
     this.#assessment = {
       status,
       checks: report.checks.map((check) => ({
-        criterion: check.criterion,
+        ...(check.scope === undefined ? {} : { scope: check.scope }),
+        criterion: check.scope === "external-call"
+          ? `外部工具调用结果：${check.evidenceCallIds.map((id) => this.#resolveEvidence(id)?.toolName ?? id).join("、")}（仅确认调用返回，不验证外部副作用）`
+          : check.criterion,
         status: check.status,
         evidenceCallIds: [...check.evidenceCallIds],
       })),
@@ -190,7 +203,26 @@ export class CompletionTracker {
   }
 
   assessment(): CompletionAssessment {
-    return this.#assessment ?? unverifiedCompletionAssessment();
+    if (this.#assessment !== undefined) return this.#assessment;
+    const evidence = [...this.#evidence.entries()];
+    const externalEvidence = evidence.filter(([, record]) => record.mutability === "external");
+    if (
+      externalEvidence.length > 0 &&
+      // read_context 只取回已卸载的外部结果，不扩大外部调用的完成证据。
+      evidence.every(([, record]) => record.mutability === "external" || record.toolName === "read_context")
+    ) {
+      return {
+        status: "observed",
+        checks: externalEvidence.map(([evidenceCallId, record]) => ({
+          scope: "external-call",
+          criterion: `外部工具调用结果：${record.toolName}（仅记录调用返回，不验证答复内容）`,
+          status: record.ok ? "passed" : "failed",
+          evidenceCallIds: [evidenceCallId],
+        })),
+        blockers: [],
+      };
+    }
+    return unverifiedCompletionAssessment();
   }
 
   #resolveEvidence(id: string): EvidenceRecord | undefined {
@@ -229,7 +261,7 @@ export function isCompletionAssessment(value: unknown): value is CompletionAsses
   if (!isRecord(value) || !hasExactFields(value, ["status", "checks", "blockers"])) {
     return false;
   }
-  if (!["verified", "partial", "unverified", "blocked"].includes(String(value.status))) {
+  if (!["verified", "observed", "partial", "unverified", "blocked"].includes(String(value.status))) {
     return false;
   }
   if (
@@ -237,7 +269,8 @@ export function isCompletionAssessment(value: unknown): value is CompletionAsses
     value.checks.length > 20 ||
     !value.checks.every((check) =>
       isRecord(check) &&
-      hasExactFields(check, ["criterion", "status", "evidenceCallIds"]) &&
+      hasExactFields(check, check.scope === undefined ? ["criterion", "status", "evidenceCallIds"] : ["criterion", "status", "evidenceCallIds", "scope"]) &&
+      (check.scope === undefined || check.scope === "external-call") &&
       typeof check.criterion === "string" &&
       check.criterion.length > 0 &&
       check.criterion.length <= 200 &&
@@ -271,7 +304,14 @@ function isAfter(left: EvidenceRecord, right: EvidenceRecord): boolean {
 }
 
 function isVerification(record: EvidenceRecord): boolean {
-  return record.mutability === "read-only" || record.mutability === "command";
+  if (record.mutability === "read-only") return true;
+  if (record.mutability !== "command") return false;
+  // 单纯回显预设文本没有验证目标，不能靠退出码替代证据。
+  try {
+    const args: unknown = JSON.parse(record.argumentsJson);
+    if (isRecord(args) && typeof args.command === "string" && /^\s*(?:echo|printf)\b/u.test(args.command)) return false;
+  } catch { return false; }
+  return true;
 }
 
 function latestFailedQualityGate(

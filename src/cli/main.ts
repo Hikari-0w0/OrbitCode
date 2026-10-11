@@ -1,3 +1,4 @@
+import { installMcpShutdown } from "@/runtime/mcp-host";
 import { ConversationRepositoryError } from "@/core/conversations/types";
 import path from "node:path";
 import type { Readable, Writable } from "node:stream";
@@ -97,11 +98,12 @@ export async function runCli({
       sandbox: new MacOsSeatbeltCommandSandbox(), loadConfig, loadWorkspaces });
     const session = new SessionController({ cwd, terminal, runtime, conversations, permissions,
       log, loadConfig, loadWorkspaces, renderer: new TerminalRenderer(output, errorOutput) });
+    const removeMcpShutdown = installMcpShutdown(() => runtime.close());
     try {
       await session.initialize(argumentsResult);
       await runTerminalChat({ session, input, output, errorOutput, terminal });
       return session.exitCode;
-    } finally { session.close(); }
+    } finally { session.close(); await runtime.close(); removeMcpShutdown(); }
 
   } catch (error) {
     errorOutput.write(`启动失败：${terminalText(startupErrorMessage(error))}\n`);

@@ -1,0 +1,13 @@
+mcpServers:
+  local-demo:
+    type: stdio
+    command: node
+    # 替换为自己的 MCP Server；加载配置不会自动授权启动。
+    args: [./your-mcp-server.mjs]
+    env:
+      DEMO_TOKEN: ${DEMO_TOKEN}
+  remote-demo:
+    type: http
+    url: https://example.com/mcp
+    headers:
+      Authorization: Bearer ${DEMO_TOKEN}

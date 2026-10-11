@@ -1,9 +1,11 @@
+import type { McpInitializationRecord } from "@/core/mcp-events";
 import { randomUUID } from "node:crypto";
 import type { AgentEvent, AgentMode } from "@/core/agent-events";
 import type { AgentRunLogEntry, AgentRunLogSink } from "@/lib/local-agent-run-log";
 import type { PersistenceState } from "@/runtime/types";
 
 export type RunLogOptions = {
+  readonly toolIdentities?: ReadonlyMap<string, { readonly serverName: string; readonly toolName: string }>;
   readonly sink: AgentRunLogSink;
   readonly source?: "web" | "cli";
   readonly conversationId: string;
@@ -48,6 +50,9 @@ export class AgentRunTracker {
     this.#startedAtMs = this.#now();
     this.#runId = (options.createRunId ?? randomUUID)();
   }
+
+  private initialization: readonly McpInitializationRecord[] = [];
+  setInitialization(records: readonly McpInitializationRecord[]): void { this.initialization = records; }
 
   observe(event: AgentEvent): void {
     if ("iteration" in event) {
@@ -215,8 +220,10 @@ export class AgentRunTracker {
       ...(this.#modelAttempts.size === 0
         ? {}
         : { modelAttempts: [...this.#modelAttempts.values()] }),
+      ...(this.initialization.length ? { initialization: this.initialization } : {}),
       tools: [...this.#tools.values()].map((tool) => ({
         name: tool.name,
+        ...(this.options.toolIdentities?.has(tool.name) ? { mcp: this.options.toolIdentities.get(tool.name) } : {}),
         status: tool.status,
         ...(tool.durationMs === undefined ? {} : { durationMs: tool.durationMs }),
         ...(tool.errorKind === undefined ? {} : { errorKind: tool.errorKind }),
@@ -252,4 +259,3 @@ function higherSideEffect(
   const rank = { none: 0, possible: 1, applied: 2 } as const;
   return rank[right] > rank[left] ? right : left;
 }
-

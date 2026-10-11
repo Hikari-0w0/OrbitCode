@@ -30,6 +30,9 @@ export function WorkspaceSelector({
           onChange={(event) => onChange(event.target.value)}
         >
           {workspaces.length === 0 && <option value="">等待配置</option>}
+          {selectedWorkspaceId && !current && (
+            <option value={selectedWorkspaceId} disabled>{selectedWorkspaceId}（不可用）</option>
+          )}
           {workspaces.map((workspace) => (
             <option
               key={workspace.id}
@@ -46,7 +49,7 @@ export function WorkspaceSelector({
       </div>
       <div className="workspaceMeta">
         <span className={current?.available ? "statusDot" : "statusDot statusDot--off"} />
-        <span>{current ? "所有工具严格限制在此目录内" : "等待服务端授权目录"}</span>
+        <span>{current ? "本地文件工具使用此授权目录" : selectedWorkspaceId ? "此会话绑定的 Workspace 已不在当前配置中" : "等待服务端授权目录"}</span>
       </div>
     </div>
   );

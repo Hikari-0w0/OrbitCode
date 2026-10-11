@@ -337,6 +337,8 @@ test("授权请求、提交失败与服务端终态只更新对应工具卡", ()
   assert.equal(tool(state)?.state, "queued");
   assert.equal(tool(state)?.permission?.state, "allowed");
   assert.equal(tool(state)?.permission?.scope, "session");
+  state = chatSessionReducer(state, { type: "permission-submitted", requestId: "request-1" });
+  assert.equal(tool(state)?.permission?.state, "allowed");
 });
 
 test("等待授权时强制切换上下文会立即清空会话", () => {
@@ -387,3 +389,15 @@ function tool(state: ChatSessionState) {
     .find((message) => message.id === "assistant-new")
     ?.toolExecutions?.[0];
 }
+
+test("MCP 初始化审批终态不被迟到 HTTP 响应覆盖，状态按 Server 更新", () => {
+  let state = startRequest({ ...populatedState(), requestState: "idle" }, "do");
+  state = chatSessionReducer(state, { type: "initialization", assistantId: "assistant-new", event: { type: "runtime-permission-requested", serverName: "demo", prompt: { requestId: "mcp-request", toolCallId: "start", toolName: "mcp_connect", workspace: { id: "alpha", name: "Alpha" }, summary: {}, risk: { level: "high", message: "external" }, source: "mode", persistentLayer: "local", expiresAt: "2026-09-18T00:00:00Z" } } });
+  state = chatSessionReducer(state, { type: "initialization", assistantId: "assistant-new", event: { type: "runtime-permission-resolved", serverName: "demo", requestId: "mcp-request", status: "allowed" } });
+  state = chatSessionReducer(state, { type: "permission-submitted", requestId: "mcp-request" });
+  for (const phase of ["connecting", "ready"] as const) state = chatSessionReducer(state, { type: "initialization", assistantId: "assistant-new", event: { type: "mcp-status", serverName: "demo", phase, detail: phase, durationMs: 1 } });
+  const message = state.messages.find((m) => m.id === "assistant-new");
+  assert.equal(message?.runtimePermissions?.[0].state, "allowed");
+  assert.equal(message?.initialization?.length, 1);
+  assert.equal(message?.initialization?.[0].phase, "ready");
+});

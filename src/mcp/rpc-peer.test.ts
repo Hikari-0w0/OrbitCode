@@ -1,0 +1,56 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { McpRpcPeer } from "./rpc-peer";
+import type { McpTransport, McpTransportHandlers, McpMessage } from "./types";
+test("并发乱序、迟到响应与取消独立收敛", async () => {
+  let handlers!: McpTransportHandlers;
+  const messages: McpMessage[] = [];
+  const transport: McpTransport = { async start(h) { handlers = h; }, async send(m) { messages.push(m); }, async close() {} };
+  const peer = new McpRpcPeer(transport);
+  await peer.start(new AbortController().signal);
+  const options = { signal: new AbortController().signal, deadlineMs: Date.now() + 1000 };
+  const first = peer.request("a", {}, options);
+  const second = peer.request("b", {}, options);
+  handlers.message({ jsonrpc: "2.0", id: "1", result: "wrong" });
+  handlers.message({ jsonrpc: "2.0", id: 2, result: "second" });
+  handlers.message({ jsonrpc: "2.0", id: 1, result: "first" });
+  assert.deepEqual(await Promise.all([first, second]), ["first", "second"]);
+  const controller = new AbortController();
+  const cancelled = peer.request("cancel", {}, { ...options, signal: controller.signal });
+  controller.abort();
+  await assert.rejects(cancelled, /取消/);
+  assert.equal(peer.pendingCount, 0);
+  assert.ok(messages.some((m) => "method" in m && m.method === "notifications/cancelled"));
+  handlers.message({ jsonrpc: "2.0", id: 3, result: "late" });
+  await peer.close();
+});
+test("超时、未知服务端方法及关闭清理", async () => {
+  let handlers!: McpTransportHandlers;
+  const sent: McpMessage[] = [];
+  const peer = new McpRpcPeer({ async start(h) { handlers = h; }, async send(m) { sent.push(m); }, async close() {} });
+  await peer.start(new AbortController().signal);
+  await assert.rejects(peer.request("hang", {}, { signal: new AbortController().signal, deadlineMs: Date.now() + 10 }), /超时/);
+  handlers.message({ jsonrpc: "2.0", id: "s", method: "sampling/createMessage" });
+  assert.ok(sent.some((m) => "error" in m && m.error.code === -32601));
+  const pending = peer.request("wait", {}, { signal: new AbortController().signal, deadlineMs: Date.now() + 1000 });
+  await peer.close();
+  await assert.rejects(pending, /关闭/);
+  assert.equal(peer.pendingCount, 0);
+});
+
+test("pending 上限拒绝第 33 项，initialize 取消不发取消通知", async () => {
+  const sent:McpMessage[]=[];
+  const peer=new McpRpcPeer({async start(){},async send(m){sent.push(m);},async close(){}});
+  await peer.start(new AbortController().signal);
+  const controller=new AbortController();
+  const options={signal:controller.signal,deadlineMs:Date.now()+1000};
+  const requests=Array.from({length:32},()=>peer.request('x',{},options));
+  const settled=Promise.allSettled(requests);
+  await assert.rejects(peer.request('overflow',{},options),/上限/);
+  controller.abort(); await settled;assert.equal(peer.pendingCount,0);
+  await peer.close();
+  const isolated=new McpRpcPeer({async start(){},async send(m){sent.push(m);},async close(){}});
+  const cancel=new AbortController();const before=sent.length;
+  const pending=isolated.request('initialize',{}, {signal:cancel.signal,deadlineMs:Date.now()+1000});cancel.abort();await assert.rejects(pending);
+  assert.equal(sent.slice(before).filter(m=>'method' in m&&m.method==='notifications/cancelled').length,0);
+});
