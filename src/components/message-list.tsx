@@ -79,6 +79,7 @@ export type VisibleMessage = {
   readonly stopReason?: StoppedEvent["reason"];
   readonly durationMs?: number;
   readonly verification?: CompletionAssessment;
+  readonly persistence?: StoppedEvent["persistence"];
 };
 
 type MessageListProps = {
@@ -203,6 +204,11 @@ export function MessageList({
                   {message.stopReason && (
                     <p className={`stopReason stopReason--${message.state}`}>
                       停止原因：{stopReasonLabel(message.stopReason)}
+                    </p>
+                  )}
+                  {message.persistence && (
+                    <p className="usageLine" role="status">
+                      保存状态：{message.persistence.status === "saved" ? "已保存到本地" : `保存失败：${message.persistence.detail}`}
                     </p>
                   )}
                   {message.verification && (

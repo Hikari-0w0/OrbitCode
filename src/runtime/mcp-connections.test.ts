@@ -82,8 +82,10 @@ test("活动缓存容量不驱逐租约，配置 draining 等待在途调用后�
     await leases[127].release();
     const call=leases[0].call('x',{},input); await new Promise(r=>setTimeout(r,0));
     const newer=await manager.acquire({...input,server:{...input.server,configurationId:'new'}});
-    await assert.rejects(leases[0].call('x',{},input),/失效/);
     assert.ok(pending);pending();assert.deepEqual(await call,{content:[]});
+    const continued = leases[0].call('x', {}, input);
+    await new Promise(r=>setTimeout(r,0));
+    assert.ok(pending);pending();assert.deepEqual(await continued,{content:[]});
     await leases[0].release();await newer.release();
   } finally {await Promise.all(leases.map(l=>l.release()));await manager.close();}
 });
@@ -98,10 +100,10 @@ test("最后一个初始化等待者取消会关闭连接", async () => {
 
 test("删除配置释放空闲连接，活动租约进入 draining", async () => {
   let closes=0;
-  const manager=new McpConnectionManager(()=>{let h!:McpTransportHandlers;return new McpClient({async start(handlers){h=handlers;},async close(){closes++;},async send(m){if('method'in m&&'id'in m)h.message({jsonrpc:'2.0',id:m.id,result:m.method==='initialize'?{protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'t',version:'1'}}:{tools:[]}});}});});
+  const manager=new McpConnectionManager(()=>{let h!:McpTransportHandlers;return new McpClient({async start(handlers){h=handlers;},async close(){closes++;},async send(m){if('method'in m&&'id'in m)h.message({jsonrpc:'2.0',id:m.id,result:m.method==='initialize'?{protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'t',version:'1'}}:m.method==='tools/call'?{content:[]}:{tools:[]}});}});});
   const input={server:{name:'s',workspaceRoot:'/w',configurationId:'c',secrets:[],config:{type:'stdio' as const,command:'x',args:[],env:{}}},signal:new AbortController().signal,deadlineMs:Date.now()+1000,revalidate:async()=>{}};
   try{
-    const lease=await manager.acquire(input);await manager.reconcile('/w',[]);assert.equal(closes,0);await assert.rejects(lease.call('x',{},input));await lease.release();assert.ok(closes>0);
+    const lease=await manager.acquire(input);await manager.reconcile('/w',[]);assert.equal(closes,0);assert.deepEqual(await lease.call('x',{},input),{content:[]});await lease.release();assert.ok(closes>0);
     const idle=await manager.acquire({...input,server:{...input.server,name:'idle'}});await idle.release();const before=closes;await manager.reconcile('/w',[]);assert.ok(closes>before);
   }finally{await manager.close();}
 });

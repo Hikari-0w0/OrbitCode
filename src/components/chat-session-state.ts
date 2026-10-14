@@ -148,7 +148,9 @@ export function chatSessionReducer(
       selectedProvider: action.provider,
       mode: action.mode,
       modeTurn: action.modeTurn,
-      messages: action.messages.map((message) => ({ ...message })),
+      messages: action.messages.map((message) => ({ ...message,
+        ...(message.role === "assistant" ? { persistence: { status: "saved" as const, revision: action.revision } } : {}),
+      })),
       history: action.messages.flatMap((message): readonly PlainConversationMessage[] =>
         message.content.length === 0
           ? []
@@ -361,6 +363,7 @@ export function chatSessionReducer(
       stopReason: "final-response",
       durationMs: action.event?.durationMs ?? action.durationMs ?? 0,
       verification: action.event?.verification,
+      persistence: action.event?.persistence,
       progress: undefined,
     }));
     return {
@@ -388,6 +391,7 @@ export function chatSessionReducer(
       stopReason: action.event.reason,
       durationMs: action.event.durationMs,
       verification: action.event.verification,
+      persistence: action.event.persistence,
       progress: undefined,
       runtimePermissions: message.runtimePermissions?.map((item) => ["awaiting", "submitting", "submitted"].includes(item.state) ? { ...item, state: "cancelled" } : item),
       toolExecutions: settleInterruptedTools(message.toolExecutions ?? []),

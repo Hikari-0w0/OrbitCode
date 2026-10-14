@@ -1,4 +1,5 @@
 import path from "node:path";
+import { LocalSettingsStore } from "@/lib/local-settings-store";
 
 import {
   assertMaxAgentRuntime,
@@ -19,23 +20,62 @@ import {
   type ResolvedProviderConfig,
 } from "@/models/config";
 import type { ProviderSummary } from "@/runtime/types";
+import type { ManagedSettings } from "@/runtime/settings-types";
 
 export type ProviderContext = {
   readonly providers: readonly ProviderConfig[];
   readonly environment: Environment;
   readonly maxIterations: AgentIterationLimit;
   readonly maxRuntimeMs: number;
+  readonly managedCredentials?: ReadonlyMap<string, string>;
+  readonly managedNames?: ReadonlyMap<string, string>;
+  readonly defaultProviderId?: string;
+  readonly settingsRevision?: number;
+  readonly managedSettings?: ManagedSettings;
 };
 
 export async function loadProviderContext(
   cwd = process.cwd(),
   processEnvironment: Environment = process.env,
   configPath = path.join(cwd, "orbitcode.yaml"),
+  preferLegacy = false,
+  settingsStore = new LocalSettingsStore(),
+  readLocalEnvironment = true,
 ): Promise<ProviderContext> {
-  const environment = await loadLocalEnvironment({
+  const environment = readLocalEnvironment ? await loadLocalEnvironment({
     cwd,
     processEnvironment,
-  });
+  }) : { ...processEnvironment };
+  const settings = preferLegacy ? null : await settingsStore.load();
+  if (settings) {
+    const credentials = new Map<string, string>();
+    const names = new Map<string, string>();
+    const providers: ProviderConfig[] = settings.providers.filter((provider) => provider.enabled).map((provider) => {
+      names.set(provider.id, provider.displayName);
+      const key = provider.credential.kind === "local"
+        ? provider.credential.value
+        : provider.credential.kind === "environment" ? environment[provider.credential.variable] : undefined;
+      if (key) credentials.set(provider.id, key);
+      return {
+        name: provider.id,
+        protocol: "openai",
+        model: provider.model,
+        baseUrl: provider.baseUrl,
+        apiKeyEnvironmentVariable: provider.credential.kind === "environment" ? provider.credential.variable : "ORBITCODE_MANAGED_CREDENTIAL",
+        context: provider.context,
+        ...(provider.thinking ? { thinking: provider.thinking } : {}),
+        ...(provider.transport ? { transport: provider.transport } : {}),
+      };
+    });
+    return {
+      providers, environment, managedCredentials: credentials, managedNames: names,
+      defaultProviderId: settings.defaultProviderId,
+      settingsRevision: settings.revision,
+      managedSettings: settings,
+      maxIterations: settings.maxIterations ?? resolveMaxAgentIterations(environment),
+      maxRuntimeMs: settings.maxRuntimeMinutes === undefined ? resolveMaxAgentRuntime(environment) : settings.maxRuntimeMinutes * 60_000,
+    };
+  }
   const providers = await loadProviderConfigs({
     filePath: configPath,
   });
@@ -95,11 +135,17 @@ export function resolveMaxAgentRuntime(environment: Environment): number {
 export function summarizeProviders({
   providers,
   environment,
+  managedCredentials,
+  managedNames,
+  defaultProviderId,
 }: ProviderContext): readonly ProviderSummary[] {
-  return providers.map((provider) => ({
+  // 两端的默认候选顺序一致；不修改快照，也不覆盖仍有效的显式会话绑定。
+  const ordered = [...providers].sort((left, right) => Number(right.name === defaultProviderId) - Number(left.name === defaultProviderId));
+  return ordered.map((provider) => ({
     name: provider.name,
+    ...(managedNames?.get(provider.name) ? { displayName: managedNames.get(provider.name) } : {}),
     model: provider.model,
-    available: Boolean(environment[provider.apiKeyEnvironmentVariable]),
+    available: managedCredentials ? managedCredentials.has(provider.name) : Boolean(environment[provider.apiKeyEnvironmentVariable]),
   }));
 }
 
@@ -107,6 +153,13 @@ export function resolveRuntimeProvider(
   context: ProviderContext,
   providerName: string,
 ): ResolvedProviderConfig {
+  if (context.managedCredentials) {
+    const selected = context.providers.find((provider) => provider.name === providerName);
+    if (!selected) throw new ConfigurationError("config-value", `找不到模型配置：${providerName}`);
+    const apiKey = context.managedCredentials.get(providerName);
+    if (!apiKey) throw new ConfigurationError("credential", `模型配置“${providerName}”缺少凭据。`);
+    return { ...selected, apiKey };
+  }
   return resolveProviderConfig({
     providers: context.providers,
     providerName,

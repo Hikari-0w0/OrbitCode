@@ -20,11 +20,14 @@ Web 与 CLI 共用本地 Agent 运行时：工具执行、权限、Plan/Do、上
 
 ```bash
 npm install
-cp .env.example .env
-cp orbitcode.example.yaml orbitcode.yaml
+npm run dev
 ```
 
-在本地 `.env` 中填写真实 API Key。YAML 不保存密钥，只保存环境变量名称：
+打开 [http://localhost:3000/settings](http://localhost:3000/settings)，添加 OpenAI 兼容模型和本机工作区，然后返回对话。模型密钥可选择在本机私密设置中保存，或引用环境变量；MCP Server 也可在设置页添加、停用、连接并查看发现的工具。保存 MCP 配置本身不会启动子进程或发送网络请求。托管设置存放在 `~/.orbitcode/settings-v1.json`，仅本机服务的设置接口可读写；已有对话从下一轮开始使用新配置。
+
+已有 YAML 配置的用户可在设置页预览并确认导入，原文件保持不变。以下是仍受支持的旧配置方式；显式 `--config` 继续使用指定的旧模型文件。
+
+在本地 `.env` 中填写真实 API Key。旧 YAML 只保存环境变量名称：
 
 ```dotenv
 MODEL_API_KEY=your-local-api-key
@@ -52,7 +55,7 @@ providers:
       preview_chars: 2000
 ```
 
-`.env` 和 `orbitcode.yaml` 均不会被 Git 跟踪。OrbitCode 启动时自动加载当前工作目录的 `.env`，但不会覆盖进程中已经导出的同名变量。
+`.env` 和 `orbitcode.yaml` 均不会被 Git 跟踪。非隔离运行会加载当前工作目录的 `.env`，但不会覆盖进程中已经导出的同名变量。使用 `--data-dir` 的 CLI 评测不会自动加载该文件。
 
 `thinking` 为可选配置。为兼容既有配置，省略 `api_style` 时使用 SiliconFlow 的 `enable_thinking` 参数；连接 DeepSeek 官方 API 时必须设置 `api_style: deepseek`，此时 OrbitCode 会发送官方的 `thinking.type` 参数，且不接受仅由 SiliconFlow 支持的 `budget_tokens`。
 
@@ -62,11 +65,11 @@ providers:
 npm run dev
 ```
 
-浏览器访问 [http://localhost:3000](http://localhost:3000)。Web 使用项目根目录的 `.env` 和 `orbitcode.yaml`，无需在页面中重复配置密钥或服务地址。Web 可另外从未入库的 `orbitcode.workspaces.yaml` 加载本地授权项目；未创建该文件时，保持以 OrbitCode 启动目录作为唯一默认 Workspace。
+浏览器访问 [http://localhost:3000](http://localhost:3000)。首次使用可从侧栏进入“设置”，添加模型和工作区。尚未创建托管设置时，旧版 `orbitcode.yaml` 与 `orbitcode.workspaces.yaml` 仍可使用；托管设置建立后以托管资源为准。
 
 ### 选择本地 Workspace
 
-需要管理多个本地项目时，先复制示例并把每个 `path` 改为已存在的绝对目录：
+需要管理多个本地项目时，在设置页添加目录。旧版文件配置仍可使用：
 
 ```bash
 cp orbitcode.workspaces.example.yaml orbitcode.workspaces.yaml
@@ -234,7 +237,9 @@ npm run cli -- export-conversation <conversation-id> --output conversation.json
 npm run cli -- export-run <run-id> --output run.json
 ```
 
-存在多个 Provider 时通过 `--provider` 明确选择。默认从启动目录读取 `.env`、`orbitcode.yaml` 和 Workspace 配置；选择 Workspace 不改变凭据来源。`--resume` 恢复原绑定，不能同时指定 Provider 或 Workspace 覆盖参数。两端使用相同配置根和配置标识时，可先后继续 `~/.orbitcode/conversations-v1` 中同一会话；并发写入由写租约和 revision 保护。
+存在多个 Provider 时通过 `--provider` 明确选择。默认优先读取设置页保存的托管资源；未创建托管设置时读取启动目录的旧配置和 `.env`。显式 `--config` 使用旧模型文件。交互 CLI 的 `--data-dir` 使用独立托管设置、会话、日志与用户级权限，且不自动加载日常 `.env`。`--resume` 恢复原绑定，不能同时指定 Provider 或 Workspace 覆盖参数。两端使用相同配置根和配置标识时，可先后继续 `~/.orbitcode/conversations-v1` 中同一会话；并发写入由写租约和 revision 保护。
+
+单次非交互运行可使用 `npm run cli -- run --prompt-file task.txt --output-format json`，或以 `--stdin` 接收多行输入；进程等待模型与持久化结束后输出结果。JSONL 模式按序输出事件及唯一终态。未授权操作返回 blocked 和退出码 3；可在显式 `--data-dir` 下使用 `--policy-file` 指定本次隔离策略。运行结果的 `completed` 只表示 Agent 正常结束，任务正确性仍须独立验收。完整用法见 [Agent 评测用法](docs/evals/agent-evaluation.md)。
 
 | 终端操作 | 命令 |
 | --- | --- |
@@ -258,7 +263,8 @@ npm run cli -- export-run <run-id> --output run.json
 
 ```bash
 npm run dev       # 启动开发服务器
-npm run cli       # 使用默认 orbitcode.yaml 启动命令行 Agent
+npm run cli       # 使用托管设置或旧版配置启动命令行 Agent
+npm run eval:agent -- --help # 查看真实模型评测的显式预算参数
 npm run test      # 运行单元、集成和端到端测试
 npm run build     # 生成生产构建
 npm run start     # 启动生产服务器
@@ -269,7 +275,7 @@ npm run check     # 依次执行 lint、类型检查和生产构建
 
 ## 环境变量
 
-复制 `.env.example` 为 `.env`，只填写本地 API Key；模型名和服务地址写在未入库的 `orbitcode.yaml`。这些配置只在服务端读取。任何 API Key 都不得提交到 Git、写入 YAML、作为命令行参数传递或发送到浏览器。`ORBITCODE_MAX_AGENT_ITERATIONS` 和 `ORBITCODE_MAX_AGENT_RUNTIME_MINUTES` 同时影响 Web 与 CLI Agent Loop。
+可在设置页选择本机私密存储或环境变量作为模型凭据；旧版文件方式可复制 `.env.example` 为 `.env`。任何 API Key 都不得提交到 Git、写入公开配置、作为命令行参数传递或发送到浏览器。`ORBITCODE_MAX_AGENT_ITERATIONS` 和 `ORBITCODE_MAX_AGENT_RUNTIME_MINUTES` 同时影响 Web 与 CLI Agent Loop；托管设置中的同类上限优先。
 
 ## 后续阶段
 

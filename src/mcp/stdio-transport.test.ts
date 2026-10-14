@@ -33,3 +33,22 @@ test("stdio 启动失败和请求中进程退出有界收敛", async () => {
   const client=new McpClient(new McpStdioTransport({command:process.execPath,args:['tests/fixtures/mcp/stdio-server.mjs'],env:{},cwd:process.cwd()}));
   try{await client.initialize(options());await assert.rejects(client.callTool('echo',{text:'exit'},options()));assert.equal(client.peer.pendingCount,0);}finally{await client.close();}
 });
+
+test("MCP 子进程只获得显式环境，不继承宿主模型凭据", async () => {
+  const name = "ORBITCODE_UNSELECTED_TEST_KEY";
+  const previous = process.env[name];
+  process.env[name] = "synthetic-unselected-secret";
+  const code = `process.stdout.write(JSON.stringify({jsonrpc:'2.0',method:'environment',params:{inherited:!!process.env.ORBITCODE_UNSELECTED_TEST_KEY,explicit:process.env.EXPLICIT_MARKER}})+'\\n');process.stdin.resume();`;
+  const transport = new McpStdioTransport({ command: process.execPath, args: ["-e", code], cwd: process.cwd(), env: { EXPLICIT_MARKER: "allowed" } });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("子进程没有返回环境元数据")), 2000);
+      void transport.start({ message(message) {
+        if (!("method" in message)) return;
+        clearTimeout(timer);
+        try { assert.equal(message.params?.inherited, false); assert.equal(message.params?.explicit, "allowed"); resolve(); }
+        catch (error) { reject(error); }
+      }, closed() {} }, new AbortController().signal).catch(reject);
+    });
+  } finally { await transport.close(); if (previous === undefined) delete process.env[name]; else process.env[name] = previous; }
+});

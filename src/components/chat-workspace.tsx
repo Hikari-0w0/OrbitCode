@@ -156,8 +156,8 @@ export function ChatWorkspace() {
         setProviders(providerCatalog.providers);
         setWorkspaces(workspaceCatalog.workspaces);
 
-        const fallbackProvider = availableProvider ?? providerCatalog.providers[0];
-        const fallbackWorkspace = defaultWorkspace ?? workspaceCatalog.workspaces[0];
+        const fallbackProvider = availableProvider;
+        const fallbackWorkspace = defaultWorkspace ?? workspaceCatalog.workspaces.find((workspace) => workspace.available);
         if (!fallbackProvider || !fallbackWorkspace) {
           throw new Error("没有可用于恢复会话绑定的 Provider 或 Workspace 配置。");
         }
@@ -195,9 +195,7 @@ export function ChatWorkspace() {
         });
         dispatch({
           type: "notice-set",
-          notice: availableProvider && defaultWorkspace
-            ? undefined
-            : "当前运行配置不可用；已保存的会话仍可只读查看。",
+          notice: defaultWorkspace ? undefined : "默认工作区当前不可用，已选择其他可用工作区。",
         });
         setCatalogState("ready");
       } catch (error) {
@@ -212,9 +210,8 @@ export function ChatWorkspace() {
 
   useEffect(() => {
     if (
-      catalogState !== "ready" ||
-      !session.selectedProvider ||
-      !session.selectedWorkspaceId
+      catalogState === "loading" ||
+      (catalogState === "ready" && (!session.selectedProvider || !session.selectedWorkspaceId))
     ) return;
     const controller = new AbortController();
     async function restoreConversation(): Promise<void> {
@@ -236,7 +233,7 @@ export function ChatWorkspace() {
           ?? catalog.conversations[0];
         if (selected) {
           if (!await loadConversation(selected.id, controller.signal, false)) return;
-        } else {
+        } else if (catalogState === "ready") {
           if (!await createConversation(
             session.selectedWorkspaceId,
             session.selectedProvider,
@@ -938,10 +935,13 @@ export function ChatWorkspace() {
           <p>选择授权项目，只读规划，确认后在同一上下文自主执行</p>
         </div>
 
+        <a className="settingsLink" href="/settings">管理模型、工作区与 MCP →</a>
+
         <ConversationList
           conversations={conversations}
           selectedId={session.conversationId}
-          disabled={isStreaming || conversationState !== "ready" || catalogState !== "ready"}
+          disabled={isStreaming || conversationState !== "ready"}
+          actionsDisabled={catalogState !== "ready"}
           onSelect={(conversationId) => void loadConversation(conversationId)}
           onCreate={() => void createConversation(session.selectedWorkspaceId, session.selectedProvider)}
           onRename={() => void renameConversation()}
@@ -971,7 +971,7 @@ export function ChatWorkspace() {
               )}
               {providers.map((provider) => (
                 <option key={provider.name} value={provider.name} disabled={!provider.available}>
-                  {provider.name}{provider.available ? "" : "（不可用）"}
+                  {provider.displayName ?? provider.name}{provider.available ? "" : "（不可用）"}
                 </option>
               ))}
             </select>

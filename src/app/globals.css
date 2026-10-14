@@ -355,3 +355,22 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+.settingsPage { max-width: 960px; margin: 0 auto; padding: 40px 24px 90px; }
+.settingsHeader h1 { margin: 22px 0 4px; font-size: 32px; }
+.settingsHeader p, .settingsCard p { color: var(--text-soft); }
+.settingsHeader a { color: var(--green); text-decoration: none; }
+.settingsCard { margin-top: 28px; padding: 24px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.settingsCard h2 { margin: 0; font-size: 20px; }
+.settingsCard ul { display: grid; gap: 8px; padding: 0; list-style: none; }
+.settingsCard li { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px; border: 1px solid var(--line-soft); border-radius: 8px; }
+.settingsCard li code { overflow-wrap: anywhere; }
+.settingsCard li small { color: var(--text-soft); }
+.settingsForm { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-top: 22px; }
+.settingsForm label { display: grid; gap: 6px; color: var(--text-soft); font-size: 13px; }
+.settingsForm input, .settingsForm select { min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--text); }
+.settingsPage button { padding: 8px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-raised); color: var(--green); }
+.settingsPage button:hover:not(:disabled) { border-color: var(--green); }
+.settingsPage button:disabled { opacity: .5; }
+.settingsNotice { padding: 12px; border: 1px solid var(--green); border-radius: 7px; color: var(--green); }
+.settingsLink { display: inline-block; margin-top: 16px; color: var(--green); font-size: 12px; }

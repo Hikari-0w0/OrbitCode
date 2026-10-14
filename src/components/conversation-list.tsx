@@ -6,6 +6,7 @@ export function ConversationList({
   conversations,
   selectedId,
   disabled,
+  actionsDisabled = false,
   onSelect,
   onCreate,
   onRename,
@@ -14,6 +15,7 @@ export function ConversationList({
   readonly conversations: readonly ConversationSummary[];
   readonly selectedId: string;
   readonly disabled: boolean;
+  readonly actionsDisabled?: boolean;
   readonly onSelect: (conversationId: string) => void;
   readonly onCreate: () => void;
   readonly onRename: () => void;
@@ -40,9 +42,9 @@ export function ConversationList({
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg>
       </div>
       <div className="conversationActions">
-        <button type="button" disabled={disabled} onClick={onCreate}>新建</button>
-        <button type="button" disabled={disabled || !selectedId} onClick={onRename}>重命名</button>
-        <button type="button" disabled={disabled || !selectedId} onClick={onDelete}>删除</button>
+        <button type="button" disabled={disabled || actionsDisabled} onClick={onCreate}>新建</button>
+        <button type="button" disabled={disabled || actionsDisabled || !selectedId} onClick={onRename}>重命名</button>
+        <button type="button" disabled={disabled || actionsDisabled || !selectedId} onClick={onDelete}>删除</button>
       </div>
     </div>
   );

@@ -16,7 +16,14 @@ export function assertSameOrigin(request: Request): void {
   const origin = request.headers.get("origin");
   let requestOrigin: string;
   try {
-    requestOrigin = new URL(request.url).origin;
+    const url = new URL(request.url);
+    const host = request.headers.get("host");
+    const loopback = (value: string) => ["localhost", "127.0.0.1", "::1", "[::1]"].includes(value);
+    if (host && loopback(url.hostname)) {
+      const hostUrl = new URL(`${url.protocol}//${host}`);
+      if (!loopback(hostUrl.hostname) || hostUrl.pathname !== "/") throw new Error("invalid-host");
+      requestOrigin = hostUrl.origin;
+    } else requestOrigin = url.origin;
   } catch {
     throw new WebRequestSecurityError("forbidden-origin", "请求来源无效。");
   }
@@ -29,10 +36,14 @@ export function assertSameOrigin(request: Request): void {
 }
 
 export async function readPermissionJsonBody(request: Request): Promise<unknown> {
+  return readBoundedJsonBody(request, MAX_PERMISSION_API_BODY_BYTES);
+}
+
+export async function readBoundedJsonBody(request: Request, maximumBytes: number): Promise<unknown> {
   const length = request.headers.get("content-length");
   if (
     length !== null &&
-    (!/^\d+$/.test(length) || Number(length) > MAX_PERMISSION_API_BODY_BYTES)
+    (!/^\d+$/.test(length) || Number(length) > maximumBytes)
   ) {
     throw new WebRequestSecurityError("body-too-large", "请求体过大。");
   }
@@ -48,7 +59,7 @@ export async function readPermissionJsonBody(request: Request): Promise<unknown>
       const item = await reader.read();
       if (item.done) break;
       size += item.value.byteLength;
-      if (size > MAX_PERMISSION_API_BODY_BYTES) {
+      if (size > maximumBytes) {
         await reader.cancel();
         throw new WebRequestSecurityError("body-too-large", "请求体过大。");
       }

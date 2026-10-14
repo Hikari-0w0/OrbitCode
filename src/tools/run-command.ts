@@ -23,7 +23,9 @@ type RunCommandInput = {
 };
 
 const baseRunCommandSchema = objectSchema({
-  command: stringSchema({ minLength: 1, maxLength: 8 * 1024 }),
+  command: stringSchema({ minLength: 1, maxLength: 8 * 1024,
+    description: "工具会自动返回原始 exitCode、stdout 和 stderr。测试或复现时直接运行检查命令；不要为显示退出码追加 echo、|| true 或其他会覆盖失败退出码的命令。",
+  }),
   cwd: optionalSchema(stringSchema({
     minLength: 1,
     maxLength: 1_024,
