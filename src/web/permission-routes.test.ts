@@ -17,12 +17,12 @@ import { permissionSessionManager } from "@/web/permission-session-store";
 const origin = "http://localhost:3000";
 
 test("创建权限会话并只接受同源模式更新", async () => {
-  const rejected = createSession(new Request(`${origin}/api/permission-sessions`, {
+  const rejected = await createSession(new Request(`${origin}/api/permission-sessions`, {
     method: "POST",
   }));
   assert.equal(rejected.status, 403);
 
-  const createdResponse = createSession(mutationRequest("/api/permission-sessions", "POST"));
+  const createdResponse = await createSession(mutationRequest("/api/permission-sessions", "POST"));
   assert.equal(createdResponse.status, 201);
   const created = parsePermissionSessionResponse(await createdResponse.json());
   assert.equal(created.mode, "default");
@@ -148,7 +148,7 @@ test("关闭会话取消等待，迟到决定不能恢复工具调用", async ()
 });
 
 async function createPermissionSession() {
-  const response = createSession(
+  const response = await createSession(
     mutationRequest("/api/permission-sessions", "POST"),
   );
   return parsePermissionSessionResponse(await response.json());

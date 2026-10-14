@@ -3,6 +3,7 @@ import type { AgentEvent } from "@/core/agent-events";
 
 export type ProviderSummary = {
   readonly name: string;
+  readonly displayName?: string;
   readonly model: string;
   readonly available: boolean;
 };

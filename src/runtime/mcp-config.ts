@@ -1,5 +1,7 @@
 import { homedir } from "node:os";
 import path from "node:path";
+import { LocalSettingsStore } from "@/lib/local-settings-store";
+import type { ManagedSettings } from "@/runtime/settings-types";
 import { parseDocument, isAlias, visit } from "yaml";
 import { isObject } from "@/mcp/messages";
 import { mcpDigest } from "@/lib/mcp-redaction";
@@ -20,10 +22,35 @@ export type McpConfigOptions = {
   readonly environment: Readonly<Record<string, string | undefined>>;
   readonly userHome?: string;
   readonly readText?: (file: string) => Promise<string>;
+  readonly settingsStore?: LocalSettingsStore;
+  readonly preferLegacy?: boolean;
+  readonly managedSettings?: ManagedSettings | null;
 };
 const SERVER_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const RESERVED_HEADERS = new Set(["host", "content-length", "connection", "accept", "content-type", "mcp-session-id", "mcp-protocol-version"]);
 export async function loadMcpConfig(options: McpConfigOptions): Promise<McpConfigSnapshot> {
+  const managed = options.preferLegacy ? null : options.managedSettings !== undefined ? options.managedSettings
+    : await (options.settingsStore ?? new LocalSettingsStore(path.join(options.userHome ?? homedir(), ".orbitcode"))).load();
+  if (managed) {
+    const workspace = managed.workspaces.find((item) => item.rootPath === options.workspaceRoot);
+    const selected = new Map<string, (typeof managed.mcpServers)[number]>();
+    for (const server of managed.mcpServers) if (server.scope === "user") selected.set(server.name, server);
+    for (const server of managed.mcpServers) if (server.scope === "workspace" && server.workspaceId === workspace?.id) selected.set(server.name, server);
+    const servers: ResolvedMcpServer[] = [];
+    const diagnostics: { serverName: string; detail: string }[] = [];
+    for (const [name, item] of selected) {
+      if (!item.enabled) continue;
+      try {
+        const secrets: string[] = [];
+        const config = parseServer(item.config, options.environment, secrets);
+        servers.push({ name, workspaceRoot: options.workspaceRoot, config, secrets,
+          configurationId: mcpDigest({ workspaceRoot: options.workspaceRoot, config }) });
+      } catch {
+        diagnostics.push({ serverName: name, detail: "MCP Server 配置无效。" });
+      }
+    }
+    return { servers, diagnostics };
+  }
   const diagnostics: { serverName: string; detail: string }[] = [];
   const read = options.readText ?? (async (file: string) => {
     // 有界读取避免先把任意大的配置载入内存。
@@ -76,7 +103,10 @@ function string(value: unknown, max: number, empty = false): string {
   if (typeof value !== "string" || (!empty && !value.trim()) || value.includes("\0") || Buffer.byteLength(value) > max) invalid();
   return value;
 }
-function parseServer(raw: unknown, environment: McpConfigOptions["environment"], secrets: string[]): McpServerConfig {
+export function parseMcpServerConfig(raw: unknown): McpServerConfig {
+  return parseServer(raw, {}, [], false);
+}
+function parseServer(raw: unknown, environment: McpConfigOptions["environment"], secrets: string[], expandEnvironment = true): McpServerConfig {
   if (!isObject(raw)) invalid();
   const map = (value: unknown, headers: boolean): Record<string, string> => {
     if (value === undefined) return {};
@@ -89,6 +119,7 @@ function parseServer(raw: unknown, environment: McpConfigOptions["environment"],
       const source = string(rawValue, 16 * 1024, true);
       const expanded = source.replace(/\$\{([^}]*)\}/g, (_all, variable: string) => {
         if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable)) invalid();
+        if (!expandEnvironment) return _all;
         const resolved = environment[variable];
         if (resolved === undefined) throw new ConfigError(`MCP ${headers ? "headers" : "env"} 引用未定义变量：${variable}。`);
         secrets.push(resolved);

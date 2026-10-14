@@ -10,9 +10,11 @@ import {
   parseCliArguments,
 } from "@/cli/arguments";
 import { runTerminalChat } from "@/cli/terminal-chat";
+import { runOnce } from "@/cli/run-once";
 import { writeFile } from "node:fs/promises";
 import { LocalConversationStore } from "@/lib/local-conversation-store";
 import { LocalAgentRunLog } from "@/lib/local-agent-run-log";
+import { LocalSettingsStore } from "@/lib/local-settings-store";
 import { LocalConversationExporter, ConversationExportError } from "@/lib/local-conversation-exporter";
 import { AgentRuntime } from "@/runtime/agent-runtime";
 import { ConversationService } from "@/runtime/conversation-service";
@@ -21,6 +23,7 @@ import { ConversationOperationGuard } from "@/runtime/conversation-operation-gua
 import { PermissionSessionManager } from "@/runtime/permission-session-manager";
 import { loadProviderContext } from "@/runtime/config";
 import { loadWorkspaceCatalog, WorkspaceCatalogError } from "@/runtime/workspace-config";
+import { loadMcpConfig } from "@/runtime/mcp-config";
 import { MacOsSeatbeltCommandSandbox } from "@/tools/macos-seatbelt-sandbox";
 import { SessionController, CliInteractionError } from "@/cli/session-controller";
 import { TerminalRenderer } from "@/cli/renderer";
@@ -66,6 +69,7 @@ export async function runCli({
       output.write(HELP_TEXT);
       return 0;
     }
+    if (argumentsResult.type === "run-once") return runOnce({ arguments: argumentsResult, cwd, environment, input, output, errorOutput });
     if (argumentsResult.type === "export-run") {
       const outputPath = path.resolve(
         cwd,
@@ -88,16 +92,31 @@ export async function runCli({
       output.write("已导出完整会话；包含敏感内容，请妥善保管。\n");
       return 0;
     }
-    const loadConfig = () => loadProviderContext(cwd, environment, path.resolve(cwd, argumentsResult.configPath));
-    const loadWorkspaces = () => loadWorkspaceCatalog({ cwd });
+    const dataDir = argumentsResult.dataDir ? path.resolve(cwd, argumentsResult.dataDir) : undefined;
+    const settingsStore = new LocalSettingsStore(dataDir);
+    const storedSettings = argumentsResult.explicitConfig ? null : await settingsStore.load();
+    if (dataDir && !storedSettings) throw new ConfigurationError("config-file", "隔离目录中没有托管设置。");
+    const actualStore = dataDir ? new LocalConversationStore(path.join(dataDir, "conversations-v1")) : store;
+    const actualLog = dataDir ? new LocalAgentRunLog(path.join(dataDir, "logs")) : log;
+    const loadConfig = () => loadProviderContext(cwd, environment, path.resolve(cwd, argumentsResult.configPath),
+      Boolean(argumentsResult.explicitConfig), settingsStore, !dataDir);
+    const loadWorkspaces = (context?: Awaited<ReturnType<typeof loadConfig>>) => loadWorkspaceCatalog({ cwd, settingsStore,
+      ...(context ? { managedSettings: context.managedSettings ?? null } : {}) });
     const manager = new ConversationRuntimeManager();
-    const guard = new ConversationOperationGuard(manager, store);
+    const guard = new ConversationOperationGuard(manager, actualStore);
     const permissions = new PermissionSessionManager();
-    const conversations = new ConversationService(store, manager, guard, loadConfig);
-    const runtime = new AgentRuntime({ store, manager, guard, permissions, log,
-      sandbox: new MacOsSeatbeltCommandSandbox(), loadConfig, loadWorkspaces });
+    const conversations = new ConversationService(actualStore, manager, guard, loadConfig);
+    const runtime = new AgentRuntime({ store: actualStore, manager, guard, permissions, log: actualLog,
+      sandbox: new MacOsSeatbeltCommandSandbox(), loadConfig, loadWorkspaces,
+      ...(dataDir ? { loadMcp: async (workspaceRoot: string, context: Awaited<ReturnType<typeof loadConfig>>) => loadMcpConfig({ workspaceRoot,
+        environment: context.environment, managedSettings: context.managedSettings ?? null, settingsStore, userHome: dataDir }),
+        permissionLocations: (workspaceRoot: string) => ({ user: path.join(dataDir, "permissions.yaml"),
+          project: path.join(workspaceRoot, ".orbitcode", "permissions.yaml"),
+          local: path.join(workspaceRoot, ".orbitcode", "permissions.local.yaml") }) } : {}),
+    });
     const session = new SessionController({ cwd, terminal, runtime, conversations, permissions,
-      log, loadConfig, loadWorkspaces, renderer: new TerminalRenderer(output, errorOutput) });
+      log: actualLog, loadConfig, loadWorkspaces, renderer: new TerminalRenderer(output, errorOutput),
+      defaultPermissionMode: storedSettings?.defaultPermissionMode });
     const removeMcpShutdown = installMcpShutdown(() => runtime.close());
     try {
       await session.initialize(argumentsResult);

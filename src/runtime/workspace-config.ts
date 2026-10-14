@@ -1,5 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { LocalSettingsStore } from "@/lib/local-settings-store";
+import type { ManagedSettings } from "@/runtime/settings-types";
 
 import { parse } from "yaml";
 
@@ -53,6 +55,9 @@ type LoadWorkspaceCatalogOptions = {
   readonly filePath?: string;
   readonly readTextFile?: (filePath: string) => Promise<string>;
   readonly createBoundary?: (root: string) => Promise<WorkspaceBoundary>;
+  readonly settingsStore?: LocalSettingsStore;
+  readonly preferLegacy?: boolean;
+  readonly managedSettings?: ManagedSettings | null;
 };
 
 export async function loadWorkspaceCatalog({
@@ -60,7 +65,28 @@ export async function loadWorkspaceCatalog({
   filePath = path.join(cwd, "orbitcode.workspaces.yaml"),
   readTextFile = (target) => readFile(target, "utf8"),
   createBoundary = createWorkspaceBoundary,
+  settingsStore = new LocalSettingsStore(),
+  preferLegacy = false,
+  managedSettings,
 }: LoadWorkspaceCatalogOptions = {}): Promise<WorkspaceCatalog> {
+  const settings = preferLegacy ? null : managedSettings !== undefined ? managedSettings : await settingsStore.load();
+  if (settings) {
+    const selected = settings.workspaces.filter((item) => item.enabled);
+    const resolved = await Promise.all(selected.map(async (item) => {
+      try {
+        const boundary = await createBoundary(item.rootPath);
+        return { entry: { id: item.id, name: item.name, rootPath: boundary.root }, available: true };
+      } catch {
+        return { entry: { id: item.id, name: item.name, rootPath: item.rootPath }, available: false };
+      }
+    }));
+    const entries = resolved.map((item) => item.entry);
+    const defaultWorkspaceId = settings.defaultWorkspaceId ?? entries[0]?.id;
+    if (!defaultWorkspaceId) return createCatalog([], "");
+    return { entries, defaultWorkspaceId,
+      summaries: resolved.map(({ entry, available }) => ({ id: entry.id, name: entry.name,
+        available, isDefault: entry.id === defaultWorkspaceId })) };
+  }
   let source: string;
   try {
     source = await readTextFile(filePath);

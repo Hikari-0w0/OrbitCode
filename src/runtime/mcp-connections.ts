@@ -7,6 +7,7 @@ import type { ResolvedMcpServer } from "@/runtime/mcp-config";
 type Entry = {
   server: ResolvedMcpServer;
   state: "connecting" | "ready" | "failed" | "draining" | "closed";
+  retiring: boolean;
   client: McpClient;
   controller: AbortController;
   references: number;
@@ -19,6 +20,7 @@ export type AuthorizedMcpConnectionInput = {
   readonly signal: AbortSignal;
   readonly deadlineMs: number;
   readonly revalidate: (signal: AbortSignal) => Promise<void>;
+  readonly retryFailed?: boolean;
 };
 export type McpConnectionLease = {
   readonly tools: readonly McpToolDefinition[];
@@ -37,12 +39,18 @@ export class McpConnectionManager {
     const key = JSON.stringify([input.server.workspaceRoot, input.server.name, input.server.configurationId]);
     for (const [oldKey, old] of this.entries) {
       if (oldKey !== key && old.server.workspaceRoot === input.server.workspaceRoot && old.server.name === input.server.name) {
-        old.state = "draining";
+        old.retiring = true;
         if (!old.references) { await this.closeEntry(old); this.entries.delete(oldKey); }
       }
     }
     let entry = this.entries.get(key);
-    if (entry?.state === "failed" || entry?.client.failed || entry?.state === "draining") throw new McpError("mcp-transport", "MCP Server 已不可用；修改配置或重新初始化应用后再试。");
+    if (entry && (entry.state === "failed" || entry.client.failed) && !input.retryFailed) throw new McpError("mcp-transport", "MCP Server 已不可用；请显式重连。");
+    if (entry && (entry.state === "failed" || entry.client.failed || entry.retiring)) {
+      if (entry.references) throw new McpError("mcp-transport", "MCP Server 正在使用中，请等待现有调用结束后重连。");
+      await this.closeEntry(entry);
+      this.entries.delete(key);
+      entry = undefined;
+    }
     if (!entry) {
       if (this.entries.size >= 128) {
         const idle = [...this.entries].find(([, e]) => e.references === 0 && e.state === "ready");
@@ -50,7 +58,7 @@ export class McpConnectionManager {
         await this.closeEntry(idle[1]); this.entries.delete(idle[0]);
       }
       const client = this.createClient(input.server);
-      entry = { server: input.server, state: "connecting", client, controller: new AbortController(), references: 0, initialized: Promise.resolve(), tools: [] };
+      entry = { server: input.server, state: "connecting", retiring: false, client, controller: new AbortController(), references: 0, initialized: Promise.resolve(), tools: [] };
       const created = entry;
       created.initialized = (async () => {
         try {
@@ -72,7 +80,7 @@ export class McpConnectionManager {
       if (released) return;
       released = true;
       current.references--;
-      if (!current.references && current.state === "draining") {
+      if (!current.references && current.retiring) {
         await this.closeEntry(current);
         if (this.entries.get(key) === current) this.entries.delete(key);
       } else if (!current.references && current.state === "connecting") await this.closeEntry(current);
@@ -102,16 +110,16 @@ export class McpConnectionManager {
     } catch (error) { await release(); throw error; }
   }
   async invalidate(workspaceRoot: string, serverName: string): Promise<void> {
-    for (const entry of this.entries.values()) if (entry.server.workspaceRoot === workspaceRoot && entry.server.name === serverName) {
-      entry.state = "draining";
-      if (!entry.references) await this.closeEntry(entry);
+    for (const [key, entry] of this.entries) if (entry.server.workspaceRoot === workspaceRoot && entry.server.name === serverName) {
+      entry.retiring = true;
+      if (!entry.references) { await this.closeEntry(entry); this.entries.delete(key); }
     }
   }
   async reconcile(workspaceRoot: string, servers: readonly ResolvedMcpServer[]): Promise<void> {
     const configured = new Map(servers.map((server) => [server.name, server.configurationId]));
     for (const [key, entry] of this.entries) {
       if (entry.server.workspaceRoot !== workspaceRoot || configured.get(entry.server.name) === entry.server.configurationId) continue;
-      entry.state = "draining";
+      entry.retiring = true;
       if (!entry.references) { await this.closeEntry(entry); this.entries.delete(key); }
     }
   }

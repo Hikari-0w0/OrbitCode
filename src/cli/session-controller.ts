@@ -3,6 +3,7 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { ConversationCheckpoint } from "@/core/conversations/types";
 import type { PermissionUserDecision } from "@/core/permissions/approval";
+import type { PermissionMode } from "@/core/permissions/types";
 import { executablePlanId, PLAN_EXECUTION_PROMPT } from "@/core/conversations/plan-execution";
 import { LocalConversationExporter } from "@/lib/local-conversation-exporter";
 import type { LocalAgentRunLog } from "@/lib/local-agent-run-log";
@@ -23,7 +24,8 @@ export type SessionControllerOptions = {
   readonly log: LocalAgentRunLog;
   readonly renderer: TerminalRenderer;
   readonly loadConfig: () => Promise<ProviderContext>;
-  readonly loadWorkspaces: () => Promise<WorkspaceCatalog>;
+  readonly loadWorkspaces: (context?: ProviderContext) => Promise<WorkspaceCatalog>;
+  readonly defaultPermissionMode?: PermissionMode;
 };
 export class CliInteractionError extends Error {}
 
@@ -39,16 +41,21 @@ export class SessionController {
   exitRequested = false;
   exitCode = 0;
   constructor(private readonly options: SessionControllerOptions) {
-    this.permissionId = options.permissions.createSession().id;
+    this.permissionId = this.createPermissionSession();
+  }
+  private createPermissionSession(): string {
+    const id = this.options.permissions.createSession().id;
+    if (this.options.defaultPermissionMode) this.options.permissions.setMode(id, this.options.defaultPermissionMode);
+    return id;
   }
   get busy(): boolean { return this.active !== undefined; }
   async initialize(selection: { readonly providerName?: string; readonly workspaceId?: string; readonly resumeId?: string }): Promise<void> {
     if (selection.resumeId) await this.resume(selection.resumeId);
     else {
       const config = await this.options.loadConfig();
-      const providerId = selection.providerName ?? (config.providers.length === 1 ? config.providers[0].name : undefined);
+      const providerId = selection.providerName ?? config.defaultProviderId ?? (config.providers.length === 1 ? config.providers[0].name : undefined);
       if (!providerId) throw new CliInteractionError("存在多个 Provider，请使用 --provider 选择。");
-      const catalog = await this.options.loadWorkspaces();
+      const catalog = await this.options.loadWorkspaces(config);
       await this.create(providerId, selection.workspaceId ?? catalog.defaultWorkspaceId);
     }
     this.status();
@@ -98,7 +105,7 @@ export class SessionController {
   }
   private replace(checkpoint: ConversationCheckpoint): void {
     this.options.permissions.closeSession(this.permissionId);
-    this.permissionId = this.options.permissions.createSession().id;
+    this.permissionId = this.createPermissionSession();
     this.checkpoint = checkpoint;
     this.plan = undefined;
     this.confirmation = undefined;
@@ -129,9 +136,9 @@ export class SessionController {
   private permissionMode() {
     try { return this.options.permissions.getSession(this.permissionId).mode; }
     catch {
-      this.permissionId = this.options.permissions.createSession().id;
-      this.options.renderer.notice("权限会话已过期，旧授权失效，恢复 default 模式。");
-      return "default" as const;
+      this.permissionId = this.createPermissionSession();
+      this.options.renderer.notice("权限会话已过期，旧授权失效，恢复默认权限模式。");
+      return this.options.defaultPermissionMode ?? "default";
     }
   }
   private approve(argument: string): void {

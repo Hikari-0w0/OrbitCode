@@ -18,7 +18,7 @@ import type { CommandSandbox } from "@/tools/command-sandbox";
 import { ManagedProcessController } from "@/tools/managed-process";
 import { createModeToolPolicy } from "@/tools/mode-policy";
 import { PermissionGateway } from "@/tools/permission-gateway";
-import { addLocalPermissionAllow, loadPermissionRules } from "@/tools/permission-config";
+import { addLocalPermissionAllow, loadPermissionRules, type PermissionConfigLocations } from "@/tools/permission-config";
 import { resolveRuntimeProvider, type ProviderContext } from "@/runtime/config";
 import { resolveWorkspaceBoundary, WorkspaceCatalogError, type WorkspaceCatalog } from "@/runtime/workspace-config";
 import { createPromptEnvironment } from "@/runtime/prompt-environment";
@@ -45,10 +45,11 @@ export type AgentRuntimeOptions = {
   readonly sandbox: CommandSandbox;
   readonly log: AgentRunLogSink;
   readonly loadConfig: () => Promise<ProviderContext>;
-  readonly loadWorkspaces: () => Promise<WorkspaceCatalog>;
+  readonly loadWorkspaces: (context: ProviderContext) => Promise<WorkspaceCatalog>;
   readonly mcpConnections?: McpConnectionManager;
-  readonly loadMcp?: (workspaceRoot: string) => Promise<McpConfigSnapshot>;
+  readonly loadMcp?: (workspaceRoot: string, context: ProviderContext) => Promise<McpConfigSnapshot>;
   readonly createProvider?: (config: ResolvedProviderConfig) => ChatProvider;
+  readonly permissionLocations?: (workspaceRoot: string) => PermissionConfigLocations;
 };
 export class AgentRuntime {
   private readonly mcp: McpConnectionManager;
@@ -97,7 +98,7 @@ export class AgentRuntime {
       }
       const context = await this.options.loadConfig();
       const providerConfig = resolveRuntimeProvider(context, checkpoint.summary.providerId);
-      const workspaceCatalog = await this.options.loadWorkspaces();
+      const workspaceCatalog = await this.options.loadWorkspaces(context);
       const workspace = await resolveWorkspaceBoundary(
         workspaceCatalog,
         checkpoint.summary.workspaceId,
@@ -166,12 +167,14 @@ export class AgentRuntime {
               (await loadPermissionRules({
                 workspaceRoot: workspace.root,
                 toolTargets,
+                ...(this.options.permissionLocations ? { locations: this.options.permissionLocations(workspace.root) } : {}),
               })).rules,
             persistAllow: async (expression) => {
               await addLocalPermissionAllow({
                 workspaceRoot: workspace.root,
                 toolTargets,
                 expression,
+                ...(this.options.permissionLocations ? { locations: this.options.permissionLocations(workspace.root) } : {}),
               });
             },
           });
@@ -194,7 +197,8 @@ export class AgentRuntime {
         ownerToken: conversationOperation.lease.ownerToken,
       });
       const mcpManager = this.mcp;
-      const loadMcp = () => this.options.loadMcp?.(workspace.root) ?? this.options.loadConfig().then((current) => loadMcpConfig({ workspaceRoot: workspace.root, environment: current.environment }));
+      const loadMcp = () => this.options.loadMcp?.(workspace.root, context) ?? loadMcpConfig({ workspaceRoot: workspace.root,
+        environment: context.environment, managedSettings: context.managedSettings ?? null });
       return {
         initialize: async function* (signal, deadlineMs) {
           const externalTools = yield* initializeMcpWorkspace({ workspaceRoot: workspace.root, mode: input.mode, signal, deadlineMs,

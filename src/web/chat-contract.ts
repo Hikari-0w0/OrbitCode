@@ -461,15 +461,19 @@ export function parseProviderCatalogResponse(
   const providers = value.providers.map((provider) => {
     if (
       !isRecord(provider) ||
-      !hasExactFields(provider, ["name", "model", "available"]) ||
+      !(provider.displayName === undefined
+        ? hasExactFields(provider, ["name", "model", "available"])
+        : hasExactFields(provider, ["name", "model", "available", "displayName"])) ||
       typeof provider.name !== "string" ||
       typeof provider.model !== "string" ||
-      typeof provider.available !== "boolean"
+      typeof provider.available !== "boolean" ||
+      (provider.displayName !== undefined && typeof provider.displayName !== "string")
     ) {
       throw new WebChatContractError("服务端返回了无效的模型配置列表。");
     }
     return {
       name: provider.name,
+      ...(provider.displayName === undefined ? {} : { displayName: provider.displayName }),
       model: provider.model,
       available: provider.available,
     };

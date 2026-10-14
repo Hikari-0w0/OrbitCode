@@ -401,3 +401,25 @@ test("MCP 初始化审批终态不被迟到 HTTP 响应覆盖，状态按 Server
   assert.equal(message?.initialization?.length, 1);
   assert.equal(message?.initialization?.[0].phase, "ready");
 });
+
+test("停止、验证与保存维度独立，保存失败不能被 complete 状态覆盖", () => {
+  const started = startRequest({ ...populatedState(), requestState: "idle" }, "do");
+  const failed = chatSessionReducer(started, {
+    type: "request-completed", assistantId: "assistant-new", userMessage: { role: "user", content: "执行" },
+    finalMessage: { role: "assistant", content: "完成" }, mode: "do",
+    event: { type: "stopped", reason: "final-response", iterations: 1, durationMs: 50, sideEffect: "none",
+      finalMessage: { role: "assistant", content: "完成" }, verification: { status: "unverified", checks: [], blockers: [] },
+      persistence: { status: "failed", detail: "磁盘不可写" } },
+  });
+  const message = failed.messages.find((item) => item.id === "assistant-new");
+  assert.equal(message?.state, "complete");
+  assert.equal(message?.stopReason, "final-response");
+  assert.equal(message?.verification?.status, "unverified");
+  assert.equal(message?.persistence?.status, "failed");
+  assert.equal(failed.unsavedExpectedRevision, started.revision);
+  const restored = chatSessionReducer(failed, { type: "conversation-loaded", conversationId: "conversation-1", revision: 5,
+    workspaceId: "alpha", provider: "primary", mode: "do", modeTurn: 1, availability: "ready",
+    messages: [{ id: "assistant-new", role: "assistant", state: "complete", content: "完成" }] });
+  assert.equal(restored.messages[0].persistence?.status, "saved");
+  assert.equal(restored.unsavedExpectedRevision, undefined);
+});
