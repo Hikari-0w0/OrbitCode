@@ -19,6 +19,7 @@ export type ConversationOperation = {
 };
 
 export type ConversationOperationKind =
+  | "memory-commit"
   | "mode"
   | "agent"
   | "compress"

@@ -28,6 +28,9 @@ export type PromptEnvironment = {
 
 export type OptionalPromptContext = {
   readonly customInstructions?: string;
+  readonly projectInstructions?: string;
+  readonly memoryIndex?: string;
+  readonly resumeReminder?: string;
   readonly activatedSkills?: string;
   readonly longTermMemory?: string;
 };

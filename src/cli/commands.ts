@@ -3,7 +3,7 @@ export type CliInput =
   | { readonly type: "message"; readonly text: string }
   | { readonly type: "command"; readonly name: string; readonly argument: string };
 const commands = new Set([
-  "help", "status", "exit", "cancel", "providers", "provider", "workspaces", "workspace",
+  "background", "memory", "cleanup", "help", "status", "exit", "cancel", "providers", "provider", "workspaces", "workspace",
   "plan", "do", "execute-plan", "permissions", "approve", "new", "conversations", "resume",
   "history", "rename", "clear", "delete", "confirm", "compress", "retry-save", "recover", "tool", "export",
 ]);
@@ -28,4 +28,6 @@ export const COMMAND_HELP = `
 /new /conversations /resume <id> /history /rename <title>
 /clear /delete <id> /confirm <token>
 /compress /retry-save /recover /tool <call-id> /export <path>
+/background /memory [user|project] list|show <id>|update <id> <file>|delete <id>
+/memory on|off /cleanup preview /cleanup delete <id...>
 `;

@@ -1,3 +1,4 @@
+import {userConfigurationRoot} from "@/runtime/background-service";
 import { installMcpShutdown } from "@/runtime/mcp-host";
 import { ConversationRepositoryError } from "@/core/conversations/types";
 import path from "node:path";
@@ -50,6 +51,7 @@ type RunCliOptions = {
   readonly terminal: boolean;
   readonly store?: LocalConversationStore;
   readonly log?: LocalAgentRunLog;
+  readonly userConfigRoot?: string;
 };
 
 export async function runCli({
@@ -62,6 +64,7 @@ export async function runCli({
   terminal,
   store = new LocalConversationStore(),
   log = new LocalAgentRunLog(),
+  userConfigRoot,
 }: RunCliOptions): Promise<number> {
   try {
     const argumentsResult = parseCliArguments(argv);
@@ -106,7 +109,7 @@ export async function runCli({
     const guard = new ConversationOperationGuard(manager, actualStore);
     const permissions = new PermissionSessionManager();
     const conversations = new ConversationService(actualStore, manager, guard, loadConfig);
-    const runtime = new AgentRuntime({ store: actualStore, manager, guard, permissions, log: actualLog,
+    const runtime = new AgentRuntime({ userConfigRoot: dataDir ? userConfigurationRoot(dataDir) : userConfigRoot ?? userConfigurationRoot(), store: actualStore, manager, guard, permissions, log: actualLog,
       sandbox: new MacOsSeatbeltCommandSandbox(), loadConfig, loadWorkspaces,
       ...(dataDir ? { loadMcp: async (workspaceRoot: string, context: Awaited<ReturnType<typeof loadConfig>>) => loadMcpConfig({ workspaceRoot,
         environment: context.environment, managedSettings: context.managedSettings ?? null, settingsStore, userHome: dataDir }),
@@ -114,6 +117,7 @@ export async function runCli({
           project: path.join(workspaceRoot, ".orbitcode", "permissions.yaml"),
           local: path.join(workspaceRoot, ".orbitcode", "permissions.local.yaml") }) } : {}),
     });
+    conversations.configureMemory(runtime.memory, checkpoint => runtime.scheduleSaved(checkpoint));
     const session = new SessionController({ cwd, terminal, runtime, conversations, permissions,
       log: actualLog, loadConfig, loadWorkspaces, renderer: new TerminalRenderer(output, errorOutput),
       defaultPermissionMode: storedSettings?.defaultPermissionMode });

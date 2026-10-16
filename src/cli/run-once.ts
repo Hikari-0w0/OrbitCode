@@ -1,3 +1,4 @@
+import {userConfigurationRoot} from "@/runtime/background-service";
 import { createHash, randomUUID } from "node:crypto";
 import { open, readFile, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -50,7 +51,7 @@ export async function runOnce(options: {
   };
   const loadWorkspaces = (context?: Awaited<ReturnType<typeof loadConfig>>) => loadWorkspaceCatalog({ cwd, settingsStore,
     ...(context ? { managedSettings: context.managedSettings ?? null } : {}) });
-  const runtime = new AgentRuntime({ store, manager, guard, permissions, log,
+  const runtime = new AgentRuntime({ userConfigRoot: userConfigurationRoot(dataDir), store, manager, guard, permissions, log,
     sandbox: new MacOsSeatbeltCommandSandbox(), loadConfig, loadWorkspaces,
     loadMcp: async (workspaceRoot, context) => loadMcpConfig({ workspaceRoot, environment: context.environment,
       managedSettings: context.managedSettings ?? null, settingsStore,
@@ -101,13 +102,14 @@ export async function runOnce(options: {
     writeEvent({ type: "started", conversationId });
     let finished: Extract<RuntimeTurnEvent, { type: "finished" }> | undefined;
     const warnings: string[] = [];
+    const blockingWarnings: string[] = [];
     let approvalBlocked = false;
     for await (const item of runtime.streamTurn({
       conversationId, expectedRevision: checkpoint.summary.revision,
       permissionSessionId: permissionId, input: prompt, mode: checkpoint.mode,
       modeTurn: checkpoint.modeTurn + 1, source: "cli", signal: controller.signal,
     })) {
-      if (item.type === "warning") warnings.push(item.detail);
+      if (item.type === "warning") { warnings.push(item.detail); if (item.kind !== "memory") blockingWarnings.push(item.detail); }
       if (item.type === "agent") writeEvent({ type: "agent", eventType: item.event.type });
       if (item.type === "initialization") writeEvent({ type: "initialization", eventType: item.event.type });
       if ((item.type === "agent" && item.event.type === "permission-requested") || (item.type === "initialization" && item.event.type === "runtime-permission-requested")) {
@@ -121,7 +123,7 @@ export async function runOnce(options: {
     const runLog = runs.findLast((item) => item.revisionBefore === checkpoint.summary.revision);
     runId = runLog?.runId ?? null;
     const outcome = approvalBlocked ? "blocked" : timeout ? "timed-out" : controller.signal.aborted ? "cancelled"
-      : finished?.stopped.reason === "final-response" && finished.persistence.status === "saved" && warnings.length === 0 && runId ? "completed" : "failed";
+      : finished?.stopped.reason === "final-response" && finished.persistence.status === "saved" && blockingWarnings.length === 0 && runId ? "completed" : "failed";
     exitCode = outcome === "completed" ? 0 : outcome === "blocked" ? 3 : outcome === "timed-out" ? 124 : outcome === "cancelled" ? 130 : 1;
     final = {
       outcome, stopReason: finished?.stopped.reason ?? null,

@@ -75,7 +75,16 @@ export type ConversationSummary = ConversationBinding & {
   readonly lastStopReason?: AgentStopReason;
 };
 
+export type PersistedLastTurn = {
+  readonly turnId: string;
+  readonly endedAt: string;
+  readonly stopReason: AgentStopReason;
+  readonly memoryEligibility: boolean;
+};
+
 export type ConversationCheckpoint = {
+  readonly lastTurn?: PersistedLastTurn;
+  readonly lifecycleEpoch?: string;
   readonly schemaVersion: typeof CONVERSATION_SCHEMA_VERSION;
   readonly summary: ConversationSummary;
   readonly mode: AgentMode;

@@ -21,7 +21,7 @@ export type PersistenceState =
 export type RuntimeTurnEvent =
   | { readonly type: "initialization"; readonly event: RuntimeInitializationEvent }
   | { readonly type: "agent"; readonly event: Exclude<AgentEvent, { type: "stopped" }> }
-  | { readonly type: "warning"; readonly kind: "run-log" | "cleanup"; readonly detail: string }
+  | { readonly type: "warning"; readonly kind: "run-log" | "cleanup" | "memory"; readonly detail: string }
   | { readonly type: "finished"; readonly stopped: Extract<AgentEvent, { type: "stopped" }>; readonly persistence: PersistenceState };
 export const MAX_WORKSPACES = 32;
 export const MAX_WORKSPACE_ID_LENGTH = 64;

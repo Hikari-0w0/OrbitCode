@@ -254,3 +254,9 @@ function done(): ModelStreamEvent {
 async function* events(...items: readonly ModelStreamEvent[]) {
   yield* items;
 }
+
+test("新增背景计入预算，背景本身超出窗口时拒绝请求",async()=>{
+ const manager=new ContextManager({sessionId:"background",config:{...policy(),windowTokens:2000,automaticReserveTokens:500},store:new MemoryStore(),provider:new ScriptedSummaryProvider([]),initialHistory:[{role:"user",content:"已有任务"},{role:"assistant",content:"已有背景"}]});
+ manager.beginTurn("接续任务");
+ await assert.rejects(manager.prepareForModel({systemMessages:[{role:"system",content:"记忆背景".repeat(4000)}],tools:[]},new AbortController().signal));
+});

@@ -1,3 +1,10 @@
+import {sourceKey} from "@/runtime/memory-store";
+import {serializeNote} from "@/runtime/memory-validation";
+import {memoryStores} from "@/runtime/background-service";
+import {MemoryService} from "@/runtime/memory-service";
+import {prepareBackground,userConfigurationRoot} from "@/runtime/background-service";
+import { randomUUID } from "node:crypto";
+import { pendingToolCalls } from "@/runtime/conversation-recovery";
 import { loadMcpConfig, type McpConfigSnapshot } from "@/runtime/mcp-config";
 import { McpConnectionManager, type McpConnectionLease } from "@/runtime/mcp-connections";
 import { initializeMcpWorkspace } from "@/runtime/mcp-initialization";
@@ -6,7 +13,7 @@ import { AgentLoop } from "@/core/agent-loop";
 import { ContextManager } from "@/core/context/context-manager";
 import { CompletionTracker } from "@/core/completion-tracker";
 import { appendPersistedTurn, deriveConversationTitle } from "@/core/conversations/display-timeline";
-import { ConversationRepositoryError, type ConversationSummary } from "@/core/conversations/types";
+import { ConversationRepositoryError, type ConversationCheckpoint, type ConversationSummary } from "@/core/conversations/types";
 import type { AgentMode } from "@/core/agent-events";
 import type { LocalConversationStore } from "@/lib/local-conversation-store";
 import type { AgentRunLogSink } from "@/lib/local-agent-run-log";
@@ -48,13 +55,58 @@ export type AgentRuntimeOptions = {
   readonly loadWorkspaces: (context: ProviderContext) => Promise<WorkspaceCatalog>;
   readonly mcpConnections?: McpConnectionManager;
   readonly loadMcp?: (workspaceRoot: string, context: ProviderContext) => Promise<McpConfigSnapshot>;
+  readonly userConfigRoot?: string;
   readonly createProvider?: (config: ResolvedProviderConfig) => ChatProvider;
   readonly permissionLocations?: (workspaceRoot: string) => PermissionConfigLocations;
 };
 export class AgentRuntime {
+  private readonly pendingMemory = new Map<string, {turnId: string; workspaceRoot: string; config: ResolvedProviderConfig}>();
+  readonly memory: MemoryService;
   private readonly mcp: McpConnectionManager;
-  constructor(private readonly options: AgentRuntimeOptions) { this.mcp = options.mcpConnections ?? new McpConnectionManager(); }
-  close(): Promise<void> { return this.mcp.close(); }
+  constructor(private readonly options: AgentRuntimeOptions) { this.mcp = options.mcpConnections ?? new McpConnectionManager(); this.memory = new MemoryService(options.userConfigRoot ?? userConfigurationRoot(), options.store, options.guard); }
+  async close(): Promise<void> { this.pendingMemory.clear(); await Promise.all([this.memory.close(), this.mcp.close()]); }
+  async memoryStoresFor(conversationId: string) {
+    const checkpoint = await this.options.store.load(conversationId);
+    const context = await this.options.loadConfig();
+    const workspace = await resolveWorkspaceBoundary(await this.options.loadWorkspaces(context), checkpoint.summary.workspaceId);
+    return memoryStores(workspace.root, this.memory.userConfigRoot);
+  }
+  async inspectBackground(conversationId: string) {
+    const checkpoint = await this.options.store.load(conversationId);
+    const context = await this.options.loadConfig();
+    const workspace = await resolveWorkspaceBoundary(await this.options.loadWorkspaces(context), checkpoint.summary.workspaceId);
+    const loaded = await prepareBackground({workspaceRoot: workspace.root, userConfigRoot: this.memory.userConfigRoot, checkpoint});
+    const scopes = [];
+    const stores = Object.values(memoryStores(workspace.root, this.memory.userConfigRoot));
+    for (const store of stores) {
+      try { const snapshot = await store.load(); scopes.push({scope: store.scope, revision: snapshot.revision, notes: snapshot.notes.map(note => ({id: note.id, title: note.title, markdown: serializeNote(note)}))}); }
+      catch { scopes.push({scope: store.scope, revision: "unavailable", notes: []}); }
+    }
+    const jobs = [];
+    for (const job of await this.memory.inspect(conversationId)) {
+      if (["abandoned", "failed"].includes(job.status)) {
+        let committed = false;
+        const noteIds: string[] = [];
+        for (const store of stores) try {
+          if (await store.hasProcessed(job.source)) {
+            committed = true;
+            const snapshot = await store.load();
+            noteIds.push(...snapshot.notes.filter(note => note.sources.some(source => sourceKey(source) === sourceKey(job.source))).map(note => note.id));
+          }
+        } catch { /* 损坏作用域由背景诊断说明，不推断其提交结果。 */ }
+        if (committed) { jobs.push({...job, status: "skipped" as const, detail: "发现已提交的作用域记录，但任务未完整结束；请检查两级笔记。", noteIds}); continue; }
+      }
+      jobs.push(job);
+    }
+    return {background: loaded.snapshot, enabled: await this.memory.enabled(), jobs, scopes};
+  }
+  private scheduleOriginalSaved(checkpoint: ConversationCheckpoint): void {
+    const pending = this.pendingMemory.get(checkpoint.summary.id);
+    if (!pending || pending.turnId !== checkpoint.lastTurn?.turnId) return;
+    this.pendingMemory.delete(checkpoint.summary.id);
+    this.memory.scheduleSavedTurn(checkpoint, pending.workspaceRoot, pending.config, this.options.createProvider?.(pending.config));
+  }
+  async scheduleSaved(checkpoint: ConversationCheckpoint): Promise<void> { this.scheduleOriginalSaved(checkpoint); }
   async *streamTurn(input: RunTurnInput) {
     const turn = await this.prepare(input);
     yield* runAgentTurn({ ...turn, signal: input.signal });
@@ -64,6 +116,7 @@ export class AgentRuntime {
     let activeConversation: GuardedConversationOperation | undefined;
     let managedProcesses: ManagedProcessController | undefined;
     let savedTurn = false;
+    let savedCheckpoint: ConversationCheckpoint | undefined;
     const mcpLeases: McpConnectionLease[] = [];
     const cleanup = async () => {
       const outcomes = await Promise.allSettled([
@@ -96,6 +149,7 @@ export class AgentRuntime {
           "会话已在其他页面更新，请刷新后重试。",
         );
       }
+      if (pendingToolCalls(checkpoint.context.messages).length) throw new ConversationRepositoryError("busy", "会话含未完成工具调用，请先恢复检查点。");
       const context = await this.options.loadConfig();
       const providerConfig = resolveRuntimeProvider(context, checkpoint.summary.providerId);
       const workspaceCatalog = await this.options.loadWorkspaces(context);
@@ -119,10 +173,15 @@ export class AgentRuntime {
       const conversationOperation = await this.options.guard.begin(
         input.conversationId,
         "agent",
+        input.signal,
       );
       activeConversation = conversationOperation;
       const locked = await this.options.store.load(input.conversationId);
       if (locked.summary.revision !== input.expectedRevision) throw new ConversationRepositoryError("conflict", "会话已更新，请重新加载。");
+      const runtimeTurnId = randomUUID();
+      const lifecycleEpoch = checkpoint.lifecycleEpoch ?? randomUUID();
+      const background = await prepareBackground({ workspaceRoot: workspace.root, userConfigRoot: this.options.userConfigRoot ?? userConfigurationRoot(), checkpoint: locked, signal: input.signal });
+      const readMemory = background.snapshot.optional.memoryIndex ? background.readMemory : undefined;
       const provider = this.options.createProvider?.(providerConfig) ?? createChatProvider(providerConfig);
       const contextManager = new ContextManager({
         sessionId: input.conversationId,
@@ -147,6 +206,8 @@ export class AgentRuntime {
         readContext,
         managedProcesses,
         completionTracker,
+        [],
+        readMemory,
       );
       const turn = this.options.permissions.beginTurn(
         input.permissionSessionId,
@@ -181,10 +242,11 @@ export class AgentRuntime {
       const toolIdentities = new Map<string, NonNullable<RegisteredTool["externalIdentity"]>>();
       const buildAgent = (externalTools: readonly RegisteredTool[], deadlineMs: number) => {
         for (const tool of externalTools) if (tool.externalIdentity) toolIdentities.set(tool.name, tool.externalIdentity);
-        const combinedRegistry = createDefaultToolRegistry(this.options.sandbox, readContext, managedProcesses, completionTracker, externalTools);
+        const combinedRegistry = createDefaultToolRegistry(this.options.sandbox, readContext, managedProcesses, completionTracker, externalTools, readMemory);
         return new AgentLoop(provider, (mode) => createModeToolPolicy(combinedRegistry, mode), workspace, {
           maxIterations: context.maxIterations, maxRuntimeMs: Math.max(1, Math.min(context.maxRuntimeMs, deadlineMs - Date.now())),
           promptEnvironment: createPromptEnvironment({ workspace: binding.workspace }),
+          optionalPromptContext: background.snapshot.optional,
           permissionGatewayForMode: gatewayForMode, contextManager, completionTracker,
         });
       };
@@ -219,6 +281,8 @@ export class AgentRuntime {
             conversationId: input.conversationId,
             expectedRevision: input.expectedRevision,
             checkpoint: {
+              lifecycleEpoch,
+              lastTurn: { turnId: runtimeTurnId, endedAt: new Date().toISOString(), stopReason: terminal.reason, memoryEligibility: terminal.reason === "final-response" && Boolean(terminal.finalMessage?.content.trim()) && pendingToolCalls(contextManager.persistentSnapshot().messages).length === 0 },
               schemaVersion: checkpoint.schemaVersion,
               summary: {
                 ...summary,
@@ -239,18 +303,24 @@ export class AgentRuntime {
             },
           } as const;
           this.options.manager.setPendingSave(saveInput);
+          if (saveInput.checkpoint.lastTurn.memoryEligibility) {
+            this.pendingMemory.set(input.conversationId, {turnId: runtimeTurnId, workspaceRoot: workspace.root, config: providerConfig});
+            if (this.pendingMemory.size > 64) { const oldest = this.pendingMemory.keys().next().value; if (oldest) this.pendingMemory.delete(oldest); }
+          }
           const result = await this.options.store.save(saveInput);
           if (result.status === "conflict") {
             throw new Error("会话已在其他页面更新，本轮结果未覆盖磁盘记录。请刷新后重试。");
           }
           this.options.manager.clearPendingSave(input.conversationId);
           savedTurn = true;
+          savedCheckpoint = result.checkpoint;
           return { status: "saved", revision: result.checkpoint.summary.revision };
         },
         runLog: { sink: this.options.log, source: input.source, toolIdentities,
           conversationId: input.conversationId, revisionBefore: input.expectedRevision,
           providerId: checkpoint.summary.providerId, workspaceId: checkpoint.summary.workspaceId },
         onFinished: cleanup,
+        onPersistedTurn: () => { if (savedCheckpoint) this.scheduleOriginalSaved(savedCheckpoint); },
       };
     } catch (error) { await cleanup().catch(() => undefined); throw error; }
   }

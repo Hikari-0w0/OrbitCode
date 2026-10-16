@@ -1,3 +1,4 @@
+import {ConversationRepositoryError} from "@/core/conversations/types";
 import type {
   ConversationActivity,
   ConversationWriteLease,
@@ -30,11 +31,21 @@ export class ConversationOperationGuard {
   async begin(
     conversationId: string,
     kind: ConversationOperationKind,
+    signal?: AbortSignal,
   ): Promise<GuardedConversationOperation> {
+    if (kind === "agent") {
+      const deadline = Date.now() + 2000;
+      while (this.runtime.activeKind(conversationId) === "memory-commit" || await this.store.hasMemoryCommitLease(conversationId)) {
+        signal?.throwIfAborted();
+        if (Date.now() >= deadline) throw new ConversationRepositoryError("busy", "记忆提交正在占用会话，请稍后重试。");
+        await new Promise<void>(resolve => setTimeout(resolve, 10));
+      }
+    }
+    signal?.throwIfAborted();
     const runtimeOperation = this.runtime.begin(conversationId, kind);
     let lease: ConversationWriteLease;
     try {
-      lease = await this.store.acquireWriteLease(conversationId);
+      lease = await this.store.acquireWriteLease(conversationId, kind);
     } catch (error) {
       this.runtime.finish(conversationId, runtimeOperation.id);
       throw error;

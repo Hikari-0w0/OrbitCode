@@ -33,7 +33,7 @@ export async function runtimeFixture(responder: (request: MockRequest) => MockRe
   const manager = new ConversationRuntimeManager();
   const guard = new ConversationOperationGuard(manager, store);
   const permissions = new PermissionSessionManager();
-  const runtime = new AgentRuntime({ store, manager, guard, permissions, log,
+  const runtime = new AgentRuntime({ userConfigRoot: path.join(root, ".test-user"), store, manager, guard, permissions, log,
     loadMcp: async (workspaceRoot) => loadMcpConfig({ workspaceRoot, userHome: path.join(root, ".home"), environment: (await loadConfig()).environment }),
     loadConfig, loadWorkspaces, sandbox: new MacOsSeatbeltCommandSandbox() });
   const conversations = new ConversationService(store, manager, guard, loadConfig);

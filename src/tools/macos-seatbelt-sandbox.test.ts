@@ -255,3 +255,12 @@ test("Seatbelt 允许系统 C++ 工具链编译 Workspace 源码", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("命令不能绕过受控读取访问现有或未来的记忆目录",async()=>{
+ const {mkdir}=await import("node:fs/promises");const root=await mkdtemp(path.join(tmpdir(),"orbitcode-memory-boundary-"));try{
+ await mkdir(path.join(root,"data/memory-v1"),{recursive:true});await writeFile(path.join(root,"data/memory-v1/note.md"),"MEMORY_SENTINEL");
+ const workspace=await createWorkspaceBoundary(root),cwd=await workspace.resolveExistingDirectory(),sandbox=new MacOsSeatbeltCommandSandbox();assert.deepEqual(await sandbox.probe(workspace),{available:true});
+ await assert.rejects(workspace.readTextFile("data/memory-v1/note.md",{maxBytes:1024}));
+ for(const command of ["cat data/memory-v1/note.md","mkdir -p fresh/memory-state-v1 && printf x > fresh/memory-state-v1/a"]){const result=await sandbox.run({command,cwd,timeoutMs:2000,outputLimitBytes:1024},{workspace,signal:new AbortController().signal});assert.notEqual(result.exitCode,0);assert.ok(!result.stdout.includes("MEMORY_SENTINEL"));}
+ }finally{await rm(root,{recursive:true,force:true});}
+});
