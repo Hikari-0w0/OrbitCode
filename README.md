@@ -302,3 +302,44 @@ Web 侧栏“项目背景与长期记忆”可检查来源、任务结果、关�
 侧栏“检查过期会话（30 天）”及 CLI `/cleanup preview` 只预览。按最近持久化更新时间至少 30 × 24 小时计算；明确选定并确认后才删除，CLI 使用 `/cleanup delete <id...>` 与 `/confirm <token>`。执行时重新检查修订、期限及运行/待保存/待恢复状态，逐条报告结果；工作区、指令、已存笔记和独立运行日志保留。启动时不删除会话。
 
 显式 `--data-dir` 或 Web `ORBITCODE_DATA_DIR` 同时隔离用户级指令、笔记和后台状态，不读取日常用户级配置；项目级资料仍来自明确绑定的 Workspace。本功能没有向量检索、RAG、团队同步或会话格式迁移。
+
+## 可复用 Skills
+
+Skill 是 YAML frontmatter 加 Markdown 操作指令。Web 的 Skills 面板和 CLI 使用相同运行层；初始模型提示只给名称与简介，模型需要时调用 `load_skill`。用户也可显式调用：
+
+```text
+/skills
+/skills refresh
+/skill run review src/runtime
+/skill deactivate review
+```
+
+`/skill <名称> [参数]` 是简写；与 `run`、`deactivate` 控制词同名时使用 `/skill run <名称>`。已有控制命令和 `//` 转义保持原义。列表和刷新不调用模型。CLI 单次执行支持 Skill 调用；管理命令使用交互 CLI 或 Web 面板。
+
+按项目级 `.orbitcode/skills/`、用户配置根下 `skills/`、应用内置 `skills/` 的顺序选择同名定义。用户配置根默认 `~/.orbitcode`，使用隔离数据目录时随之隔离。根目录中的 `*.md` 是单文件 Skill，一级子目录的 `SKILL.md` 是目录型入口；模板和参考目录不会被递归识别为新 Skill。同层重名报错，高优先级已知名称的错误定义不会偷偷回退到内置版本。
+
+```markdown
+---
+name: inspect-project
+description: 读取指定文件并按项目约定给出检查建议
+allowed-tools: [read_file, find_files, search_code, read_skill_resource]
+mode: shared
+---
+读取 {{arguments}}，遵守项目规则。需要模板时用 read_skill_resource 读取 examples/report.md。
+```
+
+必填字段为 `name`、`description`、`allowed-tools`、`mode`；名称是小写字母开头的字母/数字/连字符，最多 64 字符。白名单是精确工具名数组，不支持通配符，空数组只保留系统加载工具。元信息拒绝未知字段、重复键、YAML 别名/锚点。单个坏文件不阻断其他有效名称，来源不可读或扫描超限会明确阻止使用不完整目录。
+
+`{{arguments}}` 替换完整参数，`{{arg:1}}` 等引用从 1 开始的位置参数。引号保留含空格参数，缺参报错；`\{{arguments}}` 输出字面占位符。替换是单遍纯文本操作，不执行 Shell 或模板代码。
+
+共享模式沿用主会话模型和上下文，激活内容在后续请求中持续保留，保存/恢复后仍生效；多个 Skill 的白名单取交集。`load_skill` 只豁免 Skill 白名单，仍不能越过 Plan/Do 或授权限制。显式停用解除相应激活限制；清空会话同时清除激活。刷新只影响待加载定义，已激活内容维持快照，显式重新调用才采用新版。
+
+独立模式使用 `mode: isolated`，可选 `history: { kind: none }`（默认）、`history: { kind: recent, turns: 3 }` 或 `history: { kind: all }`；recent 的 turns 为 1—50。可选 `model: <已有模型配置ID>`；共享模式指定不同模型会被拒绝。子执行复用 Agent Loop，但隔离上下文、进程管理和完成验证，只回传状态、验证边界和有界摘要；主会话暂停推进并可实时处理子审批。子会话共享授权工作区，因此文件改动会保留；取消不会自动回滚或重做。
+
+独立执行继承父工具限制及 Plan/Do，不允许再递归启动独立 Skill；每次最多 16 次模型迭代、5 分钟且不超过父预算，每主回合最多 4 次。缺失模型、未发现外部工具或容量超限不会静默回退。已配置 MCP 名称仍需原连接/调用审批，扫描 Skill 不发起连接。
+
+目录型资源通过受白名单控制的 `read_skill_resource` 按需读取，不自动执行脚本；资源必须仍位于授权 Workspace 内，禁止穿越、链接逃逸和受保护路径。用户级/内置目录在工作区外时，只能加载入口，附属资源须先放到授权工作区。已通过资源工具引用的文件发生变化后会要求重新激活。脚本执行仍使用原命令工具、审批、沙箱、超时与取消；指纹校验不提供不可变文件系统或脚本运行期间的外部改写隔离。
+
+每个入口最多 64 KiB，参数 16 KiB；每会话最多激活 8 个 Skill、指令合计 128 KiB，并受模型上下文预算进一步约束。目录摘要超过 16 KiB 时不向模型发送不完整目录；界面保留诊断。资源单次最多 128 KiB，每激活最多记录 64 个资源。
+
+内置 `commit`、`review`、`test` 均为独立样板，可按项目需要覆盖。commit 仅处理用户明确授权范围、使用中文提交说明且不默认推送；review 默认只读；test 按现有 npm 流程检查并保留真实结果。样板是流程指令，不能替代运行权限或验收证据。

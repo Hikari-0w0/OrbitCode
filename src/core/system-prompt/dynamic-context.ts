@@ -56,22 +56,24 @@ export function buildOptionalContextMessages(
   const entries = [
     [PROMPT_TAGS.customInstructions, context.customInstructions],
     [PROMPT_TAGS.activatedSkills, context.activatedSkills],
+
     [PROMPT_TAGS.longTermMemory, context.longTermMemory],
   ] as const;
   let totalLength = 0;
   const messages: PromptSystemMessage[] = [];
   for (const [tag, content] of entries) {
     if (content === undefined) continue;
-    if (content.trim().length === 0 || content.length > MAX_OPTIONAL_PROMPT_LENGTH) {
+    if (content.trim().length === 0 || content.length > (tag === PROMPT_TAGS.activatedSkills ? 128 * 1024 + 2048 : MAX_OPTIONAL_PROMPT_LENGTH)) {
       throw new AgentConfigurationError("可选系统提示内容无效或过长。");
     }
-    totalLength += content.length;
+    if (tag !== PROMPT_TAGS.activatedSkills) totalLength += content.length;
     if (totalLength > MAX_OPTIONAL_PROMPT_TOTAL_LENGTH) {
       throw new AgentConfigurationError("可选系统提示总长度超过限制。");
     }
     messages.push(taggedMessage(tag, content));
   }
   for (const [tag, content, limit] of [
+    ["orbitcode_available_skills", context.availableSkills, 16 * 1024],
     ["orbitcode_project_instructions", context.projectInstructions, 50_000],
     ["orbitcode_memory_index", context.memoryIndex, 51_000],
     ["orbitcode_resume_reminder", context.resumeReminder, 2_000],

@@ -29,6 +29,7 @@ import { buildSystemPromptMessages } from "@/core/system-prompt/assemble";
 import type {
   OptionalPromptContext,
   PromptEnvironment,
+  PromptSystemMessage,
 } from "@/core/system-prompt/types";
 import type { ToolAccess } from "@/tools/mode-policy";
 import { mcpResultForModel } from "@/tools/mcp-result";
@@ -61,6 +62,7 @@ export class AgentLoop implements AgentSession {
   private readonly maxRuntimeMs: number;
   private readonly promptEnvironment: PromptEnvironment;
   private readonly optionalPromptContext?: OptionalPromptContext;
+  private readonly promptContext?: (signal: AbortSignal) => Promise<OptionalPromptContext>;
   private readonly permissionGatewayForMode?: (
     mode: AgentMode,
   ) => PermissionGateway;
@@ -76,6 +78,7 @@ export class AgentLoop implements AgentSession {
       readonly maxRuntimeMs?: number;
       readonly promptEnvironment: PromptEnvironment;
       readonly optionalPromptContext?: OptionalPromptContext;
+      readonly promptContext?: (signal: AbortSignal) => Promise<OptionalPromptContext>;
       readonly permissionGatewayForMode?: (
         mode: AgentMode,
       ) => PermissionGateway;
@@ -91,6 +94,7 @@ export class AgentLoop implements AgentSession {
     this.maxRuntimeMs = options.maxRuntimeMs ?? DEFAULT_MAX_AGENT_RUNTIME_MS;
     this.promptEnvironment = options.promptEnvironment;
     this.optionalPromptContext = options.optionalPromptContext;
+    this.promptContext = options.promptContext;
     this.permissionGatewayForMode = options.permissionGatewayForMode;
     this.contextManager = options.contextManager;
     this.now = options.now ?? Date.now;
@@ -125,9 +129,10 @@ export class AgentLoop implements AgentSession {
       optional: this.optionalPromptContext,
       session: { mode: options.mode, modeTurn: options.modeTurn },
     });
-    const systemMessages = /\p{Script=Han}/u.test(options.input)
-      ? [...baseSystemMessages, { role: "system" as const, content: "本轮用户使用中文。所有面向用户的过程说明和最终回复都使用中文；工具调用前如需说明动作，也先用中文，不要以英文开场。工具名、代码和原始返回保持原样。" }]
-      : baseSystemMessages;
+    const languageReminder: readonly PromptSystemMessage[] = /\p{Script=Han}/u.test(options.input)
+      ? [{ role: "system", content: "本轮用户使用中文。所有面向用户的过程说明和最终回复都使用中文；工具调用前如需说明动作，也先用中文，不要以英文开场。工具名、代码和原始返回保持原样。" }]
+      : [];
+    let systemMessages = [...baseSystemMessages, ...languageReminder];
     const startedAt = this.now();
     const durationMs = (): number =>
       Math.max(0, Math.round(this.now() - startedAt));
@@ -145,7 +150,7 @@ export class AgentLoop implements AgentSession {
       userMessage,
     ];
     const access = this.toolAccessForMode(options.mode);
-    const availableTools = access.definitions();
+
     const permissionGateway = this.permissionGatewayForMode?.(options.mode);
     let completedIterations = 0;
     let consecutiveUnknownIterations = 0;
@@ -199,6 +204,14 @@ export class AgentLoop implements AgentSession {
           phase: "model",
         };
 
+        if (this.promptContext) {
+          const optional = await this.promptContext(signal);
+          const fresh = [...buildSystemPromptMessages({ environment: this.promptEnvironment, optional, session: { mode: options.mode, modeTurn: options.modeTurn } }), ...languageReminder];
+          const firstHistory = transcript.findIndex(message => message.role !== "system");
+          transcript.splice(0, firstHistory < 0 ? transcript.length : firstHistory, ...fresh);
+          systemMessages = fresh;
+        }
+        const availableTools = access.definitions();
         const toolDefinitions = hasLocalToolResult
           ? availableTools
           : availableTools.filter((tool) => tool.function.name !== "report_completion");
@@ -374,8 +387,10 @@ export class AgentLoop implements AgentSession {
           workspace: this.workspace,
           signal,
           permissionGateway,
+          deadlineMs: Date.now() + Math.max(1, this.maxRuntimeMs - durationMs()),
         })) {
-          if (event.type === "started") {
+          if (event.type === "skill-run") { yield { ...event, iteration }; }
+          else if (event.type === "started") {
             yield {
               type: "tool-started",
               iteration,
@@ -405,8 +420,8 @@ export class AgentLoop implements AgentSession {
             };
           } else if (event.type === "result") {
             const decision = access.classify(event.call.name);
-            if (event.call.name !== "report_completion" && event.call.name !== "read_context" && decision.kind === "allowed" && decision.mutability !== "external") hasLocalToolResult = true;
-            this.completionTracker.record({
+            if (event.call.name !== "report_completion" && event.call.name !== "read_context" && event.call.name !== "load_skill" && decision.kind === "allowed" && decision.mutability !== "external") hasLocalToolResult = true;
+            if (event.call.name !== "load_skill") this.completionTracker.record({
               call: event.call,
               result: event.result,
               iteration,

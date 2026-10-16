@@ -3,7 +3,7 @@ import { installMcpShutdown } from "@/runtime/mcp-host";
 import { ConversationRepositoryError } from "@/core/conversations/types";
 import path from "node:path";
 import type { Readable, Writable } from "node:stream";
-import { pathToFileURL } from "node:url";
+import { isCliEntrypoint } from "@/cli/entrypoint";
 
 import {
   ArgumentError,
@@ -163,6 +163,6 @@ async function main(): Promise<void> {
 }
 
 const entryPath = process.argv[1];
-if (entryPath && import.meta.url === pathToFileURL(entryPath).href) {
+if (isCliEntrypoint(import.meta.url, entryPath)) {
   void main();
 }

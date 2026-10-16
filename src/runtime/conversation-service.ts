@@ -31,11 +31,20 @@ export class ConversationService {
   }
   clear(input: ConversationMutation) {
     this.memory?.cancelConversation(input.conversationId);
-    return this.mutate(input, "clear", async () => saved(await this.store.clear(input)));
+    return this.mutate(input, "clear", async () => {
+      const checkpoint = saved(await this.store.clear(input));
+      // 清空已经提交后，旧回合的待保存结果和恢复标记都不再属于当前会话生命周期。
+      this.manager.clearPendingSave(input.conversationId);
+      await this.store.clearTurnMarker(input.conversationId);
+      return checkpoint;
+    });
   }
   delete(input: ConversationMutation) {
     this.memory?.cancelConversation(input.conversationId);
-    return this.mutate(input, "delete", () => this.store.delete(input));
+    return this.mutate(input, "delete", async () => {
+      await this.store.delete(input);
+      this.manager.clearPendingSave(input.conversationId);
+    });
   }
   async deleteExpired(input: ConversationMutation, cutoff: number): Promise<void> {
     if (this.manager.pendingSave(input.conversationId)) throw new ConversationRepositoryError("busy", "会话有待保存结果。");

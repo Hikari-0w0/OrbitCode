@@ -46,6 +46,11 @@ export class TerminalRenderer {
       return;
     }
     const event = item.event;
+    if (event.type === "skill-run") {
+      this.notice(`Skill ${event.name} [${event.runId}]`);
+      if (event.event.type === "stopped") { this.notice(`子执行停止：${event.event.reason}；副作用：${event.event.sideEffect}`); return; }
+      this.event({ type: "agent", event: event.event }); return;
+    }
     switch (event.type) {
       case "text-delta": {
         if (!this.streaming) { this.output.write("助手> "); this.streaming = true; }

@@ -19,6 +19,7 @@ export type ConversationOperation = {
 };
 
 export type ConversationOperationKind =
+  | "skill-mutation"
   | "memory-commit"
   | "mode"
   | "agent"

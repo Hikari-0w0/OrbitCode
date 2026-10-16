@@ -278,6 +278,7 @@ export class LocalConversationStore implements ConversationRepository, ContextSt
         summary: summaryForSave(current.summary, undefined),
         lifecycleEpoch: randomUUID(),
         lastTurn: undefined,
+        skills: undefined,
         mode: "do",
         modeTurn: 0,
         displayMessages: [],

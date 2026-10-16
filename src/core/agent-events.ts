@@ -37,7 +37,7 @@ export type TokenUsage =
     }
   | { readonly availability: "unavailable" };
 
-export type AgentEvent =
+export type BaseAgentEvent =
   | {
       readonly type: "progress";
       readonly iteration: number;
@@ -114,3 +114,5 @@ export type AgentEvent =
       readonly detail?: string;
       readonly verification?: CompletionAssessment;
     };
+
+export type AgentEvent = BaseAgentEvent | import("@/core/skills/types").SkillRunEvent;

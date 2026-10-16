@@ -1,3 +1,5 @@
+import { SkillEventQueue } from "@/core/skills/event-queue";
+import type { SkillRunEvent } from "@/core/skills/types";
 import type { PermissionPrompt } from "@/core/permissions/approval";
 import type { ModelToolCall } from "@/models/provider";
 import type {
@@ -35,6 +37,7 @@ export type PermissionResolutionStatus =
   | "invalid";
 
 export type ToolScheduleEvent =
+  | SkillRunEvent
   | {
       readonly type: "permission-requested";
       readonly call: ModelToolCall;
@@ -74,6 +77,7 @@ type AuthorizedCall = {
 };
 
 type SchedulerOptions = {
+  readonly deadlineMs?: number;
   readonly calls: readonly ModelToolCall[];
   readonly access: ToolAccess;
   readonly workspace: WorkspaceBoundary;
@@ -94,17 +98,17 @@ export async function* scheduleToolCalls(
     throw new Error(`只读工具并发数必须在 1 到 ${MAX_READ_ONLY_CONCURRENCY} 之间。`);
   }
 
-  const prepared = options.calls.map((call, sequence) =>
-    prepareCall(call, sequence, options.access),
-  );
+
   const completed: ToolCallResult[] = [];
   const readBatch: AuthorizedCall[] = [];
 
-  for (const current of prepared) {
+  for (const [sequence, call] of options.calls.entries()) {
+    if (call.name === "load_skill") yield* flushReadBatch(readBatch, completed, options, concurrency);
+    const current = prepareCall(call, sequence, options.access);
     if (options.signal.aborted) break;
     if (
       current.preparation.kind === "failure" ||
-      current.preparation.call.mutability !== "read-only"
+      (current.preparation.call.mutability !== "read-only" || current.preparation.call.scheduling === "barrier")
     ) {
       yield* flushReadBatch(readBatch, completed, options, concurrency);
     }
@@ -177,7 +181,7 @@ export async function* scheduleToolCalls(
       prepared: current.preparation.call,
       permissions,
     };
-    if (authorized.prepared.mutability === "read-only") {
+    if (authorized.prepared.mutability === "read-only" && authorized.prepared.scheduling !== "barrier") {
       readBatch.push(authorized);
       if (readBatch.length >= concurrency) {
         yield* flushReadBatch(readBatch, completed, options, concurrency);
@@ -215,32 +219,37 @@ async function* executeAuthorizedBatch(
   completed: ToolCallResult[],
   options: SchedulerOptions,
 ): AsyncIterable<ToolScheduleEvent> {
-  const pending = new Map<number, Promise<ToolCallResult>>();
-  for (const call of calls) {
-    if (options.signal.aborted) break;
-    let revalidationFailure: ToolExecutionResult | undefined;
-    for (const permission of call.permissions) {
-      revalidationFailure = await permission.revalidate(options.signal);
-      if (revalidationFailure) break;
+  const queue = new SkillEventQueue<SkillRunEvent | ({ type: "result" } & ToolCallResult)>();
+  const executions: Promise<void>[] = [];
+  const controller = new AbortController();
+  const executionOptions = { ...options, signal: AbortSignal.any([options.signal, controller.signal]) };
+  let remaining = 0;
+  try {
+    for (const call of calls) {
+      if (options.signal.aborted) break;
+      const decision = options.access.classify(call.prepared.name);
+      let revalidationFailure: ToolExecutionResult | undefined = decision.kind !== "allowed" ? toolFailure("permission-denied", "当前策略不允许执行该工具。", { retryable: true }) : undefined;
+      for (const permission of call.permissions) {
+        if (revalidationFailure) break;
+        revalidationFailure = await permission.revalidate(options.signal);
+      }
+      if (revalidationFailure) {
+        const result = toCallResult(call, revalidationFailure); completed.push(result); yield { type: "result", ...result }; continue;
+      }
+      remaining++;
+      executions.push(safeExecute(call, executionOptions, event => executionOptions.signal.aborted ? Promise.resolve() : queue.push(event)).then(async result => { await queue.push({ type: "result", ...toCallResult(call, result) }); }));
+      yield { type: "started", call: call.call, sequence: call.sequence };
     }
-    if (revalidationFailure) {
-      const result = toCallResult(call, revalidationFailure);
-      completed.push(result);
-      yield { type: "result", ...result };
-      continue;
+    while (remaining > 0) {
+      const event = await queue.next();
+      if (!event) break;
+      if (event.type === "result") { remaining--; completed.push(event); }
+      yield event;
     }
-    const execution = safeExecute(call, options).then((result) =>
-      toCallResult(call, result),
-    );
-    pending.set(call.sequence, execution);
-    yield { type: "started", call: call.call, sequence: call.sequence };
-  }
-
-  while (pending.size > 0) {
-    const result = await Promise.race(pending.values());
-    pending.delete(result.sequence);
-    completed.push(result);
-    yield { type: "result", ...result };
+  } finally {
+    controller.abort();
+    queue.close();
+    await Promise.all(executions);
   }
 }
 
@@ -282,11 +291,12 @@ function prepareCall(
 async function safeExecute(
   call: AuthorizedCall,
   options: SchedulerOptions,
+  emitSkillEvent: (event: SkillRunEvent) => Promise<void>,
 ): Promise<ToolExecutionResult> {
   try {
     return await options.access.executePrepared(
       call.prepared,
-      executionContext(options, call.prepared.mutability),
+      { ...executionContext(options, call.prepared.mutability), callId: call.call.id, deadlineMs: call.prepared.budget === "parent-run" ? (options.deadlineMs ?? Date.now() + 300_000) : Math.min(options.deadlineMs ?? Infinity, executionContext(options, call.prepared.mutability).deadlineMs), emitSkillEvent },
     );
   } catch {
     return toolFailure("execution-failed", "工具执行发生未知错误。", {

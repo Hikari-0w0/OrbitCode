@@ -14,6 +14,8 @@ import {
 } from "@/tools/types";
 
 const PLAN_TOOL_NAMES: ReadonlySet<ToolName> = new Set([
+  "load_skill",
+  "read_skill_resource",
   "read_file",
   "find_files",
   "search_code",

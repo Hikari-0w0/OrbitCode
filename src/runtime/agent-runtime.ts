@@ -1,3 +1,17 @@
+import { loadSkillCatalog } from "@/runtime/skills/catalog";
+import { SkillSession } from "@/runtime/skills/service";
+import { SkillResources } from "@/runtime/skills/resources";
+import { LOCAL_SKILL_TOOLS } from "@/runtime/skills/definition";
+import { SkillError, type ActivatedSkill } from "@/core/skills/types";
+import { createAgentSession } from "@/runtime/agent-session-factory";
+import { createLoadSkillTool, skillFailure, type SkillLoader } from "@/tools/load-skill";
+import { createReadSkillResourceTool } from "@/tools/read-skill-resource";
+import { runIsolatedSkill } from "@/runtime/skills/isolated-runner";
+import { preloadSkill } from "@/runtime/skills/preload";
+import { parseSkillCommand } from "@/runtime/skill-commands";
+import { approximatePromptTokens } from "@/core/context/token-estimator";
+import { buildSystemPromptMessages } from "@/core/system-prompt/assemble";
+import { successfulToolResult, type ToolRegistry } from "@/tools/registry";
 import {sourceKey} from "@/runtime/memory-store";
 import {serializeNote} from "@/runtime/memory-validation";
 import {memoryStores} from "@/runtime/background-service";
@@ -9,7 +23,6 @@ import { loadMcpConfig, type McpConfigSnapshot } from "@/runtime/mcp-config";
 import { McpConnectionManager, type McpConnectionLease } from "@/runtime/mcp-connections";
 import { initializeMcpWorkspace } from "@/runtime/mcp-initialization";
 import type { RegisteredTool } from "@/tools/registry";
-import { AgentLoop } from "@/core/agent-loop";
 import { ContextManager } from "@/core/context/context-manager";
 import { CompletionTracker } from "@/core/completion-tracker";
 import { appendPersistedTurn, deriveConversationTitle } from "@/core/conversations/display-timeline";
@@ -23,7 +36,6 @@ import type { ResolvedProviderConfig } from "@/models/config";
 import { createDefaultToolRegistry } from "@/tools/default-registry";
 import type { CommandSandbox } from "@/tools/command-sandbox";
 import { ManagedProcessController } from "@/tools/managed-process";
-import { createModeToolPolicy } from "@/tools/mode-policy";
 import { PermissionGateway } from "@/tools/permission-gateway";
 import { addLocalPermissionAllow, loadPermissionRules, type PermissionConfigLocations } from "@/tools/permission-config";
 import { resolveRuntimeProvider, type ProviderContext } from "@/runtime/config";
@@ -35,6 +47,7 @@ import type { ConversationOperationGuard, GuardedConversationOperation } from "@
 import { runAgentTurn, type PreparedAgentTurn } from "@/runtime/run-agent-turn";
 
 export type RunTurnInput = {
+  readonly skillCatalogRevision?: string;
   readonly conversationId: string;
   readonly expectedRevision: number;
   readonly permissionSessionId: string;
@@ -99,6 +112,31 @@ export class AgentRuntime {
       jobs.push(job);
     }
     return {background: loaded.snapshot, enabled: await this.memory.enabled(), jobs, scopes};
+  }
+  async inspectSkills(conversationId: string) {
+    const checkpoint = await this.options.store.load(conversationId);
+    const config = await this.options.loadConfig();
+    const workspace = await resolveWorkspaceBoundary(await this.options.loadWorkspaces(config), checkpoint.summary.workspaceId);
+    const catalog = await loadSkillCatalog({ workspaceRoot: workspace.root, userRoot: this.memory.userConfigRoot });
+    return { conversationRevision: checkpoint.summary.revision, revision: catalog.revision, overridden: catalog.overridden ?? [], complete: catalog.complete, blocked: catalog.blocked, diagnostics: catalog.diagnostics,
+      entries: [...catalog.entries.values()].map(item => ({ name: item.definition.name, description: item.definition.description, source: item.source, mode: item.definition.mode,
+        active: Boolean(checkpoint.skills?.active.some(active => active.definition.name === item.definition.name)),
+        updateAvailable: checkpoint.skills?.active.some(active => active.definition.name === item.definition.name && active.definitionHash !== item.hash) ?? false,
+        availability: !catalog.complete ? "blocked" : item.definition.allowedTools.some(tool => !LOCAL_SKILL_TOOLS.has(tool)) ? "pending-discovery" : "ready" })),
+      active: checkpoint.skills?.active.map(item => ({ name: item.definition.name, description: item.definition.description, source: item.source })) ?? [] };
+  }
+  async deactivateSkill(input: { conversationId: string; expectedRevision: number; name: string }) {
+    if (this.options.manager.pendingSave(input.conversationId)) throw new ConversationRepositoryError("busy", "请先保存待保存结果。");
+    const operation = await this.options.guard.begin(input.conversationId, "skill-mutation");
+    try {
+      const checkpoint = await this.options.store.load(input.conversationId);
+      if (checkpoint.summary.revision !== input.expectedRevision) throw new ConversationRepositoryError("conflict", "会话已更新。");
+      const active = checkpoint.skills?.active.filter(item => item.definition.name !== input.name) ?? [];
+      if (active.length === (checkpoint.skills?.active.length ?? 0)) return checkpoint;
+      const result = await this.options.store.save({ conversationId: input.conversationId, expectedRevision: input.expectedRevision, checkpoint: { ...checkpoint, skills: { version: 1, generation: (checkpoint.skills?.generation ?? 0) + 1, active } } });
+      if (result.status === "conflict") throw new ConversationRepositoryError("conflict", "会话已更新。");
+      return result.checkpoint;
+    } finally { await operation.finish(); }
   }
   private scheduleOriginalSaved(checkpoint: ConversationCheckpoint): void {
     const pending = this.pendingMemory.get(checkpoint.summary.id);
@@ -217,7 +255,7 @@ export class AgentRuntime {
         sessionId: input.permissionSessionId,
         turnId: turn.id,
       };
-      const toolTargets = registry.permissionTargets();
+      const toolTargets = new Map(registry.permissionTargets()).set("read_skill_resource", "path");
       const gatewayForMode = (agentMode: AgentMode) => new PermissionGateway({
             agentMode,
             permissionMode: () =>
@@ -239,17 +277,53 @@ export class AgentRuntime {
               });
             },
           });
+      const catalog = await loadSkillCatalog({ workspaceRoot: workspace.root, userRoot: this.memory.userConfigRoot, signal: input.signal });
+      if (input.skillCatalogRevision && input.skillCatalogRevision !== catalog.revision) throw new ConversationRepositoryError("conflict", "Skill 目录已更新，请刷新列表后重新选择。");
+      let skillSession: SkillSession | undefined;
       const toolIdentities = new Map<string, NonNullable<RegisteredTool["externalIdentity"]>>();
+      let isolatedCount = 0;
       const buildAgent = (externalTools: readonly RegisteredTool[], deadlineMs: number) => {
         for (const tool of externalTools) if (tool.externalIdentity) toolIdentities.set(tool.name, tool.externalIdentity);
-        const combinedRegistry = createDefaultToolRegistry(this.options.sandbox, readContext, managedProcesses, completionTracker, externalTools, readMemory);
-        return new AgentLoop(provider, (mode) => createModeToolPolicy(combinedRegistry, mode), workspace, {
-          maxIterations: context.maxIterations, maxRuntimeMs: Math.max(1, Math.min(context.maxRuntimeMs, deadlineMs - Date.now())),
-          promptEnvironment: createPromptEnvironment({ workspace: binding.workspace }),
-          optionalPromptContext: background.snapshot.optional,
-          permissionGatewayForMode: gatewayForMode, contextManager, completionTracker,
-        });
+        const modelIds = new Set(context.providers.map(provider => provider.name));
+        const common = { maxIterations: context.maxIterations, maxRuntimeMs: Math.max(1, Math.min(context.maxRuntimeMs, deadlineMs - Date.now())), promptEnvironment: createPromptEnvironment({ workspace: binding.workspace }), optionalPromptContext: background.snapshot.optional };
+        const skills = new SkillSession(locked.skills, catalog, { tools: () => new Set(combinedRegistry.descriptors().map(tool => tool.name)), providerId: binding.providerId, modelIds,
+          validateCapacity: (active: readonly ActivatedSkill[]) => {
+            const optional = { ...background.snapshot.optional, activatedSkills: active.map(item => item.instructions).join("\n\n") || undefined };
+            const prompt = buildSystemPromptMessages({ environment: common.promptEnvironment, optional, session: { mode: input.mode, modeTurn: input.modeTurn } });
+            if (approximatePromptTokens(prompt, registry.definitions()) + providerConfig.context.automaticReserveTokens >= providerConfig.context.windowTokens) throw new SkillError("capacity", "激活指令超过模型上下文预算。");
+          } });
+        skillSession = skills;
+        const resources = new SkillResources(skills, workspace);
+        const load: SkillLoader = async (request, execution) => {
+          try {
+            const { activation } = await skills.resolve(request.name, request.arguments, execution.signal);
+            if (activation.definition.mode === "shared") { skills.activate(activation); return successfulToolResult({ name: request.name, instructions: activation.instructions, generation: skills.snapshot().generation }); }
+            if (++isolatedCount > 4) throw new SkillError("capacity", "本回合独立 Skill 调用最多 4 次。");
+            const parentTools = new Set(combinedRegistry.descriptors().map(tool => tool.name).filter(name => skills.active().every(item => item.definition.allowedTools.includes(name))));
+            return runIsolatedSkill({ activation, parentId: input.conversationId, parentHistory: locked.context.messages, parentStore: this.options.store, mode: input.mode, context: execution, iterations: context.maxIterations === "unlimited" ? 16 : context.maxIterations,
+              runLog: { sink: this.options.log, source: input.source, conversationId: input.conversationId, providerId: activation.definition.model ?? binding.providerId, workspaceId: binding.workspace.id, revisionBefore: input.expectedRevision, parentRunId: runtimeTurnId, parentCallId: execution.callId ?? `preload:${activation.definition.name}` },
+              create: async child => {
+                const childConfig = resolveRuntimeProvider(context, activation.definition.model ?? binding.providerId);
+                const childProvider = this.options.createProvider?.(childConfig) ?? createChatProvider(childConfig);
+                const childContext = new ContextManager({ sessionId: child.id, config: childConfig.context, store: child.store, provider: childProvider, initialState: { messages: child.history, consecutiveSummaryFailures: 0 } });
+                const processes = new ManagedProcessController(this.options.sandbox, workspace), tracker = new CompletionTracker();
+                const childSkills = new SkillSession(undefined, catalog, { tools: () => new Set(childRegistry.descriptors().map(tool => tool.name)), providerId: activation.definition.model ?? binding.providerId, modelIds });
+                childSkills.activate(activation);
+                const childResources = new SkillResources(childSkills, workspace);
+                const childLoad: SkillLoader = async (request, execution) => { try { const { activation: next } = await childSkills.resolve(request.name, request.arguments, execution.signal); if (next.definition.mode === "isolated") throw new SkillError("invalid-arguments", "独立 Skill 不允许递归启动独立执行。"); childSkills.activate(next); return successfulToolResult({ name: request.name, instructions: next.instructions }); } catch (error) { return skillFailure(error, execution.signal); } };
+                const childRegistry: ToolRegistry = createDefaultToolRegistry(this.options.sandbox, request => child.store.read({ sessionId: child.id, ...request }), processes, tracker, [...externalTools, createLoadSkillTool(childLoad), createReadSkillResourceTool(childResources)], readMemory);
+                const agent = createAgentSession({ provider: childProvider, registry: childRegistry, workspace, skills: childSkills, resources: childResources, parentTools, options: { ...common, maxIterations: child.maxIterations, maxRuntimeMs: child.maxRuntimeMs, contextManager: childContext, completionTracker: tracker, permissionGatewayForMode: gatewayForMode } });
+                return { agent, close: () => processes.close() };
+              } });
+          } catch (error) { return skillFailure(error, execution.signal); }
+        };
+        const combinedRegistry: ToolRegistry = createDefaultToolRegistry(this.options.sandbox, readContext, managedProcesses, completionTracker, [...externalTools, createLoadSkillTool(load), createReadSkillResourceTool(resources)], readMemory);
+        const agent = createAgentSession({ provider, registry: combinedRegistry, workspace, skills, resources, options: { ...common, contextManager, completionTracker, permissionGatewayForMode: gatewayForMode } });
+        const command = parseSkillCommand(input.input);
+        if (command && command.kind !== "run") throw new SkillError("invalid-arguments", "管理命令请通过 Skill 列表或 CLI 交互入口执行。");
+        return command?.kind === "run" ? preloadSkill(agent, command, load, workspace, deadlineMs) : agent;
       };
+
       await this.options.store.markTurnStarted({
         conversationId: input.conversationId,
         expectedRevision: input.expectedRevision,
@@ -282,6 +356,7 @@ export class AgentRuntime {
             expectedRevision: input.expectedRevision,
             checkpoint: {
               lifecycleEpoch,
+              skills: skillSession?.snapshot() ?? locked.skills,
               lastTurn: { turnId: runtimeTurnId, endedAt: new Date().toISOString(), stopReason: terminal.reason, memoryEligibility: terminal.reason === "final-response" && Boolean(terminal.finalMessage?.content.trim()) && pendingToolCalls(contextManager.persistentSnapshot().messages).length === 0 },
               schemaVersion: checkpoint.schemaVersion,
               summary: {
@@ -316,7 +391,7 @@ export class AgentRuntime {
           savedCheckpoint = result.checkpoint;
           return { status: "saved", revision: result.checkpoint.summary.revision };
         },
-        runLog: { sink: this.options.log, source: input.source, toolIdentities,
+        runLog: { sink: this.options.log, source: input.source, toolIdentities, createRunId: () => runtimeTurnId,
           conversationId: input.conversationId, revisionBefore: input.expectedRevision,
           providerId: checkpoint.summary.providerId, workspaceId: checkpoint.summary.workspaceId },
         onFinished: cleanup,
