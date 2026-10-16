@@ -1,3 +1,6 @@
+import {ConversationCleanup} from "@/runtime/conversation-cleanup";
+import {readBounded} from "@/lib/bounded-files";
+import {serializeNote} from "@/runtime/memory-validation";
 import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -30,6 +33,7 @@ export type SessionControllerOptions = {
 export class CliInteractionError extends Error {}
 
 export class SessionController {
+  private cleanupConfirmation?: {token:string;candidates:readonly {id:string;expectedRevision:number}[]};
   private checkpoint?: ConversationCheckpoint;
   private permissionId: string;
   private active?: AbortController;
@@ -81,7 +85,7 @@ export class SessionController {
         if (this.busy) throw new CliInteractionError("当前操作尚未结束，请稍后重试。可使用 /cancel。");
         if (this.unsaved && !["history", "tool", "export", "retry-save", "help"].includes(parsed.name))
           throw new CliInteractionError("本轮尚未保存，请先 /retry-save；退出将丢失进程内未保存结果。");
-        if (parsed.name !== "confirm") this.confirmation = undefined;
+        if (parsed.name !== "confirm") { this.confirmation = undefined; this.cleanupConfirmation = undefined; }
         const controller = new AbortController();
         this.active = controller;
         try { await this.command(parsed.name, parsed.argument, controller.signal); }
@@ -186,6 +190,38 @@ export class SessionController {
   private async command(name: string, argument: string, signal: AbortSignal): Promise<void> {
     const { renderer, conversations } = this.options;
     switch (name) {
+      case "background": renderer.content(JSON.stringify(await this.options.runtime.inspectBackground(this.current().summary.id), null, 2)); return;
+      case "memory": {
+        const parts = argument.trim().split(/\s+/);
+        let scope: "user" | "project" = "project";
+        if (parts[0] === "user" || parts[0] === "project") scope = parts.shift() === "user" ? "user" : "project";
+        const action = parts.shift();
+        if (action === "on" || action === "off") { await this.options.runtime.memory.setEnabled(action === "on"); renderer.notice(`自动记忆已${action === "on" ? "开启" : "关闭"}。`); return; }
+        const store = (await this.options.runtime.memoryStoresFor(this.current().summary.id))[scope];
+        const snapshot = await store.load();
+        if (action === "list") { renderer.content(JSON.stringify({scope, revision: snapshot.revision, notes: snapshot.notes.map(note => ({id: note.id, title: note.title, description: note.description}))}, null, 2)); return; }
+        const id = parts.shift(), note = snapshot.notes.find(item => item.id === id);
+        if (!id || !note) throw new CliInteractionError("笔记不存在；先 /memory list 检查标识。");
+        if (action === "show") renderer.content(serializeNote(note));
+        else if (action === "delete") { await store.update(snapshot.revision, id, null); renderer.notice("笔记已删除。"); }
+        else if (action === "update") {
+          const target = path.resolve(this.options.cwd, parts.join(" "));
+          if (!parts.length) throw new CliInteractionError("请提供 Markdown 文件。");
+          const {content} = await readBounded(path.dirname(target), target, 16000, signal);
+          await store.update(snapshot.revision, id, content); renderer.notice("笔记已更新，下一轮生效。");
+        } else throw new CliInteractionError("未知记忆命令。");
+        return;
+      }
+      case "cleanup": {
+        const cleanup = new ConversationCleanup(conversations), preview = await cleanup.preview();
+        if (argument === "preview") { renderer.content(JSON.stringify(preview, null, 2)); return; }
+        if (!argument.startsWith("delete ") || !this.options.terminal) throw new CliInteractionError("使用 /cleanup preview；删除需要终端交互确认。");
+        const ids = argument.slice(7).trim().split(/\s+/);
+        if (ids.length > 100 || new Set(ids).size !== ids.length) throw new CliInteractionError("请选择不重复的最多 100 个会话。");
+        const candidates = ids.map(id => {const item = preview.find(entry => entry.summary.id === id); if (!item?.eligible) throw new CliInteractionError(`会话 ${id} 当前不可清理。`); return {id, expectedRevision: item.summary.revision};});
+        const token = randomUUID(); this.cleanupConfirmation = {token, candidates};
+        renderer.notice(`将删除：${ids.join("、")}；/confirm ${token} 确认。`); return;
+      }
       case "help": renderer.notice(COMMAND_HELP); return;
       case "providers": renderer.content(JSON.stringify(summarizeProviders(await this.options.loadConfig()), null, 2)); return;
       case "workspaces": renderer.content(JSON.stringify((await this.options.loadWorkspaces()).summaries, null, 2)); return;
@@ -221,6 +257,16 @@ export class SessionController {
         renderer.notice(`将${name === "clear" ? "清空" : "删除"} ${target.summary.title} [${target.summary.id}]；/confirm ${this.confirmation.token} 确认，/cancel 放弃。`); return;
       }
       case "confirm": {
+        if (this.cleanupConfirmation) {
+          const selection = this.cleanupConfirmation; this.cleanupConfirmation = undefined;
+          if (selection.token !== argument) throw new CliInteractionError("确认已失效。");
+          const results = await new ConversationCleanup(conversations).execute(selection.candidates, new Date(), signal);
+          renderer.content(JSON.stringify(results, null, 2));
+          if (this.checkpoint && results.some(item => item.id === this.checkpoint?.summary.id && item.status === "deleted")) {
+            const binding = this.checkpoint.summary; this.checkpoint = undefined; await this.create(binding.providerId, binding.workspaceId);
+          }
+          return;
+        }
         const confirmation = this.confirmation; this.confirmation = undefined;
         if (!confirmation || argument !== confirmation.token) throw new CliInteractionError("确认已失效或不匹配。");
         const input = { conversationId: confirmation.id, expectedRevision: confirmation.revision };

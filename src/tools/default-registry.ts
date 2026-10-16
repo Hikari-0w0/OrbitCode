@@ -1,3 +1,4 @@
+import {createReadMemoryTool, type MemoryContentReader} from "@/tools/read-memory";
 import type { CommandSandbox } from "@/tools/command-sandbox";
 import { editFileTool } from "@/tools/edit-file";
 import { findFilesTool } from "@/tools/find-files";
@@ -22,6 +23,7 @@ export function createDefaultToolRegistry(
   processController?: ManagedProcessController,
   completionTracker?: CompletionTracker,
   externalTools: readonly RegisteredTool[] = [],
+  memoryReader?: MemoryContentReader,
 ): ToolRegistry {
   return new ToolRegistry([
     readFileTool,
@@ -34,6 +36,7 @@ export function createDefaultToolRegistry(
     findFilesTool,
     searchCodeTool,
     ...(contextReader ? [createReadContextTool(contextReader)] : []),
+    ...(memoryReader ? [createReadMemoryTool(memoryReader)] : []),
     ...externalTools,
   ]);
 }

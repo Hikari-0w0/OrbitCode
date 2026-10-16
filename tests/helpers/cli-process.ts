@@ -8,6 +8,7 @@ void runCli({
   argv: process.argv.slice(2), cwd: process.cwd(), environment: process.env,
   input: process.stdin, output: process.stdout, errorOutput: process.stderr,
   terminal: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+  userConfigRoot: path.join(process.cwd(), ".test-user"),
   store: new LocalConversationStore(path.join(process.cwd(), ".test-conversations")),
   log: new LocalAgentRunLog(path.join(process.cwd(), ".test-logs")),
 }).then((code) => { process.exitCode = code; });

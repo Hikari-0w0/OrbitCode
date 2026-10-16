@@ -1,3 +1,4 @@
+import { recoverToolCalls } from "@/runtime/conversation-recovery";
 import { randomUUID } from "node:crypto";
 import {
   chmod,
@@ -102,6 +103,7 @@ export class LocalConversationStore implements ConversationRepository, ContextSt
     const checkpoint: ConversationCheckpoint = {
       schemaVersion: CONVERSATION_SCHEMA_VERSION,
       summary,
+      lifecycleEpoch: randomUUID(),
       mode: input.mode ?? "do",
       modeTurn: 0,
       displayMessages: [],
@@ -131,6 +133,7 @@ export class LocalConversationStore implements ConversationRepository, ContextSt
           this.revisionPath(conversationId, head.revision),
           MAX_CHECKPOINT_BYTES,
         ),
+        { allowIncompleteTools: true },
       );
       if (checkpoint.summary.id !== conversationId || checkpoint.summary.revision !== head.revision) {
         throw new ConversationRepositoryError("invalid-data", "本地会话修订指针不一致。");
@@ -159,6 +162,7 @@ export class LocalConversationStore implements ConversationRepository, ContextSt
           this.revisionPath(conversationId, revision),
           MAX_CHECKPOINT_BYTES,
         ),
+        { allowIncompleteTools: true },
       );
       if (
         checkpoint.summary.id !== conversationId ||
@@ -272,6 +276,8 @@ export class LocalConversationStore implements ConversationRepository, ContextSt
       checkpoint: {
         ...current,
         summary: summaryForSave(current.summary, undefined),
+        lifecycleEpoch: randomUUID(),
+        lastTurn: undefined,
         mode: "do",
         modeTurn: 0,
         displayMessages: [],
@@ -302,7 +308,7 @@ export class LocalConversationStore implements ConversationRepository, ContextSt
     });
   }
 
-  async acquireWriteLease(conversationId: string): Promise<ConversationWriteLease> {
+  async acquireWriteLease(conversationId: string, operationKind?: string): Promise<ConversationWriteLease> {
     validateConversationId(conversationId);
     await this.load(conversationId);
     const leaseDirectory = this.writeLeaseDirectory(conversationId);
@@ -326,6 +332,7 @@ export class LocalConversationStore implements ConversationRepository, ContextSt
       }
       await this.atomicWriteJson(path.join(leaseDirectory, "owner.json"), {
         token,
+        ...(operationKind ? {operationKind} : {}),
         pid: process.pid,
         acquiredAt: new Date().toISOString(),
       });
@@ -358,7 +365,19 @@ export class LocalConversationStore implements ConversationRepository, ContextSt
     };
   }
 
-  async inspectActivity(conversationId: string): Promise<ConversationActivity> {
+  async hasMemoryCommitLease(conversationId: string): Promise<boolean> {
+    validateConversationId(conversationId);
+    try {
+      const directory = this.writeLeaseDirectory(conversationId);
+      const info = await lstat(directory);
+      if (!info.isDirectory() || info.isSymbolicLink()) throw new ConversationRepositoryError("invalid-data", "会话租约类型无效。");
+      if (this.now().getTime() - info.mtimeMs >= LEASE_STALE_MS) return false;
+      const owner: unknown = await this.readJson(path.join(directory, "owner.json"), MAX_HEAD_BYTES);
+      return typeof owner === "object" && owner !== null && "operationKind" in owner && owner.operationKind === "memory-commit";
+    } catch (error) { if (isNodeError(error, "ENOENT")) return false; throw error; }
+  }
+
+  async inspectActivity(conversationId: string, ignoreOwnerToken?: string): Promise<ConversationActivity> {
     validateConversationId(conversationId);
     await this.load(conversationId);
     const leaseDirectory = this.writeLeaseDirectory(conversationId);
@@ -370,7 +389,12 @@ export class LocalConversationStore implements ConversationRepository, ContextSt
       if (!leaseStat.isDirectory() || leaseStat.isSymbolicLink()) {
         throw new ConversationRepositoryError("invalid-data", "本地会话运行状态无效。");
       }
-      if (this.now().getTime() - leaseStat.mtimeMs < LEASE_STALE_MS) {
+      let ownLease = false;
+      if (ignoreOwnerToken) {
+        const owner = await this.readJson(path.join(leaseDirectory, "owner.json"), MAX_HEAD_BYTES);
+        ownLease = isRecordWithToken(owner, ignoreOwnerToken);
+      }
+      if (!ownLease && this.now().getTime() - leaseStat.mtimeMs < LEASE_STALE_MS) {
         return { status: "active" };
       }
     }
@@ -451,7 +475,13 @@ export class LocalConversationStore implements ConversationRepository, ContextSt
       if (!isNodeError(error, "ENOENT")) {
         throw normalizeStorageError(error, "无法读取会话恢复标记。");
       }
-      return this.load(conversationId);
+      const current = await this.load(conversationId);
+      const messages = recoverToolCalls(current.context.messages);
+      if (messages === current.context.messages) return current;
+      const result = await this.save({ conversationId, expectedRevision: current.summary.revision,
+        checkpoint: { ...current, context: { ...current.context, messages } } });
+      if (result.status === "conflict") throw new ConversationRepositoryError("conflict", "恢复期间会话已更新。");
+      return result.checkpoint;
     }
     if (!isTurnMarker(marker)) {
       throw new ConversationRepositoryError("invalid-data", "本地会话恢复标记损坏。");
@@ -467,6 +497,7 @@ export class LocalConversationStore implements ConversationRepository, ContextSt
       conversationId,
       expectedRevision: marker.expectedRevision,
       checkpoint: {
+        ...current,
         schemaVersion: current.schemaVersion,
         summary,
         mode: marker.mode,
@@ -487,7 +518,7 @@ export class LocalConversationStore implements ConversationRepository, ContextSt
         context: {
           ...current.context,
           messages: [
-            ...current.context.messages,
+            ...recoverToolCalls(current.context.messages),
             { kind: "user", content: marker.userInput },
             {
               kind: "interruption",

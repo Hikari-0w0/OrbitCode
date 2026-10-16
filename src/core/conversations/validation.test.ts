@@ -67,3 +67,11 @@ function validCheckpoint() {
     context: { messages: [], consecutiveSummaryFailures: 0 },
   };
 }
+
+test("新增轮次元信息兼容旧会话且拒绝伪造资格",()=>{
+ const old=validCheckpoint();assert.ok(parseConversationCheckpoint(old));
+ const lastTurn={turnId:"turn-1",endedAt:"2026-10-14T00:00:00Z",stopReason:"final-response",memoryEligibility:true};
+ assert.ok(parseConversationCheckpoint({...old,lastTurn,lifecycleEpoch:"epoch-1"}));
+ assert.throws(()=>parseConversationCheckpoint({...old,lastTurn:{...lastTurn,stopReason:"cancelled"}}));
+ assert.throws(()=>parseConversationCheckpoint({...old,lastTurn:{...lastTurn,extra:true}}));
+});

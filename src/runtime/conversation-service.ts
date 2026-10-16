@@ -1,3 +1,5 @@
+import {pendingToolCalls} from "@/runtime/conversation-recovery";
+import type {MemoryService} from "@/runtime/memory-service";
 import type { AgentMode } from "@/core/agent-events";
 import { ContextManager } from "@/core/context/context-manager";
 import {
@@ -12,6 +14,9 @@ import type { ConversationRuntimeManager, ConversationOperationKind } from "@/ru
 
 export type ConversationMutation = { readonly conversationId: string; readonly expectedRevision: number };
 export class ConversationService {
+  private memory?: MemoryService;
+  private scheduleSaved?: (checkpoint: ConversationCheckpoint) => Promise<void>;
+  configureMemory(memory: MemoryService, scheduleSaved: (checkpoint: ConversationCheckpoint) => Promise<void>) { this.memory = memory; this.scheduleSaved = scheduleSaved; }
   constructor(
     readonly store: LocalConversationStore,
     readonly manager: ConversationRuntimeManager,
@@ -25,10 +30,23 @@ export class ConversationService {
     return this.mutate(input, "rename", async () => saved(await this.store.rename(input)));
   }
   clear(input: ConversationMutation) {
+    this.memory?.cancelConversation(input.conversationId);
     return this.mutate(input, "clear", async () => saved(await this.store.clear(input)));
   }
   delete(input: ConversationMutation) {
+    this.memory?.cancelConversation(input.conversationId);
     return this.mutate(input, "delete", () => this.store.delete(input));
+  }
+  async deleteExpired(input: ConversationMutation, cutoff: number): Promise<void> {
+    if (this.manager.pendingSave(input.conversationId)) throw new ConversationRepositoryError("busy", "会话有待保存结果。");
+    if ((await this.guard.inspect(input.conversationId)).status !== "idle") throw new ConversationRepositoryError("busy", "会话正在运行或待恢复。");
+    await this.mutate(input, "delete", async (checkpoint, operation) => {
+      const timestamp = Date.parse(checkpoint.summary.updatedAt);
+      if (!Number.isFinite(timestamp) || timestamp > cutoff) throw new ConversationRepositoryError("conflict", "会话不再满足 30 天期限。");
+      if (this.manager.pendingSave(input.conversationId) || (await this.store.inspectActivity(input.conversationId, operation.lease.ownerToken)).status !== "idle" || pendingToolCalls(checkpoint.context.messages).length) throw new ConversationRepositoryError("busy", "会话有待处理状态。");
+      this.memory?.cancelConversation(input.conversationId);
+      await this.store.delete(input);
+    });
   }
   setMode(input: ConversationMutation & { readonly mode: AgentMode }) {
     return this.mutate(input, "mode", async (checkpoint) => saved(await this.store.save({
@@ -59,7 +77,7 @@ export class ConversationService {
       this.manager.clearPendingSave(input.conversationId);
       await this.store.clearTurnMarker(input.conversationId);
       return checkpoint;
-    });
+    }).then(async checkpoint => { await this.scheduleSaved?.(checkpoint).catch(() => undefined); return checkpoint; });
   }
   recover(input: ConversationMutation) {
     return this.mutate(input, "recover", (_checkpoint, operation) =>

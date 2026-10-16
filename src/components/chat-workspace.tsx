@@ -1,5 +1,8 @@
 "use client";
 
+import {ConversationBackgroundPanel} from "@/components/conversation-background-panel";
+import {ConversationCleanupPanel} from "@/components/conversation-cleanup-panel";
+
 import { resolveNewConversationBinding } from "./conversation-binding";
 
 import { PLAN_EXECUTION_PROMPT, matchesExecutablePlan } from "@/core/conversations/plan-execution";
@@ -947,6 +950,16 @@ export function ChatWorkspace() {
           onRename={() => void renameConversation()}
           onDelete={() => void deleteConversation()}
         />
+
+        <ConversationBackgroundPanel key={session.conversationId} conversationId={session.conversationId} disabled={isStreaming} />
+        <ConversationCleanupPanel onChanged={(deletedIds) => {
+          const currentConversation = sessionRef.current.conversationId;
+          if (currentConversation && deletedIds.includes(currentConversation)) {
+            window.localStorage.removeItem("orbitcode.activeConversationId");
+            resetPermissionSession();
+            setConversationRevision(value => value + 1);
+          } else void refreshConversationList();
+        }} />
 
         <WorkspaceSelector
           workspaces={workspaces}

@@ -7,6 +7,9 @@ const PROTECTED_NAMES = new Set([
   ".netrc",
   ".git-credentials",
   "auth.json",
+  "settings-v1.json",
+  "memory-v1",
+  "memory-state-v1",
 ]);
 const PROTECTED_EXTENSIONS = new Set([".pem", ".key", ".p12", ".pfx"]);
 const PROTECTED_RELATIVE_PATHS = new Set([

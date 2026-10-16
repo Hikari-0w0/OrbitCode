@@ -284,6 +284,8 @@ async function createProfile(
       `(require-not (literal ${schemeString("/dev/null")}))))`,
     ...readBoundaryRules,
     ...protectedRules,
+    // 记忆目录可能在命令启动后创建，按目录段保护其整个子树。
+    '(deny file-read* file-write* (regex #"(^|/)(memory-v1|memory-state-v1)(/|$)"))',
   ].join("\n");
 }
 

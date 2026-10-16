@@ -31,6 +31,7 @@ test(
   { timeout: 15_000 },
   async () => {
     const server = await startOpenAIMockServer((request) => {
+      if (isRecord(request.body) && request.body.tool_choice === "none") return {chunks: [{data: textDelta("[]")}, {data: DONE_EVENT}]};
       const prompt = lastUserContent(request);
       switch (prompt) {
         case "第一问":
@@ -69,6 +70,7 @@ test(
       path.join(tmpdir(), "orbitcode-cli-e2e-"),
     );
 
+    let cli: RunningCli | undefined;
     try {
       await writeFile(
         path.join(temporaryDirectory, ".env"),
@@ -80,39 +82,40 @@ test(
       );
       const environment = { ...process.env };
       delete environment.ORBITCODE_E2E_KEY;
-      const cli = startCli(temporaryDirectory, environment);
+      cli = startCli(temporaryDirectory, environment);
+      const running = cli;
 
-      await waitFor(() => count(cli.stdout(), "你> ") >= 1);
+      await waitFor(() => count(running.stdout(), "你> ") >= 1);
       cli.process.stdin.write("   \n");
-      await waitFor(() => count(cli.stdout(), "你> ") >= 2);
+      await waitFor(() => count(running.stdout(), "你> ") >= 2);
       assert.equal(server.requests.length, 0);
 
       cli.process.stdin.write("第一问\n");
-      await waitFor(() => cli.stdout().includes("代号是 "));
-      assert.equal(cli.stdout().includes("ORBIT-42"), false);
-      await waitFor(() => count(cli.stdout(), "你> ") >= 3);
+      await waitFor(() => running.stdout().includes("代号是 "));
+      assert.equal(running.stdout().includes("ORBIT-42"), false);
+      await waitFor(() => count(running.stdout(), "你> ") >= 3);
 
       cli.process.stdin.write("第二问\n");
-      await waitFor(() => count(cli.stdout(), "你> ") >= 4);
-      assert.deepEqual(messagesOf(server.requests[1]).filter((message) => message.role !== "system"), [
+      await waitFor(() => count(running.stdout(), "你> ") >= 4);
+      assert.deepEqual(messagesOf(agentRequests(server.requests)[1]).filter((message) => message.role !== "system"), [
         { role: "user", content: "第一问" },
         { role: "assistant", content: "代号是 ORBIT-42" },
         { role: "user", content: "第二问" },
       ]);
 
       cli.process.stdin.write("失败\n");
-      await waitFor(() => cli.stdout().includes("model-error"));
-      await waitFor(() => count(cli.stdout(), "你> ") >= 5);
+      await waitFor(() => running.stdout().includes("model-error"));
+      await waitFor(() => count(running.stdout(), "你> ") >= 5);
 
       cli.process.stdin.write("取消\n");
-      await waitFor(() => cli.stdout().includes("正在生成"));
+      await waitFor(() => running.stdout().includes("正在生成"));
       cli.process.kill("SIGINT");
-      await waitFor(() => cli.stdout().includes("停止：cancelled"));
-      await waitFor(() => count(cli.stdout(), "你> ") >= 6);
+      await waitFor(() => running.stdout().includes("停止：cancelled"));
+      await waitFor(() => count(running.stdout(), "你> ") >= 6);
 
       cli.process.stdin.write("恢复\n");
-      await waitFor(() => count(cli.stdout(), "你> ") >= 7);
-      const recoveredMessages = messagesOf(server.requests.at(-1));
+      await waitFor(() => count(running.stdout(), "你> ") >= 7);
+      const recoveredMessages = messagesOf(agentRequests(server.requests).at(-1));
       assert.equal(
         recoveredMessages.some(
           (message) => message.content === "失败" || message.content === "取消",
@@ -130,8 +133,9 @@ test(
       const result = await cli.exit;
       assert.deepEqual(result, { code: 1, signal: null });
       assert.equal(cli.stderr().includes("file-only-secret"), false);
-      assert.equal(cli.stdout().includes("file-only-secret"), false);
+      assert.equal(running.stdout().includes("file-only-secret"), false);
     } finally {
+      if (cli && cli.process.exitCode === null) { cli.process.kill("SIGTERM"); await cli.exit; }
       await server.close();
       await rm(temporaryDirectory, { recursive: true, force: true });
     }
@@ -244,6 +248,10 @@ function yamlConfig(baseUrl: string, environmentVariable: string): string {
     "      window_tokens: 128000",
     "",
   ].join("\n");
+}
+
+function agentRequests(requests: readonly MockRequest[]): MockRequest[] {
+  return requests.filter(request => !isRecord(request.body) || request.body.tool_choice !== "none");
 }
 
 function lastUserContent(request: MockRequest): string | undefined {

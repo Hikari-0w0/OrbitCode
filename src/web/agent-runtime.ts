@@ -1,3 +1,4 @@
+import {userConfigurationRoot} from "@/runtime/background-service";
 import { webMcpHost } from "@/runtime/mcp-host";
 import { AgentRuntime } from "@/runtime/agent-runtime";
 import { ConversationService } from "@/runtime/conversation-service";
@@ -12,6 +13,7 @@ import path from "node:path";
 import { webDataDirectory, webSettingsStore } from "@/web/storage-paths";
 
 export const webAgentRuntime = new AgentRuntime({
+  userConfigRoot: userConfigurationRoot(webDataDirectory),
   mcpConnections: webMcpHost(),
   store: localConversationStore, manager: conversationRuntimeManager,
   guard: conversationOperationGuard, permissions: permissionSessionManager,
@@ -34,3 +36,5 @@ function isolatedPermissionLocations(dataDirectory: string) {
 export const webConversationService = new ConversationService(
   localConversationStore, conversationRuntimeManager, conversationOperationGuard, loadWebProviderContext,
 );
+
+webConversationService.configureMemory(webAgentRuntime.memory, checkpoint => webAgentRuntime.scheduleSaved(checkpoint));

@@ -17,6 +17,7 @@ export type LocalToolName =
   | "find_files"
   | "search_code"
   | "read_context"
+  | "read_memory"
   | "start_process"
   | "process_status"
   | "stop_process"

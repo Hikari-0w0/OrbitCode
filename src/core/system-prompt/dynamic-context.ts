@@ -71,6 +71,15 @@ export function buildOptionalContextMessages(
     }
     messages.push(taggedMessage(tag, content));
   }
+  for (const [tag, content, limit] of [
+    ["orbitcode_project_instructions", context.projectInstructions, 50_000],
+    ["orbitcode_memory_index", context.memoryIndex, 51_000],
+    ["orbitcode_resume_reminder", context.resumeReminder, 2_000],
+  ] as const) {
+    if (content === undefined) continue;
+    if (!content.trim() || new TextEncoder().encode(content).length > limit) throw new AgentConfigurationError("运行背景内容无效或过长。");
+    messages.push(taggedMessage(tag, content));
+  }
   return messages;
 }
 

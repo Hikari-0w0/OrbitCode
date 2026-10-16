@@ -12,6 +12,7 @@ export type PreparedAgentTurn = {
   readonly mode: AgentMode;
   readonly modeTurn: number;
   readonly operationSignal?: AbortSignal;
+  readonly onPersistedTurn?: () => void;
   readonly onFinished?: () => void | Promise<void>;
   readonly persistTurn?: (events: readonly AgentEvent[], initialization: readonly McpInitializationRecord[]) => Promise<PersistenceState>;
   readonly runLog?: RunLogOptions;
@@ -100,6 +101,10 @@ export async function* runAgentTurn(
     tracker?.setPersistence(options.persistTurn ? persistence : undefined);
     try { await options.onFinished?.(); }
     catch { warnings.push({ type: "warning", kind: "cleanup", detail: "部分运行资源清理失败。" }); }
+    if (persistence.status === "saved" && terminal.reason === "final-response" && terminal.finalMessage?.content.trim()) {
+      try { options.onPersistedTurn?.(); }
+      catch { warnings.push({ type: "warning", kind: "memory", detail: "后台记忆任务未能安排，对话已保存。" }); }
+    }
     try { await tracker?.finish(options.signal.aborted ? "cancelled" : "agent-error"); }
     catch { warnings.push({ type: "warning", kind: "run-log", detail: "运行记录写入失败。" }); }
   }
