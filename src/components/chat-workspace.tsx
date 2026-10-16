@@ -1,5 +1,8 @@
 "use client";
 
+import { skillDisplayEvent } from "@/core/skills/display-event";
+import { SkillPanel } from "@/components/skill-panel";
+import { parseSkillCommand } from "@/runtime/skill-commands";
 import {ConversationBackgroundPanel} from "@/components/conversation-background-panel";
 import {ConversationCleanupPanel} from "@/components/conversation-cleanup-panel";
 
@@ -70,6 +73,7 @@ export function ChatWorkspace() {
   const [catalogError, setCatalogError] = useState<string>();
   const [catalogRevision, setCatalogRevision] = useState(0);
   const [permissionRevision, setPermissionRevision] = useState(0);
+  const [skillRunStatus, setSkillRunStatus] = useState("");
   const [conversationRevision, setConversationRevision] = useState(0);
   const [conversations, setConversations] = useState<readonly ConversationSummary[]>([]);
   const [conversationState, setConversationState] = useState<ConversationUiState>("loading");
@@ -627,6 +631,7 @@ export function ChatWorkspace() {
     input: string,
     requestMode: AgentMode,
     requiredPlanMessageId?: string,
+    skillCatalogRevision?: string,
   ): Promise<void> {
     const snapshot = sessionRef.current;
     if (
@@ -643,6 +648,19 @@ export function ChatWorkspace() {
         !matchesExecutablePlan(snapshot.executablePlanMessageId, requiredPlanMessageId))
     ) return;
 
+    let skillCommand: ReturnType<typeof parseSkillCommand>;
+    try { skillCommand = parseSkillCommand(input); }
+    catch (error) { setConversationError(error instanceof Error ? error.message : "Skill 命令无效。"); return; }
+    if (skillCommand && skillCommand.kind !== "run") {
+      try {
+        const response = await fetch(`/api/conversations/${snapshot.conversationId}/skills`, skillCommand.kind === "list" ? { cache: "no-store" } : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: skillCommand.kind, ...(skillCommand.kind === "deactivate" ? { name: skillCommand.name } : {}), expectedRevision: snapshot.revision }) });
+        if (!response.ok) throw new Error("Skill 管理操作失败。");
+        await loadConversation(snapshot.conversationId, undefined, false);
+        document.querySelector<HTMLDetailsElement>(".skillPanel")?.setAttribute("open", "");
+      } catch (error) { setConversationError(error instanceof Error ? error.message : "Skill 操作失败。"); }
+      return;
+    }
+    setSkillRunStatus("");
     const userMessage: PlainConversationMessage = { role: "user", content: input };
     const modeTurn = snapshot.mode === requestMode ? snapshot.modeTurn + 1 : 1;
     const userId = crypto.randomUUID();
@@ -674,6 +692,7 @@ export function ChatWorkspace() {
         body: JSON.stringify({
           conversationId: snapshot.conversationId,
           revision: snapshot.revision,
+          ...(skillCatalogRevision ? { skillCatalogRevision } : {}),
           permissionSessionId,
           mode: requestMode,
           modeTurn,
@@ -695,6 +714,19 @@ export function ChatWorkspace() {
       if (!response.body) throw new Error("模型服务没有返回响应流。");
 
       for await (const event of parseWebChatEvents(readWebStream(response.body))) {
+        if (event.type === "skill-run") {
+          if (event.event.type === "progress") setSkillRunStatus(`Skill ${event.name}：${event.event.phase === "model" ? "请求模型" : "执行工具"}`);
+          else if (event.event.type === "permission-requested") setSkillRunStatus(`Skill ${event.name}：等待审批`);
+          else if (event.event.type === "stopped") setSkillRunStatus(`Skill ${event.name}：${event.event.reason}`);
+          const child = skillDisplayEvent(event);
+          if (!child) continue;
+          if (child.type === "permission-requested") dispatch({ type: "permission-requested", assistantId, event: child });
+          else if (child.type === "permission-resolved") dispatch({ type: "permission-resolved", assistantId, event: child });
+          else if (child.type === "tool-call") dispatch({ type: "tool-call", assistantId, event: child });
+          else if (child.type === "tool-started") dispatch({ type: "tool-started", assistantId, event: child });
+          else if (child.type === "tool-result") dispatch({ type: "tool-result", assistantId, event: child });
+          continue;
+        }
         if (event.type === "mcp-status" || event.type === "runtime-permission-requested" || event.type === "runtime-permission-resolved") {
           dispatch({ type: "initialization", assistantId, event });
         } else if (event.type === "text-delta") {
@@ -951,6 +983,8 @@ export function ChatWorkspace() {
           onDelete={() => void deleteConversation()}
         />
 
+        {skillRunStatus && <p className="skillPanel" role="status" aria-live="polite">{skillRunStatus}</p>}
+        <SkillPanel conversationId={session.conversationId} revision={session.revision} disabled={isStreaming} onRun={(command, revision) => void submitInput(command, session.mode, undefined, revision)} onChanged={() => loadConversation(session.conversationId, undefined, false)} />
         <ConversationBackgroundPanel key={session.conversationId} conversationId={session.conversationId} disabled={isStreaming} />
         <ConversationCleanupPanel onChanged={(deletedIds) => {
           const currentConversation = sessionRef.current.conversationId;

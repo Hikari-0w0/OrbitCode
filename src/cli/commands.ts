@@ -3,7 +3,7 @@ export type CliInput =
   | { readonly type: "message"; readonly text: string }
   | { readonly type: "command"; readonly name: string; readonly argument: string };
 const commands = new Set([
-  "background", "memory", "cleanup", "help", "status", "exit", "cancel", "providers", "provider", "workspaces", "workspace",
+  "skills", "skill", "background", "memory", "cleanup", "help", "status", "exit", "cancel", "providers", "provider", "workspaces", "workspace",
   "plan", "do", "execute-plan", "permissions", "approve", "new", "conversations", "resume",
   "history", "rename", "clear", "delete", "confirm", "compress", "retry-save", "recover", "tool", "export",
 ]);
@@ -21,6 +21,7 @@ export function parseCliInput(line: string): CliInput {
   return { type: "command", name, argument };
 }
 export const COMMAND_HELP = `
+/skills /skills refresh /skill run <name> [参数] /skill deactivate <name>
 /help /status /exit /cancel
 /providers /provider <name> /workspaces /workspace <id>
 /plan /do /execute-plan /permissions <strict|default|permissive>

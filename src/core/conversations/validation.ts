@@ -1,3 +1,4 @@
+import { validSkillState } from "@/core/skills/types";
 import { isMcpInitializationRecord } from "@/core/mcp-events";
 import {
   CONVERSATION_SCHEMA_VERSION,
@@ -70,7 +71,7 @@ export function parseConversationSummary(value: unknown): ConversationSummary {
 export function parseConversationCheckpoint(value: unknown, options: { readonly allowIncompleteTools?: boolean } = {}): ConversationCheckpoint {
   if (
     !isRecord(value) ||
-    !hasAllowedFields(value, ["schemaVersion", "summary", "mode", "modeTurn", "displayMessages", "context"], ["lastTurn", "lifecycleEpoch"]) ||
+    !hasAllowedFields(value, ["schemaVersion", "summary", "mode", "modeTurn", "displayMessages", "context"], ["lastTurn", "lifecycleEpoch", "skills"]) ||
     value.schemaVersion !== CONVERSATION_SCHEMA_VERSION ||
     !Array.isArray(value.displayMessages) ||
     !isRecord(value.context) ||
@@ -88,6 +89,7 @@ export function parseConversationCheckpoint(value: unknown, options: { readonly 
     const turn = value.lastTurn;
     if (!isRecord(turn) || !hasExactFields(turn, ["turnId", "endedAt", "stopReason", "memoryEligibility"]) || typeof turn.turnId !== "string" || !SAFE_ID.test(turn.turnId) || turn.turnId.length > 128 || typeof turn.endedAt !== "string" || !Number.isFinite(Date.parse(turn.endedAt)) || !STOP_REASONS.has(String(turn.stopReason)) || typeof turn.memoryEligibility !== "boolean" || (turn.memoryEligibility && turn.stopReason !== "final-response")) throw invalidStoredConversation();
   }
+  if (value.skills !== undefined && !validSkillState(value.skills)) throw invalidStoredConversation();
   const summary = parseConversationSummary(value.summary);
   for (const message of value.displayMessages) validateDisplayMessage(message);
   for (const message of value.context.messages) validateManagedMessage(message);

@@ -1,3 +1,4 @@
+import type { SkillState } from "@/core/skills/types";
 import type { McpInitializationRecord } from "@/core/mcp-events";
 import type {
   AgentMode,
@@ -83,6 +84,7 @@ export type PersistedLastTurn = {
 };
 
 export type ConversationCheckpoint = {
+  readonly skills?: SkillState;
   readonly lastTurn?: PersistedLastTurn;
   readonly lifecycleEpoch?: string;
   readonly schemaVersion: typeof CONVERSATION_SCHEMA_VERSION;

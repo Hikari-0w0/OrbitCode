@@ -1,3 +1,4 @@
+import { skillDisplayEvent } from "@/core/skills/display-event";
 import type { McpInitializationRecord } from "@/core/mcp-events";
 import { randomUUID } from "node:crypto";
 
@@ -42,7 +43,9 @@ export function appendPersistedTurn(input: {
   let usage: PersistedDisplayMessage["usage"];
   let cumulativeUsage: PersistedDisplayMessage["cumulativeUsage"];
 
-  for (const event of input.events) {
+  for (const original of input.events) {
+    const event = original.type === "skill-run" ? skillDisplayEvent(original) : original;
+    if (!event) continue;
     if (event.type === "text-delta") {
       content += event.text;
       const last = parts.at(-1);

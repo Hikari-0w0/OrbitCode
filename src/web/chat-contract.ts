@@ -51,6 +51,7 @@ export const MAX_CONTEXT_SESSION_ID_LENGTH = 128;
 const MAX_WEB_AGENT_ITERATION = Number.MAX_SAFE_INTEGER;
 
 export type WebChatRequest = {
+  readonly skillCatalogRevision?: string;
   readonly conversationId: string;
   readonly revision: number;
   readonly permissionSessionId: string;
@@ -167,6 +168,7 @@ export function parseWebChatRequest(value: unknown): WebChatRequest {
       "mode",
       "modeTurn",
       "input",
+      ...(value.skillCatalogRevision === undefined ? [] : ["skillCatalogRevision"]),
     ])
   ) {
     throw new WebChatContractError("对话请求格式无效。");
@@ -196,7 +198,9 @@ export function parseWebChatRequest(value: unknown): WebChatRequest {
     );
   }
 
+  if (value.skillCatalogRevision !== undefined && (typeof value.skillCatalogRevision !== "string" || !/^[a-f0-9]{64}$/.test(value.skillCatalogRevision))) throw new WebChatContractError("Skill 目录修订号无效。");
   return {
+    ...(typeof value.skillCatalogRevision === "string" ? { skillCatalogRevision: value.skillCatalogRevision } : {}),
     conversationId: value.conversationId,
     revision: value.revision,
     permissionSessionId: value.permissionSessionId,
@@ -596,6 +600,12 @@ export async function* readWebStream(
 function parseWebChatEvent(value: unknown): WebChatEvent {
   if (!isRecord(value) || typeof value.type !== "string") {
     throw invalidEvent();
+  }
+  if (value.type === "skill-run") {
+    if (!hasExactFields(value, ["type", "iteration", "runId", "name", "event"]) || (typeof value.iteration !== "number" || !Number.isSafeInteger(value.iteration) || value.iteration < 1) || typeof value.runId !== "string" || !/^[A-Za-z0-9-]{1,128}$/.test(value.runId) || typeof value.name !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(value.name) || !isRecord(value.event) || value.event.type === "skill-run") throw invalidEvent();
+    const event = parseWebChatEvent(value.event);
+    if (event.type === "skill-run" || event.type === "mcp-status" || event.type === "runtime-permission-requested" || event.type === "runtime-permission-resolved") throw invalidEvent();
+    return { type: "skill-run", iteration: value.iteration, runId: value.runId, name: value.name, event };
   }
   if (["mcp-status", "runtime-permission-requested", "runtime-permission-resolved"].includes(value.type)) return parseInitializationEvent(value);
   if (value.type === "progress") return parseProgressEvent(value);

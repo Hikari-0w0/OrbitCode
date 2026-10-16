@@ -20,6 +20,8 @@ export type RegisteredTool = {
   readonly name: ToolName;
   readonly description: string;
   readonly inputSchema: ToolInputSchema<unknown>;
+  readonly scheduling?: "normal" | "barrier";
+  readonly budget?: "standard" | "parent-run";
   readonly mutability: ToolMutability;
   readonly permissionTargetKind: ToolPermissionTarget["kind"];
   prepareUnknown(input: unknown): ToolPreparationResult;
@@ -27,6 +29,8 @@ export type RegisteredTool = {
 
 export type ToolDescriptor = {
   readonly name: ToolName;
+  readonly scheduling?: "normal" | "barrier";
+  readonly budget?: "standard" | "parent-run";
   readonly mutability: ToolMutability;
   readonly permissionTargetKind: ToolPermissionTarget["kind"];
   readonly definition: ModelToolDefinition;
@@ -34,6 +38,8 @@ export type ToolDescriptor = {
 
 export type PreparedToolCall = {
   readonly name: ToolName;
+  readonly scheduling?: "normal" | "barrier";
+  readonly budget?: "standard" | "parent-run";
   readonly mutability: ToolMutability;
   readonly permissionTarget: ToolPermissionTarget;
   readonly permissionTargets?: readonly ToolPermissionTarget[];
@@ -142,10 +148,13 @@ export class ToolRegistry {
 }
 
 async function executePrepared(
-  tool: Pick<RegisteredTool, "mutability">,
+  tool: Pick<RegisteredTool, "mutability" | "budget">,
   execute: (context: ToolExecutionContext) => Promise<ToolExecutionResult>,
   context: ToolExecutionContext,
 ): Promise<ToolExecutionResult> {
+  if (tool.budget === "parent-run") {
+    try { return await execute(context); } catch { return toolFailure("execution-failed", "Skill 执行异常。", { sideEffect: "possible" }); }
+  }
   const startedAt = Date.now();
   if (context.signal.aborted) {
     return toolFailure("cancelled", "工具执行已取消。", {
@@ -238,6 +247,8 @@ export function defineTool<TInput, TOutput extends JsonValue>(
         call: Object.freeze({
           name: tool.name,
           mutability: tool.mutability,
+          scheduling: tool.scheduling,
+          budget: tool.budget,
           permissionTarget: permissionTargets[0],
           permissionTargets,
           fingerprint: fingerprint(parsed.value),

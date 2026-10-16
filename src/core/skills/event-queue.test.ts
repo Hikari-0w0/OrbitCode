@@ -1,0 +1,21 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { SkillEventQueue } from './event-queue';
+test('有界子事件队列对多个生产者施加背压且关闭唤醒等待者', async () => {
+    const queue = new SkillEventQueue<number>(1);
+    await queue.push(1);
+    let completed = 0;
+    const pending = [queue.push(2).then(() => completed++), queue.push(3).then(() => completed++)];
+    await Promise.resolve();
+    assert.equal(completed, 0);
+    assert.equal(await queue.next(), 1);
+    await Promise.resolve();
+    assert.equal(await queue.next(), 2);
+    queue.close();
+    await Promise.all(pending);
+    assert.equal(completed, 2);
+    const empty = new SkillEventQueue<number>();
+    const waiting = empty.next();
+    empty.close();
+    assert.equal(await waiting, undefined);
+});

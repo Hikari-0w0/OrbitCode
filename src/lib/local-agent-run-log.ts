@@ -17,6 +17,8 @@ export const DEFAULT_AGENT_RUN_LOG_DIRECTORY = path.join(
 
 export type AgentRunLogEntry = {
   readonly initialization?: readonly McpInitializationRecord[];
+  readonly parentRunId?: string;
+  readonly parentCallId?: string;
   readonly runId: string;
   readonly source: "web" | "cli";
   readonly conversationId: string;
@@ -192,6 +194,7 @@ function toStoredEntry(entry: AgentRunLogEntry): StoredAgentRunLogEntry {
     schemaVersion: entry.initialization?.length ? 5 : 4,
     ...(entry.initialization?.length ? { initialization: entry.initialization } : {}),
     runId: entry.runId,
+    ...(entry.parentRunId ? { parentRunId: entry.parentRunId, parentCallId: entry.parentCallId } : {}),
     source: entry.source,
     conversationId: entry.conversationId,
     revisionBefore: entry.revisionBefore,
@@ -258,6 +261,7 @@ function parseStoredEntry(value: unknown): StoredAgentRunLogEntry {
     "stopReason", "iterations", "sideEffect", "inputChars", "outputChars", "usage", "tools",
   ];
   const optionalCommon = [
+    "parentRunId", "parentCallId",
     "firstModelOutputMs",
     ...(value.schemaVersion === 5 ? ["initialization"] : []),
     ...(value.schemaVersion === 3 ? ["modelAttempts"] : []),
@@ -273,6 +277,8 @@ function parseStoredEntry(value: unknown): StoredAgentRunLogEntry {
       ],
       optionalCommon,
     ) ||
+    (value.parentRunId !== undefined && (typeof value.parentRunId !== "string" || !/^[A-Za-z0-9-]{1,128}$/.test(value.parentRunId))) ||
+    (value.parentCallId !== undefined && (typeof value.parentCallId !== "string" || value.parentCallId.length > 256)) ||
     typeof value.runId !== "string" ||
     (value.source !== "web" && value.source !== "cli") ||
     typeof value.conversationId !== "string" ||

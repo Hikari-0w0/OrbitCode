@@ -1,3 +1,4 @@
+import { parseSkillCommand } from "@/runtime/skill-commands";
 import {ConversationCleanup} from "@/runtime/conversation-cleanup";
 import {readBounded} from "@/lib/bounded-files";
 import {serializeNote} from "@/runtime/memory-validation";
@@ -72,6 +73,13 @@ export class SessionController {
   }
   async handleLine(line: string): Promise<void> {
     try {
+      const skill = parseSkillCommand(line);
+      if (skill?.kind === "run") { if (this.busy) throw new CliInteractionError("当前会话正在运行。"); await this.run(line); return; }
+      if (skill) {
+        if (this.busy && skill.kind !== "refresh" && skill.kind !== "list") throw new CliInteractionError("当前会话正在运行。");
+        if (skill.kind === "deactivate") this.replace(await this.options.runtime.deactivateSkill({ ...this.mutation(), name: skill.name }));
+        this.options.renderer.content(JSON.stringify(await this.options.runtime.inspectSkills(this.current().summary.id), null, 2)); return;
+      }
       const parsed = parseCliInput(line);
       if (parsed.type === "empty") return;
       if (parsed.type === "command") {
@@ -172,9 +180,11 @@ export class SessionController {
         this.options.renderer.event(item);
         if (item.type === "agent" && item.event.type === "tool-result")
           this.latestResults.set(item.event.callId, JSON.stringify(item.event.result, null, 2));
-        if (((item.type === "agent" && item.event.type === "permission-requested") || (item.type === "initialization" && item.event.type === "runtime-permission-requested")) && !this.options.terminal) {
+        const approval = item.type === "agent" && item.event.type === "skill-run" && item.event.event.type === "permission-requested" ? item.event.event.prompt
+          : ((item.type === "agent" && item.event.type === "permission-requested") || (item.type === "initialization" && item.event.type === "runtime-permission-requested")) ? item.event.prompt : undefined;
+        if (approval && !this.options.terminal) {
           this.options.renderer.notice("非交互输入无法审批，本次拒绝。");
-          this.options.permissions.resolveDecision(this.permissionId, item.event.prompt.requestId, "deny");
+          this.options.permissions.resolveDecision(this.permissionId, approval.requestId, "deny");
         }
         if (item.type === "finished") {
           this.unsaved = item.persistence.status !== "saved";

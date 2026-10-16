@@ -374,3 +374,15 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
 .settingsPage button:disabled { opacity: .5; }
 .settingsNotice { padding: 12px; border: 1px solid var(--green); border-radius: 7px; color: var(--green); }
 .settingsLink { display: inline-block; margin-top: 16px; color: var(--green); font-size: 12px; }
+
+.skillPanel { margin: 18px 0; color: var(--text-soft); font-size: 12px; line-height: 1.6; }
+.skillPanel summary { color: var(--text); cursor: pointer; font-weight: 650; }
+.skillPanel p { margin: 10px 0; overflow-wrap: anywhere; }
+.skillPanel label { display: block; margin: 10px 0; }
+.skillPanel input { display: block; width: 100%; margin-top: 5px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; }
+.skillPanel button { padding: 5px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-raised); color: var(--green); font: inherit; }
+.skillPanel button:disabled { opacity: .45; }
+.skillPanel ul { max-height: 280px; margin: 12px 0; padding: 0; overflow-y: auto; list-style: none; }
+.skillPanel li { padding: 10px 0; border-bottom: 1px solid var(--line-soft); overflow-wrap: anywhere; }
+.skillPanel li button { display: block; margin-top: 6px; }
+.skillPanel input:focus-visible, .skillPanel button:focus-visible, .skillPanel summary:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }

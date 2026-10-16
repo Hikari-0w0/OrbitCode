@@ -7,6 +7,9 @@ export function within(root: string, target: string): boolean {
     return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 export function nodeError(error: unknown, code: string): boolean { return error instanceof Error && "code" in error && error.code === code; }
+export class BoundedFileCapacityError extends Error {
+    constructor(readonly maxBytes: number) { super(`文件超过 ${maxBytes} 字节读取上限。`); this.name = "BoundedFileCapacityError"; }
+}
 export async function readBounded(root: string, target: string, maxBytes: number, signal?: AbortSignal): Promise<{
     content: string;
     realPath: string;
@@ -18,8 +21,8 @@ export async function readBounded(root: string, target: string, maxBytes: number
     const handle = await open(resolved, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
         const before = await handle.stat();
-        if (!before.isFile() || before.size > maxBytes)
-            throw new Error("文件不是普通文件或超过上限。");
+        if (!before.isFile()) throw new Error("文件不是普通文件。");
+        if (before.size > maxBytes) throw new BoundedFileCapacityError(maxBytes);
         const buffer = Buffer.alloc(maxBytes + 1);
         let used = 0;
         while (used < buffer.length) {
@@ -30,7 +33,8 @@ export async function readBounded(root: string, target: string, maxBytes: number
             used += read.bytesRead;
         }
         const after = await handle.stat(), current = await stat(resolved);
-        if (used > maxBytes || before.ino !== after.ino || before.dev !== after.dev || before.size !== after.size || before.mtimeMs !== after.mtimeMs || current.ino !== before.ino || current.dev !== before.dev || await realpath(target) !== resolved || await realpath(root) !== resolvedRoot)
+        if (used > maxBytes) throw new BoundedFileCapacityError(maxBytes);
+        if (before.ino !== after.ino || before.dev !== after.dev || before.size !== after.size || before.mtimeMs !== after.mtimeMs || current.ino !== before.ino || current.dev !== before.dev || await realpath(target) !== resolved || await realpath(root) !== resolvedRoot)
             throw new Error("文件读取期间发生变化或超过上限。");
         const content = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, used));
         if (content.includes("\0"))

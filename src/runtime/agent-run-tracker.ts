@@ -5,6 +5,8 @@ import type { AgentRunLogEntry, AgentRunLogSink } from "@/lib/local-agent-run-lo
 import type { PersistenceState } from "@/runtime/types";
 
 export type RunLogOptions = {
+  readonly parentRunId?: string;
+  readonly parentCallId?: string;
   readonly toolIdentities?: ReadonlyMap<string, { readonly serverName: string; readonly toolName: string }>;
   readonly sink: AgentRunLogSink;
   readonly source?: "web" | "cli";
@@ -194,6 +196,7 @@ export class AgentRunTracker {
     const terminal = this.#terminal;
     await this.options.sink.append({
       runId: this.#runId,
+      ...(this.options.parentRunId ? { parentRunId: this.options.parentRunId, parentCallId: this.options.parentCallId } : {}),
       source: this.options.source ?? "web",
       conversationId: this.options.conversationId,
       revisionBefore: this.options.revisionBefore,

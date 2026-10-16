@@ -9,6 +9,8 @@ export const MAX_TOOL_ARGUMENTS_JSON_CHARS = 2 * 1024 * 1024;
 
 export type ToolName = LocalToolName | `mcp__${string}`;
 export type LocalToolName =
+  | "load_skill"
+  | "read_skill_resource"
   | "read_file"
   | "write_file"
   | "write_files"
@@ -141,6 +143,8 @@ export interface WorkspaceBoundary {
 }
 
 export type ToolExecutionContext = {
+  readonly callId?: string;
+  readonly emitSkillEvent?: (event: import("@/core/skills/types").SkillRunEvent) => Promise<void>;
   readonly workspace: WorkspaceBoundary;
   readonly signal: AbortSignal;
   readonly deadlineMs: number;
@@ -183,6 +187,8 @@ export type ToolPermissionDescriptor<TInput> = {
 
 export interface Tool<TInput, TOutput extends JsonValue = JsonValue> {
   readonly name: ToolName;
+  readonly scheduling?: "normal" | "barrier";
+  readonly budget?: "standard" | "parent-run";
   readonly description: string;
   readonly inputSchema: ToolInputSchema<TInput>;
   readonly mutability: ToolMutability;

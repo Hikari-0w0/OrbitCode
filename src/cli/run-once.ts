@@ -1,3 +1,4 @@
+import { parseSkillCommand } from "@/runtime/skill-commands";
 import {userConfigurationRoot} from "@/runtime/background-service";
 import { createHash, randomUUID } from "node:crypto";
 import { open, readFile, stat, writeFile } from "node:fs/promises";
@@ -73,6 +74,8 @@ export async function runOnce(options: {
   let policyId: string | null = null;
   try {
     const prompt = args.promptFile ? await readPromptFile(path.resolve(cwd, args.promptFile)) : await readStdin(input, controller.signal);
+    const skillCommand = parseSkillCommand(prompt);
+    if (skillCommand && skillCommand.kind !== "run") throw new Error("单次运行不支持 Skill 管理命令，请使用交互 CLI 或 Web 面板。");
     if (!prompt.trim() || prompt.length > 20_000) throw new Error("Prompt 必须为 1–20000 个字符。");
     const managedSettings = await settingsStore.load();
     if (dataDir && !managedSettings) throw new Error("隔离运行需要在 data-dir 内提供托管设置。");
@@ -110,11 +113,13 @@ export async function runOnce(options: {
       modeTurn: checkpoint.modeTurn + 1, source: "cli", signal: controller.signal,
     })) {
       if (item.type === "warning") { warnings.push(item.detail); if (item.kind !== "memory") blockingWarnings.push(item.detail); }
-      if (item.type === "agent") writeEvent({ type: "agent", eventType: item.event.type });
+      if (item.type === "agent") writeEvent({ type: "agent", eventType: item.event.type, ...(item.event.type === "skill-run" ? { skillRun: item.event } : {}) });
       if (item.type === "initialization") writeEvent({ type: "initialization", eventType: item.event.type });
-      if ((item.type === "agent" && item.event.type === "permission-requested") || (item.type === "initialization" && item.event.type === "runtime-permission-requested")) {
+      const approval = item.type === "agent" && item.event.type === "skill-run" && item.event.event.type === "permission-requested" ? item.event.event.prompt
+        : ((item.type === "agent" && item.event.type === "permission-requested") || (item.type === "initialization" && item.event.type === "runtime-permission-requested")) ? item.event.prompt : undefined;
+      if (approval) {
         approvalBlocked = true;
-        permissions.resolveDecision(permissionId, item.event.prompt.requestId, "deny");
+        permissions.resolveDecision(permissionId, approval.requestId, "deny");
         controller.abort();
       }
       if (item.type === "finished") finished = item;
