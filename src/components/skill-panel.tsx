@@ -17,9 +17,14 @@ export function SkillPanel({ conversationId, revision, disabled, onRun, onChange
         if (!conversationId)
             return;
         const controller = new AbortController();
-        fetch(`/api/conversations/${conversationId}/skills`, { cache: "no-store", signal: controller.signal }).then(async (response) => { if (!response.ok)
-            throw new Error("无法读取 Skill 列表。"); return response.json() as Promise<Catalog>; }).then(value => { setCatalog(value); setError(""); }).catch(() => { if (!controller.signal.aborted)
-            setError("无法读取 Skill 列表。"); });
+        fetch(`/api/conversations/${conversationId}/skills`, { cache: "no-store", signal: controller.signal }).then(async (response) => {
+            if (!response.ok)
+                throw new Error("无法读取 Skill 列表。");
+            return response.json() as Promise<Catalog>;
+        }).then(value => { setCatalog(value); setError(""); }).catch(() => {
+            if (!controller.signal.aborted)
+                setError("无法读取 Skill 列表。");
+        });
         return () => controller.abort();
     }, [conversationId, revision, disabled]);
     async function mutate(action: "refresh" | "deactivate", name?: string) {
@@ -42,7 +47,7 @@ export function SkillPanel({ conversationId, revision, disabled, onRun, onChange
     }
     if (!conversationId)
         return null;
-    return <details className="skillPanel"><summary>Skills（{catalog?.entries.length ?? 0}）</summary>
+    return <details className="skillPanel" open><summary>Skills（{catalog?.entries.length ?? 0}）</summary>
     <p>按名称和简介选择流程，需要时加载完整指令。</p>
     <button type="button" disabled={busy} onClick={() => void mutate("refresh")}>刷新 Skill 定义</button>
     <label>Skill 参数 <input value={argument} disabled={disabled || busy} onChange={event => setArgument(event.target.value)} placeholder="可选参数，支持引号"/></label>
