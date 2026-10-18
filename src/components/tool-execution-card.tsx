@@ -1,17 +1,18 @@
 "use client";
+import { memo, useMemo } from "react";
 import type { VisibleToolExecution } from "./message-list";
 import type { PermissionUserDecision } from "@/core/permissions/approval";
 import { PermissionRequestCard } from "./permission-request-card";
-export function ToolExecutionCard({ execution, onPermissionDecision, }: {
+export const ToolExecutionCard = memo(function ToolExecutionCard({ execution, onPermissionDecision, }: {
     readonly execution: VisibleToolExecution;
     readonly onPermissionDecision: (requestId: string, decision: PermissionUserDecision) => void;
 }) {
     const result = execution.result;
-    const detail = result?.ok
+    const detail = useMemo(() => result?.ok
         ? JSON.stringify(result.output, null, 2)
         : result
             ? `错误：\n${result.error.message}`
-            : "参数已在服务端完成校验，原始内容不在页面展示。";
+            : "参数已在服务端完成校验，原始内容不在页面展示。", [result]);
     const summary = result
         ? result.ok
             ? "查看执行结果"
@@ -29,7 +30,7 @@ export function ToolExecutionCard({ execution, onPermissionDecision, }: {
       </details>
       {execution.permission && (<PermissionRequestCard request={execution.permission} onDecision={onPermissionDecision}/>)}
     </section>);
-}
+});
 function toolStateLabel(state: VisibleToolExecution["state"]): string {
     if (state === "queued")
         return "等待执行";

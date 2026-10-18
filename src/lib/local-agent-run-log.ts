@@ -1,3 +1,4 @@
+import { isModelUsageSummary, type ModelUsageSummary } from "@/models/usage-tracker";
 import { isMcpInitializationRecord, type McpInitializationRecord } from "@/core/mcp-events";
 import { createReadStream } from "node:fs";
 import { appendFile, chmod, mkdir } from "node:fs/promises";
@@ -16,6 +17,7 @@ export const DEFAULT_AGENT_RUN_LOG_DIRECTORY = path.join(
 );
 
 export type AgentRunLogEntry = {
+  readonly modelUsage?: ModelUsageSummary;
   readonly initialization?: readonly McpInitializationRecord[];
   readonly parentRunId?: string;
   readonly parentCallId?: string;
@@ -50,6 +52,7 @@ export type AgentRunLogEntry = {
     | { readonly availability: "unavailable" };
   readonly modelAttempts?: readonly AgentModelAttemptLog[];
   readonly tools: readonly {
+    readonly callId?: string;
     readonly mcp?: { readonly serverName: string; readonly toolName: string };
     readonly name: string;
     readonly status:
@@ -88,7 +91,7 @@ export interface AgentRunLogSink {
 }
 
 export type StoredAgentRunLogEntry = AgentRunLogEntry & {
-  readonly schemaVersion: 3 | 4 | 5;
+  readonly schemaVersion: 3 | 4 | 5 | 6;
 };
 
 export class AgentRunLogError extends Error {
@@ -173,7 +176,7 @@ export class LocalAgentRunLog implements AgentRunLogSink {
         }
         if (
           !isRecord(value) ||
-          (value.schemaVersion !== 3 && value.schemaVersion !== 4 && value.schemaVersion !== 5)
+          (value.schemaVersion !== 3 && value.schemaVersion !== 4 && value.schemaVersion !== 5 && value.schemaVersion !== 6)
         ) continue;
         yield parseStoredEntry(value);
       }
@@ -190,8 +193,14 @@ export class LocalAgentRunLog implements AgentRunLogSink {
 }
 
 function toStoredEntry(entry: AgentRunLogEntry): StoredAgentRunLogEntry {
+  if (entry.modelUsage !== undefined && !isModelUsageSummary(entry.modelUsage)) throw invalidRunLog();
   return {
-    schemaVersion: entry.initialization?.length ? 5 : 4,
+    schemaVersion: entry.modelUsage ? 6 : entry.initialization?.length ? 5 : 4,
+    ...(entry.modelUsage ? { modelUsage: { scope: entry.modelUsage.scope, categories: entry.modelUsage.categories.map(category => ({
+      purpose: category.purpose, requests: category.requests, reportedRequests: category.reportedRequests,
+      failedRequests: category.failedRequests, durationMs: category.durationMs,
+      promptTokens: category.promptTokens, completionTokens: category.completionTokens, totalTokens: category.totalTokens,
+    })) } } : {}),
     ...(entry.initialization?.length ? { initialization: entry.initialization } : {}),
     runId: entry.runId,
     ...(entry.parentRunId ? { parentRunId: entry.parentRunId, parentCallId: entry.parentCallId } : {}),
@@ -237,6 +246,7 @@ function toStoredEntry(entry: AgentRunLogEntry): StoredAgentRunLogEntry {
     })),
     tools: entry.tools.map((tool) => ({
       name: tool.name,
+      ...(tool.callId === undefined ? {} : { callId: tool.callId }),
       ...(tool.mcp ? { mcp: { ...tool.mcp } } : {}),
       status: tool.status,
       ...(tool.durationMs === undefined ? {} : { durationMs: tool.durationMs }),
@@ -251,7 +261,7 @@ function toStoredEntry(entry: AgentRunLogEntry): StoredAgentRunLogEntry {
 function parseStoredEntry(value: unknown): StoredAgentRunLogEntry {
   if (
     !isRecord(value) ||
-    (value.schemaVersion !== 3 && value.schemaVersion !== 4 && value.schemaVersion !== 5)
+    (value.schemaVersion !== 3 && value.schemaVersion !== 4 && value.schemaVersion !== 5 && value.schemaVersion !== 6)
   ) {
     throw invalidRunLog();
   }
@@ -262,8 +272,9 @@ function parseStoredEntry(value: unknown): StoredAgentRunLogEntry {
   ];
   const optionalCommon = [
     "parentRunId", "parentCallId",
+    ...(value.schemaVersion === 6 ? ["modelUsage"] : []),
     "firstModelOutputMs",
-    ...(value.schemaVersion === 5 ? ["initialization"] : []),
+    ...((value.schemaVersion === 5 || value.schemaVersion === 6) ? ["initialization"] : []),
     ...(value.schemaVersion === 3 ? ["modelAttempts"] : []),
   ];
   const versionFields = ["conversationId", "revisionBefore", "persistence"];
@@ -298,6 +309,7 @@ function parseStoredEntry(value: unknown): StoredAgentRunLogEntry {
     !isNonNegativeInteger(value.inputChars) ||
     !isNonNegativeInteger(value.outputChars) ||
     !isUsage(value.usage) ||
+    (value.modelUsage !== undefined && !isModelUsageSummary(value.modelUsage)) ||
     (value.modelAttempts !== undefined &&
       (!Array.isArray(value.modelAttempts) ||
         !value.modelAttempts.every(isModelAttemptLog))) ||
@@ -351,9 +363,10 @@ function isToolLog(value: unknown): boolean {
     hasAllowedFields(
       value,
       ["name", "status"],
-      ["durationMs", "errorKind", "authorization", "mcp"],
+      ["durationMs", "errorKind", "authorization", "mcp", "callId"],
     ) &&
     typeof value.name === "string" &&
+    (value.callId === undefined || (typeof value.callId === "string" && value.callId.length > 0 && value.callId.length <= 1024)) &&
     (value.mcp === undefined || (isRecord(value.mcp) && hasAllowedFields(value.mcp, ["serverName", "toolName"], []) &&
       typeof value.mcp.serverName === "string" && value.mcp.serverName.length <= 64 &&
       typeof value.mcp.toolName === "string" && value.mcp.toolName.length <= 1024)) &&

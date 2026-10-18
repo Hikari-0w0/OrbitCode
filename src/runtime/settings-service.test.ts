@@ -74,3 +74,26 @@ test("事务写入目录不可写时保留旧文件及 revision", async () => {
     assert.equal((await store.load())?.revision, 1);
   } finally { await chmod(root, 0o700); await rm(root, { recursive: true, force: true }); }
 });
+
+test("高级模型设置支持创建、保留、清除及窗口约束，运行快照保留参数", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-provider-advanced-"));
+  try {
+    const store = new LocalSettingsStore(root), service = new SettingsService(store);
+    const created = await service.apply(0, { type: "provider-add", displayName: "高级模型", model: "model", baseUrl: "https://example.invalid/v1", windowTokens: 128000,
+      credential: { kind: "local", value: "synthetic-test-key" }, maxOutputTokens: 32768, thinking: { enabled: false, apiStyle: "deepseek" } });
+    const id = created.providers[0].id;
+    await service.apply(1, { type: "provider-edit", id, displayName: "改名" });
+    const provider = resolveRuntimeProvider(await loadProviderContext(root, {}, undefined, false, store, false), id);
+    assert.equal(provider.maxOutputTokens, 32768);
+    assert.deepEqual(provider.thinking, { enabled: false, apiStyle: "deepseek" });
+    await assert.rejects(service.apply(2, { type: "provider-edit", id, windowTokens: 16000 }));
+    await assert.rejects(service.apply(2, { type: "provider-edit", id, maxOutputTokens: 1.5 }));
+    await assert.rejects(service.apply(2, { type: "provider-edit", id, thinking: { enabled: true, apiStyle: "deepseek", budgetTokens: 1000 } }));
+    assert.equal((await store.load())?.revision, 2);
+    const cleared = await service.apply(2, { type: "provider-edit", id, maxOutputTokens: null, thinking: null });
+    assert.equal(cleared.providers[0].maxOutputTokens, undefined);
+    assert.equal(cleared.providers[0].thinking, undefined);
+    const enabled = await service.apply(3, { type: "provider-edit", id, thinking: { enabled: true, apiStyle: "siliconflow", budgetTokens: 1024 } });
+    assert.equal(enabled.providers[0].thinking?.budgetTokens, 1024);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

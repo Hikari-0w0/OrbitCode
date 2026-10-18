@@ -1,3 +1,4 @@
+import { ModelUsageTracker, isModelUsageSummary } from "@/models/usage-tracker";
 import path from "node:path";
 import { readdir } from "node:fs/promises";
 import type { ConversationCheckpoint } from "@/core/conversations/types";
@@ -75,7 +76,7 @@ export class MemoryService {
                         if (nodeError(error, "ESRCH"))
                             status = "abandoned";
                     }
-                result.push({ source, status, detail: status === "abandoned" ? "进程中断，后台提取已放弃。" : value.detail, noteIds: value.noteIds });
+                result.push({ ...(isModelUsageSummary(value.modelUsage) ? { modelUsage: value.modelUsage } : {}), source, status, detail: status === "abandoned" ? "进程中断，后台提取已放弃。" : value.detail, noteIds: value.noteIds });
             }
             catch { }
         }
@@ -102,6 +103,8 @@ export class MemoryService {
         this.pendingStates.set(key, { source, status: "queued", detail: "等待后台提取。", noteIds: [] });
         const run = async (signal: AbortSignal) => {
             let claimed = false;
+            const modelUsage = new ModelUsageTracker();
+            const record = (state: MemoryJobState) => this.record({ ...state, modelUsage: modelUsage.snapshot() });
             try {
                 claimed = await this.withStateLock(async () => {
                     if (!await this.enabled())
@@ -114,7 +117,7 @@ export class MemoryService {
                         if (!nodeError(error, "ENOENT"))
                             throw error;
                     }
-                    await this.record({ source, status: "running", detail: "正在提取候选笔记。", noteIds: [] });
+                    await record({ source, status: "running", detail: "正在提取候选笔记。", noteIds: [] });
                     return true;
                 });
                 this.pendingStates.delete(key);
@@ -131,10 +134,10 @@ export class MemoryService {
                     catch { }
                 const noRetry = { ...config, transport: { firstByteTimeoutMs: 10000, idleTimeoutMs: 10000, totalTimeoutMs: 30000, maxRetries: 0 } };
                 let invalidCandidates = 0;
-                const candidates = await extractMemory({ provider: provider ?? createChatProvider(noRetry), checkpoint, secrets: [config.apiKey], windowTokens: config.context.windowTokens, existing, signal, onRejectedCandidates: count => { invalidCandidates = count; } });
+                const candidates = await extractMemory({ provider: modelUsage.wrap(provider ?? createChatProvider(noRetry), "memory"), checkpoint, secrets: [config.apiKey], windowTokens: config.context.windowTokens, existing, signal, onRejectedCandidates: count => { invalidCandidates = count; } });
                 signal.throwIfAborted();
                 if (!candidates.length) {
-                    await this.record({source, status: "saved", detail: "没有适合长期保存的笔记。", noteIds: []});
+                    await record({source, status: "saved", detail: "没有适合长期保存的笔记。", noteIds: []});
                     return;
                 }
                 const operation = await this.guard.begin(source.conversationId, "memory-commit", signal);
@@ -164,7 +167,7 @@ export class MemoryService {
                             else
                                 rejected.push(`${store.scope}:${result.reason}`);
                         }
-                        await this.record({ source, status: rejected.length ? "skipped" : "saved", detail: rejected.length ? `部分候选未收录：${rejected.join("，")}` : candidates.length ? "候选已处理。" : "没有适合长期保存的笔记。", noteIds });
+                        await record({ source, status: rejected.length ? "skipped" : "saved", detail: rejected.length ? `部分候选未收录：${rejected.join("，")}` : candidates.length ? "候选已处理。" : "没有适合长期保存的笔记。", noteIds });
                     });
                 }
                 finally {
@@ -174,7 +177,7 @@ export class MemoryService {
             catch (error) {
                 this.pendingStates.delete(key);
                 if (claimed)
-                    await this.record({ source, status: signal.aborted ? "abandoned" : "failed", detail: signal.aborted ? "后台任务已取消或超时。" : error instanceof MemoryExtractionError ? error.message : "候选写入失败；请检查作用域存储、来源及并发状态，对话已保存。", noteIds: [] }).catch(() => undefined);
+                    await record({ source, status: signal.aborted ? "abandoned" : "failed", detail: signal.aborted ? "后台任务已取消或超时。" : error instanceof MemoryExtractionError ? error.message : "候选写入失败；请检查作用域存储、来源及并发状态，对话已保存。", noteIds: [] }).catch(() => undefined);
             }
         };
         const accepted = this.jobs.enqueue(key, run, () => { this.pendingStates.delete(key); void this.record({ source, status: "abandoned", detail: "后台任务已取消。", noteIds: [] }).catch(() => undefined); });

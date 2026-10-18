@@ -11,7 +11,7 @@
     "start": "next start --hostname 127.0.0.1",
     "cli": "tsx src/cli/main.ts",
     "eval:agent": "tsx scripts/run-agent-evals.ts",
-    "test": "tsx --test",
+    "test": "node scripts/run-tests.mjs",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "check": "npm run lint && npm run typecheck && npm run build"

@@ -98,3 +98,20 @@ test("本地运行日志以脱敏 JSONL 串行追加并收紧文件权限", asyn
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("新版运行记录保留用途统计和工具关联键，旧版仍可读取", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "orbitcode-log-usage-"));
+  try {
+    const log = new LocalAgentRunLog(directory);
+    const modelUsage = { scope: "self", categories: [{ purpose: "summary", requests: 2, reportedRequests: 1, failedRequests: 1,
+      durationMs: 20, promptTokens: 100, completionTokens: 10, totalTokens: 110 }] } as const;
+    await log.append({ runId: "new-run", source: "cli", conversationId: "conversation", revisionBefore: 0, persistence: { status: "saved", revisionAfter: 1 },
+      providerId: "provider", workspaceId: "workspace", mode: "do", modeTurn: 1, startedAt: new Date(0).toISOString(), finishedAt: new Date(20).toISOString(), durationMs: 20,
+      stopReason: "final-response", iterations: 1, sideEffect: "none", inputChars: 0, outputChars: 0, usage: { availability: "unavailable" }, modelUsage,
+      tools: [{ callId: "call-first", name: "read_file", status: "succeeded" }, { callId: "call-second", name: "read_file", status: "failed" }] });
+    const found = await log.find("new-run");
+    assert.equal(found.schemaVersion, 6);
+    assert.deepEqual(found.modelUsage, modelUsage);
+    assert.deepEqual(found.tools.map(tool => tool.callId), ["call-first", "call-second"]);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

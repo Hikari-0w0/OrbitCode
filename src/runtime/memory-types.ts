@@ -1,3 +1,4 @@
+import type { ModelUsageSummary } from "@/models/usage-tracker";
 export const NOTE_CATEGORIES = ["preference", "correction", "project-knowledge", "reference"] as const;
 export type NoteCategory = typeof NOTE_CATEGORIES[number];
 export type MemoryScope = "user" | "project";
@@ -33,6 +34,7 @@ export type MemoryNote = MemoryCandidate & {
     readonly sources: readonly SavedTurnIdentity[];
 };
 export type MemoryJobState = {
+    readonly modelUsage?: ModelUsageSummary;
     readonly source: SavedTurnIdentity;
     readonly status: "queued" | "running" | "saved" | "skipped" | "failed" | "abandoned";
     readonly detail: string;

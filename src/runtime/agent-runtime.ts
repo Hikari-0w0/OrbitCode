@@ -1,3 +1,5 @@
+import { createIsolatedSkillSession } from "@/runtime/skills/session-factory";
+import { ModelUsageTracker } from "@/models/usage-tracker";
 import { loadSkillCatalog } from "@/runtime/skills/catalog";
 import { SkillSession } from "@/runtime/skills/service";
 import { SkillResources } from "@/runtime/skills/resources";
@@ -220,12 +222,15 @@ export class AgentRuntime {
       const lifecycleEpoch = checkpoint.lifecycleEpoch ?? randomUUID();
       const background = await prepareBackground({ workspaceRoot: workspace.root, userConfigRoot: this.options.userConfigRoot ?? userConfigurationRoot(), checkpoint: locked, signal: input.signal });
       const readMemory = background.snapshot.optional.memoryIndex ? background.readMemory : undefined;
-      const provider = this.options.createProvider?.(providerConfig) ?? createChatProvider(providerConfig);
+      const modelUsage = new ModelUsageTracker();
+      const baseProvider = this.options.createProvider?.(providerConfig) ?? createChatProvider(providerConfig);
+      const provider = modelUsage.wrap(baseProvider, "agent");
       const contextManager = new ContextManager({
         sessionId: input.conversationId,
         config: providerConfig.context,
         store: this.options.store,
         provider,
+        summaryProvider: modelUsage.wrap(baseProvider, "summary"),
         initialState: checkpoint.context,
       });
       const readContext = (request: {
@@ -304,16 +309,10 @@ export class AgentRuntime {
               runLog: { sink: this.options.log, source: input.source, conversationId: input.conversationId, providerId: activation.definition.model ?? binding.providerId, workspaceId: binding.workspace.id, revisionBefore: input.expectedRevision, parentRunId: runtimeTurnId, parentCallId: execution.callId ?? `preload:${activation.definition.name}` },
               create: async child => {
                 const childConfig = resolveRuntimeProvider(context, activation.definition.model ?? binding.providerId);
-                const childProvider = this.options.createProvider?.(childConfig) ?? createChatProvider(childConfig);
-                const childContext = new ContextManager({ sessionId: child.id, config: childConfig.context, store: child.store, provider: childProvider, initialState: { messages: child.history, consecutiveSummaryFailures: 0 } });
-                const processes = new ManagedProcessController(this.options.sandbox, workspace), tracker = new CompletionTracker();
-                const childSkills = new SkillSession(undefined, catalog, { tools: () => new Set(childRegistry.descriptors().map(tool => tool.name)), providerId: activation.definition.model ?? binding.providerId, modelIds });
-                childSkills.activate(activation);
-                const childResources = new SkillResources(childSkills, workspace);
-                const childLoad: SkillLoader = async (request, execution) => { try { const { activation: next } = await childSkills.resolve(request.name, request.arguments, execution.signal); if (next.definition.mode === "isolated") throw new SkillError("invalid-arguments", "独立 Skill 不允许递归启动独立执行。"); childSkills.activate(next); return successfulToolResult({ name: request.name, instructions: next.instructions }); } catch (error) { return skillFailure(error, execution.signal); } };
-                const childRegistry: ToolRegistry = createDefaultToolRegistry(this.options.sandbox, request => child.store.read({ sessionId: child.id, ...request }), processes, tracker, [...externalTools, createLoadSkillTool(childLoad), createReadSkillResourceTool(childResources)], readMemory);
-                const agent = createAgentSession({ provider: childProvider, registry: childRegistry, workspace, skills: childSkills, resources: childResources, parentTools, options: { ...common, maxIterations: child.maxIterations, maxRuntimeMs: child.maxRuntimeMs, contextManager: childContext, completionTracker: tracker, permissionGatewayForMode: gatewayForMode } });
-                return { agent, close: () => processes.close() };
+                return createIsolatedSkillSession({ child, config: childConfig,
+                  provider: this.options.createProvider?.(childConfig) ?? createChatProvider(childConfig),
+                  sandbox: this.options.sandbox, workspace, catalog, activation, modelIds, parentTools, externalTools, readMemory,
+                  options: { ...common, permissionGatewayForMode: gatewayForMode } });
               } });
           } catch (error) { return skillFailure(error, execution.signal); }
         };
@@ -393,7 +392,7 @@ export class AgentRuntime {
         },
         runLog: { sink: this.options.log, source: input.source, toolIdentities, createRunId: () => runtimeTurnId,
           conversationId: input.conversationId, revisionBefore: input.expectedRevision,
-          providerId: checkpoint.summary.providerId, workspaceId: checkpoint.summary.workspaceId },
+          providerId: checkpoint.summary.providerId, workspaceId: checkpoint.summary.workspaceId, modelUsage: () => modelUsage.snapshot() },
         onFinished: cleanup,
         onPersistedTurn: () => { if (savedCheckpoint) this.scheduleOriginalSaved(savedCheckpoint); },
       };

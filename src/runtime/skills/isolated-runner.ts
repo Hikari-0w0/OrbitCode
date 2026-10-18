@@ -1,3 +1,4 @@
+import type { ModelUsageSummary } from "@/models/usage-tracker";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
@@ -40,6 +41,7 @@ export async function runIsolatedSkill(input: {
         maxIterations: number;
     }) => Promise<{
         agent: AgentSession;
+        modelUsage?: () => ModelUsageSummary;
         close: () => Promise<void>;
     }>;
 }): Promise<ToolExecutionResult> {
@@ -61,7 +63,7 @@ export async function runIsolatedSkill(input: {
     try {
         const history = await selectSkillHistory({ messages: input.parentHistory, history: definition.history, parentId: input.parentId, childId: runId, parentStore: input.parentStore, childStore: store, signal });
         child = await input.create({ id: runId, store, history, maxRuntimeMs: Math.max(1, Math.min(300000, input.context.deadlineMs - Date.now())), maxIterations: Math.min(16, input.iterations) });
-        for await (const item of runAgentTurn({ agent: child.agent, input: `Skill ${definition.name} 已经加载并激活，完整操作指令在 activatedSkills 中。请直接执行，不要再次调用 load_skill 加载当前 Skill；独立执行中仍禁止递归启动独立 Skill。用户参数：${input.activation.arguments || "（无）"}。历史若含不可用父会话引用，不得尝试访问。`, mode: input.mode, modeTurn: 1, signal, maxRuntimeMs: Math.max(1, Math.min(300000, input.context.deadlineMs - Date.now())), runLog: { ...input.runLog, conversationId: runId, createRunId: () => runId } })) {
+        for await (const item of runAgentTurn({ agent: child.agent, input: `Skill ${definition.name} 已经加载并激活，完整操作指令在 activatedSkills 中。请直接执行，不要再次调用 load_skill 加载当前 Skill；独立执行中仍禁止递归启动独立 Skill。用户参数：${input.activation.arguments || "（无）"}。历史若含不可用父会话引用，不得尝试访问。`, mode: input.mode, modeTurn: 1, signal, maxRuntimeMs: Math.max(1, Math.min(300000, input.context.deadlineMs - Date.now())), runLog: { ...input.runLog, conversationId: runId, createRunId: () => runId, modelUsage: child.modelUsage } })) {
             if (item.type === "warning") warnings.push(boundedSummaryLabel(item.detail));
             const event = item.type === "agent" ? item.event : item.type === "finished" ? item.stopped : undefined;
             if (!event || event.type === "skill-run")

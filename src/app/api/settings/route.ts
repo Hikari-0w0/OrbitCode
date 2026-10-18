@@ -1,3 +1,4 @@
+import type { ModelThinkingConfig } from "@/models/provider";
 import { reconcileWebMcpSettings } from "@/web/settings-mcp";
 import { webSettingsStore } from "@/web/storage-paths";
 import { access } from "node:fs/promises";
@@ -47,8 +48,8 @@ function parsePayload(value: unknown): { expectedRevision: number; action: Setti
   if (Object.keys(value).some((key) => !["expectedRevision", "action"].includes(key))) throw new SettingsError("invalid", "设置请求含未知字段。");
   const action = value.action;
   const fields: Readonly<Record<string, readonly string[]>> = {
-    "provider-add": ["displayName", "model", "baseUrl", "windowTokens", "credential"],
-    "provider-edit": ["id", "displayName", "model", "baseUrl", "windowTokens", "credential"],
+    "provider-add": ["displayName", "model", "baseUrl", "windowTokens", "credential", "maxOutputTokens", "thinking"],
+    "provider-edit": ["id", "displayName", "model", "baseUrl", "windowTokens", "credential", "maxOutputTokens", "thinking"],
     "provider-enable": ["id", "enabled"], "provider-default": ["id"],
     "workspace-add": ["name", "rootPath"], "workspace-rename": ["id", "name"], "workspace-enable": ["id", "enabled"],
     "workspace-default": ["id"], "workspace-remove": ["id"],
@@ -60,13 +61,13 @@ function parsePayload(value: unknown): { expectedRevision: number; action: Setti
   switch (action.type) {
     case "provider-add":
       if (typeof action.displayName === "string" && typeof action.model === "string" && typeof action.baseUrl === "string" && typeof action.windowTokens === "number")
-        return { expectedRevision: Number(value.expectedRevision), action: { type: "provider-add", displayName: action.displayName, model: action.model, baseUrl: action.baseUrl, windowTokens: action.windowTokens, credential: credential(action.credential) } };
+        return { expectedRevision: Number(value.expectedRevision), action: { type: "provider-add", displayName: action.displayName, model: action.model, baseUrl: action.baseUrl, windowTokens: action.windowTokens, credential: credential(action.credential), ...advanced(action) } };
       break;
     case "provider-edit":
       if (["displayName", "model", "baseUrl"].some((key) => action[key] !== undefined && typeof action[key] !== "string") ||
         (action.windowTokens !== undefined && typeof action.windowTokens !== "number")) throw new SettingsError("invalid", "模型编辑字段类型无效。");
       if (typeof action.id === "string") return { expectedRevision: Number(value.expectedRevision), action: {
-        type: "provider-edit", id: action.id,
+        type: "provider-edit", id: action.id, ...advanced(action),
         ...(typeof action.displayName === "string" ? { displayName: action.displayName } : {}),
         ...(typeof action.model === "string" ? { model: action.model } : {}),
         ...(typeof action.baseUrl === "string" ? { baseUrl: action.baseUrl } : {}),
@@ -129,4 +130,23 @@ function failure(error: unknown, headers?: Headers): Response {
   const message = error instanceof LocalManagementError || error instanceof SettingsError || error instanceof WebRequestSecurityError ? error.message : "设置操作失败。";
   return Response.json({ error: message, code: error instanceof SettingsError ? error.code : undefined },
     { status, headers: headers ?? { "cache-control": "no-store" } });
+}
+
+function advanced(action: Record<string, unknown>): { maxOutputTokens?: number | null; thinking?: ModelThinkingConfig | null } {
+  if (action.maxOutputTokens !== undefined && action.maxOutputTokens !== null && typeof action.maxOutputTokens !== "number")
+    throw new SettingsError("invalid", "最大输出 Tokens 类型无效。");
+  const value = action.thinking;
+  let thinking: ModelThinkingConfig | null | undefined;
+  if (value === null) thinking = null;
+  else if (value !== undefined) {
+    if (!record(value) || typeof value.enabled !== "boolean" ||
+      Object.keys(value).some(key => !["enabled", "apiStyle", "budgetTokens"].includes(key)) ||
+      (value.apiStyle !== undefined && value.apiStyle !== "deepseek" && value.apiStyle !== "siliconflow") ||
+      (value.budgetTokens !== undefined && typeof value.budgetTokens !== "number"))
+      throw new SettingsError("invalid", "思考模式字段无效。");
+    thinking = { enabled: value.enabled, ...(value.apiStyle === undefined ? {} : { apiStyle: value.apiStyle }),
+      ...(typeof value.budgetTokens === "number" ? { budgetTokens: value.budgetTokens } : {}) };
+  }
+  return { ...(typeof action.maxOutputTokens === "number" || action.maxOutputTokens === null ? { maxOutputTokens: action.maxOutputTokens } : {}),
+    ...(thinking === undefined ? {} : { thinking }) };
 }

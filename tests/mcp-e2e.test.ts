@@ -44,7 +44,7 @@ for (const transport of ["stdio", "http"] as const) {
       const saved = await fixture.store.load(checkpoint.summary.id);
       assert.ok(saved.displayMessages.at(-1)?.initialization?.some((i) => i.phase === "ready"));
       const runs = await fixture.log.findAllForConversation(checkpoint.summary.id);
-      assert.equal(runs[0].schemaVersion, 5);
+      assert.equal(runs[0].schemaVersion, 6);
       assert.ok(runs[0].initialization?.length);
       assert.equal(runs[0].initialization?.length, 1);
       assert.deepEqual(runs[0].tools[0].mcp, { serverName: "demo", toolName: "echo" });

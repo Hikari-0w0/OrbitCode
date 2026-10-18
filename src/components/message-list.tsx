@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { MessageContent, CopyButton } from "./message-content";
 import { ToolExecutionCard } from "./tool-execution-card";
 import type { McpInitializationRecord } from "@/core/mcp-events";
@@ -80,6 +80,10 @@ const suggestions = [
     "搜索代码中所有 ProviderError 的位置",
 ];
 export function MessageList({ messages, currentRunStartedAtMs, onSuggestion, executablePlanMessageId, planActionDisabled, onExecutePlan, onPermissionDecision = () => undefined, }: MessageListProps) {
+    const actions = useRef({ onExecutePlan, onPermissionDecision });
+    useEffect(() => { actions.current = { onExecutePlan, onPermissionDecision }; }, [onExecutePlan, onPermissionDecision]);
+    const executePlan = useCallback((id: string) => actions.current.onExecutePlan(id), []);
+    const decidePermission = useCallback((id: string, decision: PermissionUserDecision) => actions.current.onPermissionDecision(id, decision), []);
     const viewportRef = useRef<HTMLDivElement>(null);
     const followsLatestRef = useRef(true);
     const [followsLatest, setFollowsLatest] = useState(true);
@@ -87,7 +91,7 @@ export function MessageList({ messages, currentRunStartedAtMs, onSuggestion, exe
         const viewport = viewportRef.current;
         if (!viewport || !followsLatestRef.current)
             return;
-        viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" });
+        viewport.scrollTo({ top: viewport.scrollHeight, behavior: "instant" });
     }, [messages]);
     function handleScroll(): void {
         const viewport = viewportRef.current;
@@ -109,7 +113,25 @@ export function MessageList({ messages, currentRunStartedAtMs, onSuggestion, exe
     return (<div className="messageRegion">
       <div ref={viewportRef} className="messageViewport" onScroll={handleScroll} role="log" aria-live="polite" aria-label="对话消息">
         {messages.length === 0 ? (<EmptyConversation onSuggestion={onSuggestion}/>) : (<div className="messageStack">
-            {messages.map((message) => (<article key={message.id} className={`message message--${message.role}`}>
+            {messages.map((message) => (<MessageItem key={message.id} message={message} currentRunStartedAtMs={message.state === "streaming" ? currentRunStartedAtMs : undefined} executablePlan={message.id === executablePlanMessageId} planActionDisabled={message.id === executablePlanMessageId && planActionDisabled} onExecutePlan={executePlan} onPermissionDecision={decidePermission}/>))}
+          </div>)}
+      </div>
+
+      {!followsLatest && messages.length > 0 && (<button className="jumpToLatest" type="button" onClick={scrollToLatest}>
+          <DownIcon />
+          回到底部
+        </button>)}
+    </div>);
+}
+const MessageItem = memo(function MessageItem({ message, currentRunStartedAtMs, executablePlan, planActionDisabled, onExecutePlan, onPermissionDecision }: {
+    readonly message: VisibleMessage;
+    readonly currentRunStartedAtMs?: number;
+    readonly executablePlan: boolean;
+    readonly planActionDisabled: boolean;
+    readonly onExecutePlan: (id: string) => void;
+    readonly onPermissionDecision: (id: string, decision: PermissionUserDecision) => void;
+}) {
+    return (<article className={`message message--${message.role}`}>
                 <div className="messageIdentity" aria-hidden="true">
                   {message.role === "assistant" ? "OC" : "你"}
                 </div>
@@ -151,7 +173,7 @@ export function MessageList({ messages, currentRunStartedAtMs, onSuggestion, exe
                   {message.detail && (<p className={`messageDetail messageDetail--${message.state}`}>
                       {message.detail}
                     </p>)}
-                  {message.id === executablePlanMessageId && message.state === "complete" && (<div className="planAction">
+                  {executablePlan && message.state === "complete" && (<div className="planAction">
                       <div>
                         <strong>计划已就绪</strong>
                         <span>将保留当前 Workspace 和对话上下文，以 Do 模式开始执行。</span>
@@ -162,16 +184,8 @@ export function MessageList({ messages, currentRunStartedAtMs, onSuggestion, exe
                       </button>
                     </div>)}
                 </div>
-              </article>))}
-          </div>)}
-      </div>
-
-      {!followsLatest && messages.length > 0 && (<button className="jumpToLatest" type="button" onClick={scrollToLatest}>
-          <DownIcon />
-          回到底部
-        </button>)}
-    </div>);
-}
+              </article>);
+});
 function MessageTimeline({ message, onPermissionDecision, }: {
     readonly message: VisibleMessage;
     readonly onPermissionDecision: (requestId: string, decision: PermissionUserDecision) => void;

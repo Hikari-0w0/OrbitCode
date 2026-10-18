@@ -89,6 +89,7 @@ test("Web 流消费者取消会中止 Agent 并释放响应流", async () => {
   assert.equal(loggedEntry?.revisionBefore, 2);
   assert.deepEqual(loggedEntry?.persistence, { status: "not-attempted" });
   assert.deepEqual(loggedEntry?.tools, [{
+    callId: "call_cancel",
     name: "run_command",
     status: "unfinished",
   }]);
@@ -353,7 +354,7 @@ test("Web Agent 运行聚合为不含正文和工具载荷的本地日志摘要"
       completionTokens: 20,
       totalTokens: 100,
     },
-    tools: [{ name: "read_file", status: "succeeded", durationMs: 25 }],
+    tools: [{ name: "read_file", callId: "call-secret", status: "succeeded", durationMs: 25 }],
   });
   assert.equal(JSON.stringify(entries).includes("不得写入日志"), false);
   assert.equal(JSON.stringify(entries).includes("secret.ts"), false);
@@ -443,6 +444,7 @@ test("本地运行日志记录授权等待时长和终态", async () => {
   }
 
   assert.deepEqual(entries[0]?.tools, [{
+    callId: "call-approval",
     name: "run_command",
     status: "cancelled",
     durationMs: 0,
