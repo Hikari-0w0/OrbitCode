@@ -45,6 +45,7 @@ export const MAX_AGENT_ITERATIONS = 32;
 export const DEFAULT_MAX_AGENT_RUNTIME_MS = 60 * 60 * 1_000;
 export const MAX_AGENT_RUNTIME_MS = 24 * 60 * 60 * 1_000;
 const UNKNOWN_TOOL_ITERATION_LIMIT = 2;
+const COMPLETION_REPORT_FAILURE_LIMIT = 2;
 export interface AgentSession {
   getHistory(): readonly PlainConversationMessage[];
   streamTurn(options: {
@@ -160,6 +161,7 @@ export class AgentLoop implements AgentSession {
     let contextTurnActive = false;
     let partialAssistantContent = "";
     let hasLocalToolResult = false;
+    let completionReportFailures = 0;
     let interruption:
       | {
           readonly reason: Exclude<AgentStopReason, "final-response">;
@@ -212,16 +214,20 @@ export class AgentLoop implements AgentSession {
           systemMessages = fresh;
         }
         const availableTools = access.definitions();
-        const toolDefinitions = hasLocalToolResult
+        const finalOnly = completionReportFailures >= COMPLETION_REPORT_FAILURE_LIMIT;
+        const toolDefinitions = finalOnly ? [] : hasLocalToolResult
           ? availableTools
           : availableTools.filter((tool) => tool.function.name !== "report_completion");
-        const promptEnvelope = { systemMessages, tools: toolDefinitions } as const;
+        const finalizationMessages: readonly PromptSystemMessage[] = finalOnly
+          ? [{ role: "system", content: "完成报告首次提交及一次修正均未通过。本轮仅生成最终答复：根据已有结果交代已完成内容、失败和未验证项，不再请求任何工具，不重做已执行的操作，不宣称任务已完整验收。" }]
+          : [];
+        const promptEnvelope = { systemMessages: [...systemMessages, ...finalizationMessages], tools: toolDefinitions } as const;
         const modelMessages = this.contextManager
           ? (await this.contextManager.prepareForModel(
               promptEnvelope,
               signal,
             )).messages
-          : transcript;
+          : [...transcript, ...finalizationMessages];
         const response = this.collectModelResponse(
           modelMessages,
           toolDefinitions,
@@ -233,41 +239,47 @@ export class AgentLoop implements AgentSession {
         const calls: ModelToolCall[] = [];
         let finishReason: "stop" | "tool-call" | undefined;
         let usage: ModelTokenUsage | undefined;
-        for await (const event of response) {
-          if (event.type === "model-progress") {
-            yield {
-              type: "progress",
-              iteration,
-              maxIterations: this.maxIterations,
-              phase: "model",
-              model: {
-                stage: event.progress.stage,
-                elapsedMs: event.progress.elapsedMs,
-                attempt: event.progress.attempt,
-                ...(event.progress.traceId === undefined
-                  ? {}
-                  : { traceId: event.progress.traceId }),
-                ...(event.progress.toolName === undefined
-                  ? {}
-                  : { toolName: event.progress.toolName }),
-                ...(event.progress.toolArgumentsChars === undefined
-                  ? {}
-                  : { toolArgumentsChars: event.progress.toolArgumentsChars }),
-              },
-            };
-          } else if (event.type === "agent-text") {
-            content += event.text;
-            partialAssistantContent = content;
-            yield { type: "text-delta", iteration, text: event.text };
-          } else if (event.type === "model-reasoning") {
-            reasoningContent += event.text;
-          } else if (event.type === "model-tool-call") {
-            calls.push(event.call);
-          } else if (event.type === "model-usage") {
-            usage = event.usage;
-          } else {
-            finishReason = event.finishReason;
+        let finalizationProtocolFailure = false;
+        try {
+          for await (const event of response) {
+            if (event.type === "model-progress") {
+              yield {
+                type: "progress",
+                iteration,
+                maxIterations: this.maxIterations,
+                phase: "model",
+                model: {
+                  stage: event.progress.stage,
+                  elapsedMs: event.progress.elapsedMs,
+                  attempt: event.progress.attempt,
+                  ...(event.progress.traceId === undefined
+                    ? {}
+                    : { traceId: event.progress.traceId }),
+                  ...(event.progress.toolName === undefined
+                    ? {}
+                    : { toolName: event.progress.toolName }),
+                  ...(event.progress.toolArgumentsChars === undefined
+                    ? {}
+                    : { toolArgumentsChars: event.progress.toolArgumentsChars }),
+                },
+              };
+            } else if (event.type === "agent-text") {
+              content += event.text;
+              partialAssistantContent = content;
+              yield { type: "text-delta", iteration, text: event.text };
+            } else if (event.type === "model-reasoning") {
+              reasoningContent += event.text;
+            } else if (event.type === "model-tool-call") {
+              calls.push(event.call);
+            } else if (event.type === "model-usage") {
+              usage = event.usage;
+            } else {
+              finishReason = event.finishReason;
+            }
           }
+        } catch (error) {
+          if (!finalOnly || !(error instanceof ProviderError) || error.kind !== "protocol") throw error;
+          finalizationProtocolFailure = true;
         }
         completedIterations = iteration;
         if (usage !== undefined) {
@@ -293,6 +305,14 @@ export class AgentLoop implements AgentSession {
           cumulative: nextCumulativeUsage,
         };
 
+        if (finalOnly && (finalizationProtocolFailure || finishReason !== "stop" || calls.length > 0 || content.trim().length === 0)) {
+          // 隐藏工具不能阻止模型伪造调用；收尾阶段也必须在执行入口阻断副作用。
+          const fallback = `${content.length > 0 ? "\n\n" : ""}完成报告未通过校验，本轮已结束。已有操作和检查记录已保留，任务尚未完成验收；请查看未验证项后决定是否继续。`;
+          content += fallback;
+          yield { type: "text-delta", iteration, text: fallback };
+          calls.length = 0;
+          finishReason = "stop";
+        }
         if (finishReason === "stop") {
           if (calls.length > 0 || content.trim().length === 0) {
             throw new ProviderError("protocol", "模型没有返回有效的最终文本。");
@@ -484,6 +504,14 @@ export class AgentLoop implements AgentSession {
         const budgetGuidance = new Map<string, string>();
         let budgetStopDetail: string | undefined;
         for (const item of orderedResults) {
+          if (item.call.name === "report_completion" && !item.result.ok && item.result.error.kind === "invalid-arguments") {
+            this.completionTracker.markReportFailure();
+            completionReportFailures += 1;
+            budgetGuidance.set(item.call.id, completionReportFailures >= COMPLETION_REPORT_FAILURE_LIMIT
+              ? "完成报告修正预算已耗尽。仅生成最终答复，交代已有结果和未验证项，不再调用工具。"
+              : "完成报告允许修正一次；按 error.issues 修正检查和证据，汇总状态由运行时计算。无法验证的需求保留为 not-run，不重做已成功的操作。");
+            continue;
+          }
           const decision = toolFailureBudget.observe(item.call, item.result);
           if (decision.action === "switch") {
             budgetGuidance.set(item.call.id, decision.guidance);
@@ -619,7 +647,7 @@ export class AgentLoop implements AgentSession {
     for await (const event of this.provider.stream(messages, {
       signal,
       tools,
-      toolChoice: "auto",
+      toolChoice: tools.length > 0 ? "auto" : "none",
     })) {
       if (signal.aborted) {
         throw new ProviderError("cancelled", "模型请求已取消。");

@@ -769,6 +769,62 @@ test("结构化完成报告引用真实写入后证据时标记为已验证", as
   }
 });
 
+test("完成报告修正失败后仅生成最终答复，保留检查且不再执行工具", async () => {
+  for (const [withContext, ignoresFinalOnly] of [[false, false], [false, true], [true, false], [true, true]]) {
+    const tracker = new CompletionTracker();
+    let writes = 0;
+    const badReport = (id: string) => ({
+      id, name: "report_completion", argumentsJson: JSON.stringify({
+        checks: [
+          { criterion: "读取文件", status: "passed", evidence_call_ids: ["read"] },
+          { criterion: "浏览器交互", status: "passed", evidence_call_ids: ["invented"] },
+        ], blockers: [],
+      }),
+    });
+    const provider = new ScriptedProvider([
+      [{ type: "tool-call", call: call("read", "read_file", "target") }, { type: "done", finishReason: "tool-call" }],
+      [{ type: "tool-call", call: badReport("report-1") }, { type: "done", finishReason: "tool-call" }],
+      [{ type: "tool-call", call: badReport("report-2") }, { type: "done", finishReason: "tool-call" }],
+      ignoresFinalOnly
+        ? [{ type: "tool-call", call: call("unexpected-write", "write_file", "target") }, { type: "done", finishReason: "tool-call" }]
+        : [{ type: "text-delta", text: "文件已读取；浏览器交互尚未验证。" }, { type: "done", finishReason: "stop" }],
+      [{ type: "tool-call", call: call("next-read", "read_file", "target") }, { type: "done", finishReason: "tool-call" }],
+      [{ type: "text-delta", text: "已继续检查。" }, { type: "done", finishReason: "stop" }],
+    ]);
+    const tools = registry(() => writes++, tracker);
+    const agent = withContext
+      ? createContextAgent(provider, "completion-fallback", 6, tools, tracker)
+      : createAgent(provider, tools, 6, tracker);
+    const result = await collect(agent.streamTurn({
+      input: "检查项目", mode: "do", modeTurn: 1, signal: new AbortController().signal,
+    }));
+    assert.equal(stopReason(result), "final-response");
+    assert.equal(result.filter((event) => event.type === "stopped").length, 1);
+    assert.equal(writes, 0);
+    assert.deepEqual(provider.requests[3]?.toolNames, []);
+    assert.match(JSON.stringify(provider.requests[3]?.messages), /仅生成最终答复/u);
+    const terminal = result.at(-1);
+    if (terminal?.type !== "stopped") assert.fail("缺少最终事件");
+    assert.equal(terminal.verification?.status, "unverified");
+    assert.deepEqual(terminal.verification?.checks.map((check) => check.status), ["passed", "not-run"]);
+    assert.match(agent.getHistory().at(-1)?.content ?? "", /尚未验证|未通过校验/u);
+    assert.equal(result.filter((event) => event.type === "tool-result").length, 3);
+    const resumed = await collect(agent.streamTurn({
+      input: "继续检查", mode: "do", modeTurn: 2, signal: new AbortController().signal,
+    }));
+    assert.equal(stopReason(resumed), "final-response");
+    assert.ok(provider.requests[4]?.toolNames.includes("read_file"));
+    assert.doesNotMatch(JSON.stringify(provider.requests[4]?.messages.filter((message) => message.role === "system")), /仅生成最终答复/u);
+    if (withContext) {
+      const previousMessages = JSON.stringify(provider.requests[4]?.messages);
+      assert.match(previousMessages, /report-1/u);
+      assert.match(previousMessages, /report-2/u);
+      assert.match(previousMessages, /尚未验证|未通过校验/u);
+      assert.doesNotMatch(previousMessages, /unexpected-write/u);
+    }
+  }
+});
+
 test("工具结果向后续模型请求公开可复制的完成证据 ID", async () => {
   const tracker = new CompletionTracker({ createRunId: () => "test_run" });
   const provider = new ScriptedProvider([
@@ -1240,6 +1296,8 @@ function createContextAgent(
   provider: ChatProvider,
   sessionId: string,
   maxIterations: number,
+  tools: ToolRegistry = registry(),
+  completionTracker?: CompletionTracker,
 ): AgentLoop {
   const contextManager = new ContextManager({
     sessionId,
@@ -1257,7 +1315,7 @@ function createContextAgent(
   });
   return new AgentLoop(
     provider,
-    (mode) => createModeToolPolicy(registry(), mode),
+    (mode) => createModeToolPolicy(tools, mode),
     requireWorkspace(),
     {
       maxIterations,
@@ -1269,6 +1327,7 @@ function createContextAgent(
         pathSemantics: "workspace-relative-posix",
       },
       contextManager,
+      completionTracker,
     },
   );
 }

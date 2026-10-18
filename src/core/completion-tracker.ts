@@ -28,7 +28,8 @@ export type CompletionAssessment = {
 };
 
 export type CompletionReportInput = {
-  readonly status: "complete" | "partial" | "blocked";
+  // 兼容旧客户端；汇总状态始终由检查项和实际证据计算。
+  readonly status?: "complete" | "partial" | "blocked";
   readonly checks: readonly CompletionCheck[];
   readonly blockers: readonly string[];
 };
@@ -72,6 +73,9 @@ export class CompletionTracker {
     readonly mutability: ToolMutability;
   }): string | undefined {
     if (input.call.name === "report_completion") return undefined;
+    if (input.result.sideEffect === "applied" && input.mutability !== "read-only") {
+      this.#assessment = undefined;
+    }
     const evidenceId = this.#evidenceIdByCallId.get(input.call.id) ??
       `e_${this.#runId}_${this.#nextEvidenceId++}`;
     this.#evidenceIdByCallId.set(input.call.id, evidenceId);
@@ -95,11 +99,13 @@ export class CompletionTracker {
     | { readonly ok: true; readonly assessment: CompletionAssessment }
     | { readonly ok: false; readonly message: string; readonly issues: readonly SchemaIssue[] } {
     const issues: SchemaIssue[] = [];
+    const claimsComplete = report.blockers.length === 0 &&
+      report.checks.length > 0 && report.checks.every((check) => check.status === "passed");
     const unresolvedQualityGate = latestFailedQualityGate(this.#evidence.values());
-    if (report.status === "complete" && unresolvedQualityGate !== undefined) {
+    if (claimsComplete && unresolvedQualityGate !== undefined) {
       issues.push({
-        path: "status",
-        message: `${unresolvedQualityGate} 质量检查最后一次执行仍失败，不能声明 complete；请修复后重跑，或如实报告 partial/blocked。`,
+        path: "checks",
+        message: `${unresolvedQualityGate} 质量检查最后一次执行仍失败；请修复后重跑，或在 checks 中如实保留 failed/not-run。`,
       });
     }
     for (const [index, check] of report.checks.entries()) {
@@ -160,11 +166,22 @@ export class CompletionTracker {
     const hasPostWriteVerification = lastWrite === undefined || passedEvidence.some(
       (record) => record.ok && isAfter(record, lastWrite) && isVerification(record),
     );
-    if (report.status === "complete" && !hasPostWriteVerification) {
-      issues.push({ path: "status",
-        message: "complete 必须引用最后写入之后的成功验证；请补充与目标匹配的验证，无法验证时如实报告 partial/blocked。" });
+    if (claimsComplete && !hasPostWriteVerification) {
+      issues.push({ path: "checks",
+        message: "完整验证必须引用最后写入之后的成功验证；请补充与目标匹配的验证，无法验证时在 checks 中保留 failed/not-run。" });
     }
-    if (issues.length > 0) return rejectedReport(issues);
+    if (issues.length > 0) {
+      // 拒绝报告不抹去已知检查；无效项只保留需求，不能继续展示为已通过。
+      this.#assessment = {
+        status: "unverified",
+        checks: report.checks.map((check, index) => issues.some((issue) =>
+          issue.path.startsWith(`checks[${index}].`)
+        ) ? { ...check, status: "not-run", evidenceCallIds: [] }
+          : { ...check, evidenceCallIds: [...check.evidenceCallIds] }),
+        blockers: [...report.blockers],
+      };
+      return rejectedReport(issues);
+    }
     const hasIncompleteChecks = report.checks.some(
       (check) => check.status !== "passed",
     );
@@ -177,16 +194,6 @@ export class CompletionTracker {
             ? "observed"
             : "verified"
           : "unverified";
-    const expectedClaim = status === "verified" || status === "observed"
-      ? "complete"
-      : status === "blocked"
-        ? "blocked"
-        : "partial";
-    if (report.status !== expectedClaim) {
-      return rejectedReport([{ path: "status",
-        message: `完成报告的声明状态与检查结果或写入后验证不一致；当前检查对应 ${expectedClaim}，请如实修正声明，不要删除未满足的需求。`,
-      }]);
-    }
     this.#assessment = {
       status,
       checks: report.checks.map((check) => ({
@@ -200,6 +207,12 @@ export class CompletionTracker {
       blockers: [...report.blockers],
     };
     return { ok: true, assessment: this.#assessment };
+  }
+
+  markReportFailure(): void {
+    if (this.#assessment !== undefined) {
+      this.#assessment = { ...this.#assessment, status: "unverified" };
+    }
   }
 
   assessment(): CompletionAssessment {
@@ -397,7 +410,10 @@ function isHttpEvidence(
 ): boolean {
   if (!record?.ok || record.toolName !== "run_command") return false;
   const command = commandArgument(record.argumentsJson);
-  if (command === undefined || !/\bcurl\b/iu.test(command)) return false;
+  if (command === undefined) return false;
+  // 只能识别显式 curl 目标冲突。脚本和测试可以自行发起请求，不能因包装层未出现 curl 拒绝；
+  // 接受命令证据仅确认成功执行，不独立证明脚本断言和需求覆盖完整。
+  if (!/\bcurl\b/iu.test(command)) return true;
   const targets = criterion.match(/\b(?:localhost|127\.0\.0\.1):\d+\b/giu) ?? [];
   return targets.every((target) => command.includes(target));
 }

@@ -36,6 +36,98 @@ test("CLI 共用完整工具集合，读取编辑验证并持久化 CLI 来源",
   } finally { await fixture.close(); }
 });
 
+test("CLI 完成报告两次无效后收尾并持久化已有检查", async () => {
+  let requests = 0;
+  const report = {
+    checks: [
+      { criterion: "文件已写入并回读", status: "passed", evidence_call_ids: ["completion-read"] },
+      { criterion: "浏览器交互", status: "passed", evidence_call_ids: ["invented"] },
+    ], blockers: [],
+  };
+  const steps = [
+    { id: "completion-write", name: "write_file", argumentsJson: JSON.stringify({ path: "completion.txt", content: "saved" }) },
+    { id: "completion-read", name: "read_file", argumentsJson: JSON.stringify({ path: "completion.txt" }) },
+    { id: "completion-report-1", name: "report_completion", argumentsJson: JSON.stringify(report) },
+    { id: "completion-report-2", name: "report_completion", argumentsJson: JSON.stringify(report) },
+  ];
+  const fixture = await runtimeFixture((request) => {
+    const step = steps[requests++];
+    if (!step) {
+      assert.match(JSON.stringify(request.body), /仅生成最终答复/u);
+      assert.doesNotMatch(JSON.stringify(request.body), /"tools":\[\{/u);
+    }
+    return { chunks: [{ data: step
+      ? toolCallDelta(step) + TOOL_FINISH_EVENT + TRANSPORT_DONE_EVENT
+      : textDelta("文件已保存并回读，浏览器交互尚未验证。") + DONE_EVENT }] };
+  }, { iterations: "8" });
+  try {
+    await fixture.controller.handleLine("/permissions permissive");
+    await fixture.controller.handleLine("保存文件并报告检查结果");
+    const checkpoint = await fixture.checkpoint();
+    const assistant = checkpoint.displayMessages[1];
+    assert.equal(await readFile(path.join(fixture.root, "completion.txt"), "utf8"), "saved");
+    assert.equal(requests, 5, fixture.errors() + fixture.output());
+    assert.equal(assistant.stopReason, "final-response");
+    assert.equal(assistant.verification?.status, "unverified");
+    assert.deepEqual(assistant.verification?.checks.map((check) => check.status), ["passed", "not-run"]);
+    assert.equal(assistant.toolExecutions?.filter((tool) => tool.name === "report_completion").length, 2);
+    assert.match(fixture.output(), /浏览器交互尚未验证/u);
+    assert.equal(fixture.errors(), "");
+    const runs = await fixture.log.findAllForConversation(checkpoint.summary.id);
+    assert.equal(runs[0]?.stopReason, "final-response");
+    assert.equal(runs[0]?.persistence.status, "saved");
+  } finally { await fixture.close(); }
+});
+
+test("CLI 收尾时 Provider 拒绝违规工具调用，运行时仍给出保守总结", async () => {
+  let requests = 0;
+  const steps = [
+    { id: "read", name: "read_file", argumentsJson: '{"path":"existing.txt"}' },
+    { id: "invalid-1", name: "report_completion", argumentsJson: "{}" },
+    { id: "invalid-2", name: "report_completion", argumentsJson: "{}" },
+    { id: "forged-write", name: "write_file", argumentsJson: '{"path":"forged.txt","content":"no"}' },
+  ];
+  const fixture = await runtimeFixture((request) => {
+    const step = steps[requests++];
+    assert.ok(step, "不应在收尾阶段继续请求模型");
+    if (requests === 4) assert.match(JSON.stringify(request.body), /"tool_choice":"none"/u);
+    return { chunks: [{ data: toolCallDelta(step) + TOOL_FINISH_EVENT + TRANSPORT_DONE_EVENT }] };
+  }, { iterations: "8" });
+  try {
+    await writeFile(path.join(fixture.root, "existing.txt"), "existing");
+    await fixture.controller.handleLine("检查文件并报告");
+    const checkpoint = await fixture.checkpoint();
+    assert.equal(requests, 4);
+    assert.equal(checkpoint.displayMessages[1].stopReason, "final-response");
+    assert.equal(checkpoint.displayMessages[1].verification?.status, "unverified");
+    assert.match(fixture.output(), /完成报告未通过校验/u);
+    await assert.rejects(readFile(path.join(fixture.root, "forged.txt")), { code: "ENOENT" });
+    assert.equal(fixture.errors(), "");
+  } finally { await fixture.close(); }
+});
+
+test("CLI 显式发送放宽后的输出预算，截断原因落盘且不写入部分文件", async () => {
+  const fixture = await runtimeFixture((request) => {
+    assert.match(JSON.stringify(request.body), /"max_tokens":32768/u);
+    return { chunks: [{ data: toolCallDelta({ id: "truncated-batch", name: "write_files",
+      argumentsJson: '{"files":[{"path":"partial.txt","content":"' + "x".repeat(25701),
+    }) + `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "length" }] })}\n\n` + TRANSPORT_DONE_EVENT }] };
+  }, { context: "    max_tokens: 32768\n" });
+  try {
+    await fixture.controller.handleLine("生成注册登录系统");
+    const checkpoint = await fixture.checkpoint();
+    const assistant = checkpoint.displayMessages[1];
+    assert.equal(assistant.stopReason, "model-error");
+    assert.match(assistant.detail ?? "", /finish_reason=length.*32768/u);
+    assert.equal(assistant.toolExecutions?.length ?? 0, 0);
+    assert.match(JSON.stringify(checkpoint.context.messages), /finish_reason=length/u);
+    await assert.rejects(readFile(path.join(fixture.root, "partial.txt")), { code: "ENOENT" });
+    const runs = await fixture.log.findAllForConversation(checkpoint.summary.id);
+    assert.equal(runs[0]?.persistence.status, "saved");
+    assert.equal(fixture.server.requests.length, 1);
+  } finally { await fixture.close(); }
+});
+
 test("Plan 硬拒绝伪造写入，成功计划显式执行后才可写", async () => {
   let call = 0;
   const fixture = await runtimeFixture(() => ({ chunks: [{ data: ++call === 1

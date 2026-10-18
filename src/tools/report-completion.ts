@@ -13,7 +13,7 @@ import {
 import { toolFailure } from "@/tools/types";
 
 const reportSchema = objectSchema({
-  status: enumSchema(["complete", "partial", "blocked"] as const),
+  status: optionalSchema(enumSchema(["complete", "partial", "blocked"] as const)),
   checks: arraySchema(objectSchema({
     scope: optionalSchema(enumSchema(["external-call"] as const)),
     criterion: stringSchema({ minLength: 1, maxLength: 200 }),
@@ -33,7 +33,7 @@ export function createReportCompletionTool(tracker: CompletionTracker) {
   return defineTool({
     name: "report_completion",
     description:
-      "执行本地工具后，用于提交结构化完成检查。仅调用外部工具并告知返回值时无需调用本工具，运行时会记录调用结果；不要为了报告重复调用外部工具或执行 echo/printf 打印固定文本。混合任务中如需确认外部调用返回，设置 scope=external-call 且 evidence_call_ids 只引用那一次成功的外部调用，此检查不证明外部副作用。其余检查省略 scope，遵守下述本地验证规则。根据用户目标列出验收项，包括未验证的需求（not-run），不要只列已经通过的命令。运行时 verified 仅表示所列检查通过证据规则，不保证需求覆盖完整。evidence_call_ids 必须逐字复制工具结果中的 evidence_call_id，passed 的所有引用必须成功，且须包含成功的只读或命令验证，写入成功本身不算验证。证据必须直接证明 criterion：文件列表只证明存在，HTTP 响应不证明客户端交互，build、lint 等检查必须引用对应命令。已失败的质量门禁须修复并重跑成功，否则只能报告 partial/blocked；存在写入时，complete 还必须引用最后写入后的验证结果。checks 描述最终验收状态，不是操作流水账；已修复的历史失败在最终回复中说明，仍失败或未验证的需求必须保留。若复现失败本身是验收要求，用断言预期错误的验证脚本产生成功证据。收到 error.issues 后按路径逐项修正，必要时补充验证，不要仅改措辞或重复原报告。",
+      "执行本地工具后提交结构化完成检查。提交 checks 和 blockers 即可，汇总状态由运行时计算；旧 status 字段仅兼容读取，不能覆盖失败或未验证项。根据用户目标列出检查，包括 failed 和 not-run，不要只列通过的命令。verified 仅表示所列检查通过证据规则，不保证需求覆盖完整。evidence_call_ids 须逐字复制本轮工具结果的 evidence_call_id；passed 的所有引用须成功，且至少包含匹配的只读或命令验证，写入成功不能替代验证。发生写入后，完整验证须引用最后写入后的验证。失败的质量门禁须修复重跑，或保留 failed/not-run。证据必须匹配 criterion：文件列表只证明存在；HTTP 可通过 curl、脚本或 Node 测试验证，但不证明浏览器交互；build、lint 须引用对应命令。预期错误须用断言脚本产生成功证据。只执行外部工具时无需本报告；混合任务的外部返回检查设置 scope=external-call，只引用一次成功外部调用，不证明外部副作用。报告失败后按 error.issues 修正一次；仍失败则直接总结已有结果和未验证项，不重复调用工具、重做已成功的操作或打印固定文本补证据。已修复的历史失败在最终回复说明。",
     inputSchema: reportSchema,
     // 报告本身无副作用，但必须在此前工具全部收敛后串行评估。
     mutability: "workspace-write",
@@ -43,7 +43,7 @@ export function createReportCompletionTool(tracker: CompletionTracker) {
     },
     async execute(input) {
       const report: CompletionReportInput = {
-        status: input.status,
+        ...(input.status === undefined ? {} : { status: input.status }),
         checks: input.checks.map((check) => ({
           ...(check.scope === undefined ? {} : { scope: check.scope }),
           criterion: check.criterion,

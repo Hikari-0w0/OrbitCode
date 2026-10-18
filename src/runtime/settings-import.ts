@@ -79,6 +79,7 @@ async function readLegacy(options: { cwd: string; userHome: string; environment:
     providers: models.map((provider) => ({ id: provider.name, displayName: provider.name, model: provider.model,
       baseUrl: provider.baseUrl, credential: { kind: "environment", variable: provider.apiKeyEnvironmentVariable },
       context: provider.context, ...(provider.thinking ? { thinking: provider.thinking } : {}),
+      ...(provider.maxOutputTokens === undefined ? {} : { maxOutputTokens: provider.maxOutputTokens }),
       ...(provider.transport ? { transport: provider.transport } : {}), enabled: true })),
     workspaces: catalog.entries.map((workspace) => ({ ...workspace, enabled: true })),
     mcpServers,

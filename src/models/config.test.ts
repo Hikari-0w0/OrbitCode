@@ -58,6 +58,15 @@ test("加载单个合法配置并从环境解析凭据", async () => {
   });
 });
 
+test("可配置单次输出预算，省略时保留服务商默认值", async () => {
+  const configured = await load(VALID_PROVIDER.replace("    context:", "    max_tokens: 32768\n    context:"));
+  assert.equal(configured.maxOutputTokens, 32768);
+  assert.equal((await load(VALID_PROVIDER)).maxOutputTokens, undefined);
+  for (const value of ["0", "-1", "1.5", "1048577", "'32768'", "null"]) {
+    await assert.rejects(load(VALID_PROVIDER.replace("    context:", `    max_tokens: ${value}\n    context:`)), ConfigurationError);
+  }
+});
+
 test("可先列举无密钥配置，再按名称安全解析凭据", async () => {
   const source = `${VALID_PROVIDER}\n  - name: secondary\n    protocol: openai\n    model: second-model\n    base_url: http://127.0.0.1:3001/v1/\n    api_key: SECONDARY_KEY\n    context:\n      window_tokens: 64000`;
   const providers = await loadProviderConfigs({

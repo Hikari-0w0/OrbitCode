@@ -82,6 +82,7 @@ export class SettingsService {
         const clearing = action.credential?.kind === "none";
         next = { ...settings, providers: settings.providers.map((item) => item.id === action.id
           ? { ...changed, context: { ...item.context, windowTokens: changed.context.windowTokens },
+            ...(item.maxOutputTokens === undefined ? {} : { maxOutputTokens: item.maxOutputTokens }),
             ...(item.thinking ? { thinking: item.thinking } : {}), ...(item.transport ? { transport: item.transport } : {}), enabled: clearing ? false : item.enabled }
           : item), defaultProviderId: clearing && settings.defaultProviderId === action.id
           ? settings.providers.find((item) => item.id !== action.id && item.enabled)?.id : settings.defaultProviderId };

@@ -303,6 +303,53 @@ test("HTTP 检查不能用其他端口的响应冒充", () => {
   }).ok, true);
 });
 
+test("脚本和 Node 测试的 HTTP 证据不要求顶层命令出现 curl", () => {
+  for (const command of ["bash test/smoke-http.sh http://127.0.0.1:3417", "npm test"]) {
+    const tracker = new CompletionTracker();
+    tracker.record({
+      call: { id: "http-script", name: "run_command", argumentsJson: JSON.stringify({ command }) },
+      result: successfulToolResult({ stdout: "HTTP assertions passed", exitCode: 0 }),
+      iteration: 1, sequence: 0, mutability: "command",
+    });
+    for (const criterion of ["冒烟检查通过", "HTTP 冒烟检查通过，返回 200"]) {
+      assert.equal(tracker.accept({
+        checks: [{ criterion, status: "passed", evidenceCallIds: ["http-script"] }],
+        blockers: [],
+      }).ok, true);
+    }
+  }
+});
+
+test("完成状态由检查项计算，兼容旧声明且保留未验证项", () => {
+  for (const status of [undefined, "complete"] as const) {
+    const tracker = new CompletionTracker();
+    const result = tracker.accept({
+      ...(status === undefined ? {} : { status }),
+      checks: [{ criterion: "浏览器交互", status: "not-run", evidenceCallIds: [] }],
+      blockers: [],
+    });
+    assert.equal(result.ok, true);
+    assert.equal(tracker.assessment().status, "partial");
+    assert.equal(tracker.assessment().checks[0]?.status, "not-run");
+  }
+});
+
+test("报告被拒绝后保留合法检查并降级无效证据", () => {
+  const tracker = new CompletionTracker();
+  tracker.record({
+    call: { id: "check", name: "read_file", argumentsJson: "{}" },
+    result: successfulToolResult({}), iteration: 1, sequence: 0, mutability: "read-only",
+  });
+  assert.equal(tracker.accept({ checks: [
+    { criterion: "文件内容", status: "passed", evidenceCallIds: ["check"] },
+    { criterion: "浏览器交互", status: "passed", evidenceCallIds: ["invented"] },
+  ], blockers: [] }).ok, false);
+  assert.deepEqual(tracker.assessment(), { status: "unverified", checks: [
+    { criterion: "文件内容", status: "passed", evidenceCallIds: ["check"] },
+    { criterion: "浏览器交互", status: "not-run", evidenceCallIds: [] },
+  ], blockers: [] });
+});
+
 test("拒绝伪造证据、失败证据和写入前的完成声明", () => {
   const tracker = new CompletionTracker();
   tracker.record({
@@ -422,7 +469,7 @@ test("真实模型报告同时定位失败证据与仅写入证据，修正后�
   ] }).ok, true);
 });
 
-test("缺失证据与写入后验证不足一次反馈，不捏造后续检查状态", () => {
+test("缺失证据与未运行项的错误引用一次反馈，不捏造后续检查状态", () => {
   const tracker = new CompletionTracker();
   tracker.record({ call: { id: "edit", name: "edit_file", argumentsJson: '{}' },
     result: successfulToolResult({}, "applied"), iteration: 1, sequence: 0, mutability: "workspace-write" });
@@ -433,10 +480,42 @@ test("缺失证据与写入后验证不足一次反馈，不捏造后续检查�
   assert.equal(result.ok, false);
   if (result.ok) return;
   assert.deepEqual(result.issues.map((issue) => issue.path), [
-    "checks[0].evidence_call_ids[0]", "checks[1].evidence_call_ids", "status",
+    "checks[0].evidence_call_ids[0]", "checks[1].evidence_call_ids",
   ]);
-  assert.match(result.issues[2].message, /最后写入之后/);
   assert.equal(tracker.assessment().status, "unverified");
+});
+
+test("省略旧 status 仍拒绝未收敛的质量门禁和过期验证", () => {
+  const tracker = new CompletionTracker();
+  tracker.record({ call: { id: "read", name: "read_file", argumentsJson: "{}" },
+    result: successfulToolResult({}), iteration: 1, sequence: 0, mutability: "read-only" });
+  tracker.record({ call: { id: "write", name: "write_file", argumentsJson: "{}" },
+    result: successfulToolResult({}, "applied"), iteration: 2, sequence: 0, mutability: "workspace-write" });
+  const oldEvidence = tracker.accept({ checks: [
+    { criterion: "读取检查", status: "passed", evidenceCallIds: ["read"] },
+  ], blockers: [] });
+  assert.equal(oldEvidence.ok, false);
+  if (!oldEvidence.ok) assert.match(oldEvidence.message, /最后写入之后/);
+  tracker.record({ call: { id: "lint", name: "run_command", argumentsJson: '{"command":"npm run lint"}' },
+    result: toolFailure("command-failed", "lint 失败"), iteration: 3, sequence: 0, mutability: "command" });
+  const failedGate = tracker.accept({ checks: [
+    { criterion: "读取检查", status: "passed", evidenceCallIds: ["read"] },
+  ], blockers: [] });
+  assert.equal(failedGate.ok, false);
+  if (!failedGate.ok) assert.match(failedGate.message, /lint.*仍失败/);
+});
+
+test("报告通过后再次写入会使旧评估失效", () => {
+  const tracker = new CompletionTracker();
+  tracker.record({ call: { id: "read", name: "read_file", argumentsJson: "{}" },
+    result: successfulToolResult({}), iteration: 1, sequence: 0, mutability: "read-only" });
+  const report = { checks: [{ criterion: "文件检查", status: "passed" as const, evidenceCallIds: ["read"] }], blockers: [] };
+  assert.equal(tracker.accept(report).ok, true);
+  assert.equal(tracker.assessment().status, "verified");
+  tracker.record({ call: { id: "write", name: "write_file", argumentsJson: "{}" },
+    result: successfulToolResult({}, "applied"), iteration: 2, sequence: 0, mutability: "workspace-write" });
+  assert.equal(tracker.assessment().status, "unverified");
+  assert.equal(tracker.accept(report).ok, false);
 });
 
 test("外部调用范围只确认一次成功返回，不能冒充本地验证或写入后验证", () => {

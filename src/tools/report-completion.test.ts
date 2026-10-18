@@ -45,3 +45,22 @@ test("完成报告工具严格校验字段并返回运行时评估", async () =>
   ) assert.fail("完成报告应返回对象");
   assert.equal("status" in result.output ? result.output.status : undefined, "verified");
 });
+
+test("模型无需提交汇总状态，旧 complete 不能覆盖 not-run", async () => {
+  const tracker = new CompletionTracker();
+  const tool = createReportCompletionTool(tracker);
+  const workspace = await createWorkspaceBoundary(process.cwd());
+  for (const status of [undefined, "complete"] as const) {
+    const input = {
+      ...(status === undefined ? {} : { status }),
+      checks: [{ criterion: "浏览器交互", status: "not-run" as const, evidence_call_ids: [] }],
+      blockers: [],
+    };
+    assert.equal(tool.prepareUnknown(input).kind, "ready");
+    const result = await tool.execute(input, {
+      workspace, signal: new AbortController().signal, deadlineMs: Date.now() + 1_000,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(tracker.assessment().status, "partial");
+  }
+});

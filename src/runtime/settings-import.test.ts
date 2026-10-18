@@ -7,6 +7,8 @@ import test from "node:test";
 import { LocalSettingsStore } from "@/lib/local-settings-store";
 import { commitLegacySettings, previewLegacySettings } from "@/runtime/settings-import";
 import { SettingsError } from "@/runtime/settings-types";
+import { SettingsService } from "@/runtime/settings-service";
+import { loadProviderContext } from "@/runtime/config";
 
 const legacyModel = [
   "providers:",
@@ -37,6 +39,29 @@ test("旧配置预览不写入，确认后原文件保持原样并保留模型�
     assert.equal(await readFile(modelPath, "utf8"), legacyModel);
     await assert.rejects(commitLegacySettings({ previewId: preview.previewId, expectedRevision: 1,
       cwd: root, userHome: root, environment: {}, store }), (error) => error instanceof SettingsError && error.code === "conflict");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("输出预算在导入、保存、编辑和运行快照间保持一致", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-output-budget-"));
+  const store = new LocalSettingsStore(path.join(root, "data"));
+  try {
+    await writeFile(path.join(root, "orbitcode.yaml"), legacyModel.replace("    context:", "    max_tokens: 32768\n    context:"));
+    const preview = await previewLegacySettings({ cwd: root, userHome: root, environment: {} });
+    const saved = await commitLegacySettings({ previewId: preview.previewId, expectedRevision: 0,
+      cwd: root, userHome: root, environment: {}, store });
+    assert.equal(saved.providers[0].maxOutputTokens, 32768);
+    await new SettingsService(store).apply(1, { type: "provider-edit", id: "primary", displayName: "新名称" });
+    const snapshot = await loadProviderContext(root, {}, undefined, false, store, false);
+    assert.equal(snapshot.providers[0].maxOutputTokens, 32768);
+    const settings = await store.load();
+    assert.ok(settings);
+    for (const maxOutputTokens of [0, 1.5, 1_048_577, 128001]) {
+      await assert.rejects(store.save(2, { ...settings,
+        providers: settings.providers.map((provider) => ({ ...provider, maxOutputTokens })),
+      }), SettingsError);
+    }
+    assert.equal((await store.load())?.revision, 2);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
