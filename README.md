@@ -67,7 +67,7 @@ providers:
 
 `thinking` 为可选配置。为兼容既有配置，省略 `api_style` 时使用 SiliconFlow 的 `enable_thinking` 参数；连接 DeepSeek 官方 API 时必须设置 `api_style: deepseek`，此时 OrbitCode 会发送官方的 `thinking.type` 参数，且不接受仅由 SiliconFlow 支持的 `budget_tokens`。
 
-旧版 YAML 可在模型条目中添加 `max_tokens: 32768`，显式设置单次输出预算；省略时维持服务商默认值。该值不同于 `context.window_tokens`，须按服务商实际输出上限设置，OrbitCode 本地接受 1 到 1048576 且不超过配置上下文窗口的整数，不会绕过服务商限制。导入托管设置、编辑模型及建立运行快照时会保留此字段，当前设置表单尚未提供单独编辑项。遇到非成功结束原因时，错误记录区分 `length`、`content_filter`、`insufficient_system_resource` 和 `aborted`；截断的工具参数不会执行。
+旧版 YAML 可在模型条目中添加 `max_tokens: 32768`，显式设置单次输出预算；省略时维持服务商默认值。该值不同于 `context.window_tokens`，须按服务商实际输出上限设置，OrbitCode 本地接受 1 到 1048576 且不超过配置上下文窗口的整数，不会绕过服务商限制。导入托管设置、编辑模型及建立运行快照时会保留此字段，设置页可编辑最大输出预算；留空使用服务商默认值，也可选择思考模式、参数格式及适用的思考预算。遇到非成功结束原因时，错误记录区分 `length`、`content_filter`、`insufficient_system_resource` 和 `aborted`；截断的工具参数不会执行。
 
 ## Web 流式对话
 

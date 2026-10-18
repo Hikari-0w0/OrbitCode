@@ -70,6 +70,7 @@ export class ContextManager {
       readonly config: ContextPolicyConfig;
       readonly store: ContextStore;
       readonly provider: ChatProvider;
+      readonly summaryProvider?: ChatProvider;
       readonly initialHistory?: readonly PlainConversationMessage[];
       readonly initialState?: ContextManagerPersistentState;
     },
@@ -80,7 +81,7 @@ export class ContextManager {
         "上下文不能同时从纯文本历史和持久化快照恢复。",
       );
     }
-    this.generator = new ToolFreeSummaryGenerator(options.provider);
+    this.generator = new ToolFreeSummaryGenerator(options.summaryProvider ?? options.provider);
     this.committed = options.initialState === undefined
       ? (options.initialHistory ?? []).map((message) => ({
           kind: message.role,

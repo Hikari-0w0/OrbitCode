@@ -1,4 +1,5 @@
 "use client";
+import { createTextDeltaBuffer } from "./text-delta-buffer";
 import { skillDisplayEvent } from "@/core/skills/display-event";
 import { parseSkillCommand } from "@/runtime/skill-commands";
 import { resolveNewConversationBinding } from "./conversation-binding";
@@ -649,6 +650,7 @@ export function useChatWorkspace() {
         let reconcileCancelledTurn = false;
         let lastProgressRenderedAt = 0;
         let lastProgressSignature = "";
+        const textBuffer = createTextDeltaBuffer(delta => dispatch({ type: "text-delta", assistantId, ...delta }));
         try {
             const response = await fetch("/api/chat", {
                 method: "POST",
@@ -676,6 +678,9 @@ export function useChatWorkspace() {
                 throw new Error("模型服务没有返回响应流。");
             drafts.remove(snapshot.conversationId);
             for await (const event of parseWebChatEvents(readWebStream(response.body))) {
+                if (event.type === "text-delta") { textBuffer.push(event); continue; }
+                // 工具、审批和终止事件之前提交文字，保证时间线顺序与流一致。
+                textBuffer.flush();
                 if (event.type === "skill-run") {
                     if (event.event.type === "progress")
                         setSkillRunStatus(`Skill ${event.name}：${event.event.phase === "model" ? "请求模型" : "执行工具"}`);
@@ -700,14 +705,6 @@ export function useChatWorkspace() {
                 }
                 if (event.type === "mcp-status" || event.type === "runtime-permission-requested" || event.type === "runtime-permission-resolved") {
                     dispatch({ type: "initialization", assistantId, event });
-                }
-                else if (event.type === "text-delta") {
-                    dispatch({
-                        type: "text-delta",
-                        assistantId,
-                        iteration: event.iteration,
-                        text: event.text,
-                    });
                 }
                 else if (event.type === "progress") {
                     const now = Date.now();
@@ -767,6 +764,7 @@ export function useChatWorkspace() {
                 throw new Error("流式响应意外结束，请重试。");
         }
         catch (error) {
+            textBuffer.flush();
             if (!controller.signal.aborted)
                 changeDraft(input);
             const cancelled = controller.signal.aborted;
@@ -798,6 +796,7 @@ export function useChatWorkspace() {
             }
         }
         finally {
+            textBuffer.flush();
             if (manualStopRequestRef.current === controller) {
                 manualStopRequestRef.current = undefined;
             }

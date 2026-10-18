@@ -43,6 +43,10 @@ export function useSettings() {
     const [keyKind, setKeyKind] = useState<"local" | "environment">("environment");
     const [keyValue, setKeyValue] = useState("");
     const [windowTokens, setWindowTokens] = useState(128000);
+    const [maxOutputTokens, setMaxOutputTokens] = useState("");
+    const [thinkingMode, setThinkingMode] = useState<"default" | "enabled" | "disabled">("default");
+    const [thinkingApiStyle, setThinkingApiStyle] = useState<"siliconflow" | "deepseek">("siliconflow");
+    const [thinkingBudget, setThinkingBudget] = useState("");
     const [workspaceName, setWorkspaceName] = useState("");
     const [renamingWorkspaceId, setRenamingWorkspaceId] = useState<string>();
     const [workspacePath, setWorkspacePath] = useState("");
@@ -132,6 +136,10 @@ export function useSettings() {
             setKeyValue("");
             setMcpVariables("{}");
             setEditingProviderId(undefined);
+            setMaxOutputTokens("");
+            setThinkingMode("default");
+            setThinkingApiStyle("siliconflow");
+            setThinkingBudget("");
             setRenamingWorkspaceId(undefined);
             for (const controller of probeControllers.current.values())
                 controller.abort();
@@ -292,12 +300,15 @@ export function useSettings() {
     }
     function submitModel(event: FormEvent<HTMLFormElement>): void {
         event.preventDefault();
+        const advanced = { maxOutputTokens: maxOutputTokens === "" ? null : Number(maxOutputTokens),
+            thinking: thinkingMode === "default" ? null : { enabled: thinkingMode === "enabled", apiStyle: thinkingApiStyle,
+                ...(thinkingMode === "enabled" && thinkingApiStyle === "siliconflow" && thinkingBudget !== "" ? { budgetTokens: Number(thinkingBudget) } : {}) } };
         const credential = keyValue ? keyKind === "local" ? { kind: "local" as const, value: keyValue } : { kind: "environment" as const, variable: keyValue } : undefined;
         if (editingProviderId)
             void apply({ type: "provider-edit", id: editingProviderId, displayName: modelName, model: modelId,
-                baseUrl: apiUrl, windowTokens, ...(credential ? { credential } : {}) });
+                baseUrl: apiUrl, windowTokens, ...advanced, ...(credential ? { credential } : {}) });
         else if (credential)
-            void apply({ type: "provider-add", displayName: modelName, model: modelId, baseUrl: apiUrl, windowTokens, credential });
+            void apply({ type: "provider-add", displayName: modelName, model: modelId, baseUrl: apiUrl, windowTokens, credential, ...advanced });
     }
     function submitWorkspace(event: FormEvent<HTMLFormElement>): void {
         event.preventDefault();
@@ -337,6 +348,10 @@ export function useSettings() {
         setDirty(false);
         setKeyValue("");
         setModelName("");
+        setMaxOutputTokens("");
+        setThinkingMode("default");
+        setThinkingApiStyle("siliconflow");
+        setThinkingBudget("");
         setModelId("");
         setApiUrl("");
         setEditingProviderId(undefined);
@@ -353,7 +368,7 @@ export function useSettings() {
             setDefaultPermissionMode(state.settings.defaultPermissionMode ?? "default");
         }
     }
-    return { state, busy, notice, probeStatus, mcpStatus, importPreview, modelName, setModelName, modelId, setModelId, apiUrl, setApiUrl, keyKind, setKeyKind, keyValue, setKeyValue, windowTokens, setWindowTokens, editingProviderId, setEditingProviderId, workspaceName, setWorkspaceName, workspacePath, setWorkspacePath, renamingWorkspaceId, setRenamingWorkspaceId, mcpName, setMcpName, mcpType, setMcpType, mcpWorkspace, setMcpWorkspace, mcpTarget, setMcpTarget, mcpArgs, setMcpArgs, mcpVariables, setMcpVariables, maxIterations, setMaxIterations, maxRuntimeMinutes, setMaxRuntimeMinutes, defaultPermissionMode, setDefaultPermissionMode, setNotice, refresh, apply, importLegacy, recoverInvalidSettings, probeProvider, manageMcp, submitModel, submitWorkspace, submitMcp, dirty, setDirty, dialog, confirmLeave, resetForm };
+    return { maxOutputTokens, setMaxOutputTokens, thinkingMode, setThinkingMode, thinkingApiStyle, setThinkingApiStyle, thinkingBudget, setThinkingBudget, state, busy, notice, probeStatus, mcpStatus, importPreview, modelName, setModelName, modelId, setModelId, apiUrl, setApiUrl, keyKind, setKeyKind, keyValue, setKeyValue, windowTokens, setWindowTokens, editingProviderId, setEditingProviderId, workspaceName, setWorkspaceName, workspacePath, setWorkspacePath, renamingWorkspaceId, setRenamingWorkspaceId, mcpName, setMcpName, mcpType, setMcpType, mcpWorkspace, setMcpWorkspace, mcpTarget, setMcpTarget, mcpArgs, setMcpArgs, mcpVariables, setMcpVariables, maxIterations, setMaxIterations, maxRuntimeMinutes, setMaxRuntimeMinutes, defaultPermissionMode, setDefaultPermissionMode, setNotice, refresh, apply, importLegacy, recoverInvalidSettings, probeProvider, manageMcp, submitModel, submitWorkspace, submitMcp, dirty, setDirty, dialog, confirmLeave, resetForm };
 }
 function isSettings(value: unknown): value is PublicSettings {
     return typeof value === "object" && value !== null && "revision" in value && typeof value.revision === "number" && "providers" in value && Array.isArray(value.providers) && "workspaces" in value && Array.isArray(value.workspaces) && "mcpServers" in value && Array.isArray(value.mcpServers);

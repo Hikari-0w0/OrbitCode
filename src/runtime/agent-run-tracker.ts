@@ -1,3 +1,4 @@
+import type { ModelUsageSummary } from "@/models/usage-tracker";
 import type { McpInitializationRecord } from "@/core/mcp-events";
 import { randomUUID } from "node:crypto";
 import type { AgentEvent, AgentMode } from "@/core/agent-events";
@@ -5,6 +6,7 @@ import type { AgentRunLogEntry, AgentRunLogSink } from "@/lib/local-agent-run-lo
 import type { PersistenceState } from "@/runtime/types";
 
 export type RunLogOptions = {
+  readonly modelUsage?: () => ModelUsageSummary;
   readonly parentRunId?: string;
   readonly parentCallId?: string;
   readonly toolIdentities?: ReadonlyMap<string, { readonly serverName: string; readonly toolName: string }>;
@@ -220,12 +222,14 @@ export class AgentRunTracker {
       inputChars: this.options.inputChars,
       outputChars: this.#outputChars,
       usage: this.#usage,
+      ...(this.options.modelUsage ? { modelUsage: this.options.modelUsage() } : {}),
       ...(this.#modelAttempts.size === 0
         ? {}
         : { modelAttempts: [...this.#modelAttempts.values()] }),
       ...(this.initialization.length ? { initialization: this.initialization } : {}),
       tools: [...this.#tools.values()].map((tool) => ({
         name: tool.name,
+        callId: tool.callId,
         ...(this.options.toolIdentities?.has(tool.name) ? { mcp: this.options.toolIdentities.get(tool.name) } : {}),
         status: tool.status,
         ...(tool.durationMs === undefined ? {} : { durationMs: tool.durationMs }),

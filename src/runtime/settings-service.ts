@@ -1,3 +1,4 @@
+import { MAX_MODEL_OUTPUT_TOKENS, type ModelThinkingConfig } from "@/models/provider";
 import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
@@ -17,9 +18,14 @@ import {
 } from "@/core/context/types";
 import { EMPTY_SETTINGS, SettingsError, type ManagedMcpServer, type ManagedProvider, type ManagedSettings, type ManagedWorkspace, type PublicSettings, type StoredCredential } from "@/runtime/settings-types";
 
+type ProviderAdvancedSettings = {
+  readonly maxOutputTokens?: number | null;
+  readonly thinking?: ModelThinkingConfig | null;
+};
+
 export type SettingsAction =
-  | { readonly type: "provider-add"; readonly displayName: string; readonly model: string; readonly baseUrl: string; readonly windowTokens: number; readonly credential: StoredCredential }
-  | { readonly type: "provider-edit"; readonly id: string; readonly displayName?: string; readonly model?: string; readonly baseUrl?: string; readonly windowTokens?: number; readonly credential?: StoredCredential }
+  | ({ readonly type: "provider-add"; readonly displayName: string; readonly model: string; readonly baseUrl: string; readonly windowTokens: number; readonly credential: StoredCredential } & ProviderAdvancedSettings)
+  | ({ readonly type: "provider-edit"; readonly id: string; readonly displayName?: string; readonly model?: string; readonly baseUrl?: string; readonly windowTokens?: number; readonly credential?: StoredCredential } & ProviderAdvancedSettings)
   | { readonly type: "provider-enable"; readonly id: string; readonly enabled: boolean }
   | { readonly type: "provider-default"; readonly id: string }
   | { readonly type: "workspace-add"; readonly name: string; readonly rootPath: string }
@@ -65,7 +71,7 @@ export class SettingsService {
     switch (action.type) {
       case "provider-add": {
         if (action.credential.kind === "none") throw new SettingsError("invalid", "新增模型需要凭据。");
-        const provider = providerFromInput(action);
+        const provider = { ...providerFromInput(action), ...advancedSettings(action, action.windowTokens) };
         next = { ...settings, providers: [...settings.providers, provider], defaultProviderId: settings.defaultProviderId ?? provider.id };
         break;
       }
@@ -82,8 +88,8 @@ export class SettingsService {
         const clearing = action.credential?.kind === "none";
         next = { ...settings, providers: settings.providers.map((item) => item.id === action.id
           ? { ...changed, context: { ...item.context, windowTokens: changed.context.windowTokens },
-            ...(item.maxOutputTokens === undefined ? {} : { maxOutputTokens: item.maxOutputTokens }),
-            ...(item.thinking ? { thinking: item.thinking } : {}), ...(item.transport ? { transport: item.transport } : {}), enabled: clearing ? false : item.enabled }
+            ...advancedSettings({ maxOutputTokens: action.maxOutputTokens === undefined ? item.maxOutputTokens : action.maxOutputTokens,
+              thinking: action.thinking === undefined ? item.thinking : action.thinking }, changed.context.windowTokens), ...(item.transport ? { transport: item.transport } : {}), enabled: clearing ? false : item.enabled }
           : item), defaultProviderId: clearing && settings.defaultProviderId === action.id
           ? settings.providers.find((item) => item.id !== action.id && item.enabled)?.id : settings.defaultProviderId };
         break;
@@ -219,3 +225,16 @@ function validateName(value: string): void { if (!nonempty(value, 80)) throw new
 function nonempty(value: unknown, max: number): value is string { return typeof value === "string" && value.trim().length > 0 && Buffer.byteLength(value) <= max && !value.includes("\0"); }
 function missing(): SettingsError { return new SettingsError("unavailable", "所选配置不存在或已停用。"); }
 function safeEndpoint(source: string): string { try { const url = new URL(source); return `${url.protocol}//${url.host}`; } catch { return "地址无效"; } }
+
+function advancedSettings(input: ProviderAdvancedSettings, windowTokens: number): Pick<ManagedProvider, "maxOutputTokens" | "thinking"> {
+  const maxOutputTokens = input.maxOutputTokens ?? undefined;
+  const thinking = input.thinking ?? undefined;
+  if (maxOutputTokens !== undefined && (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > Math.min(MAX_MODEL_OUTPUT_TOKENS, windowTokens)))
+    throw new SettingsError("invalid", "最大输出 Tokens 必须为正整数，且不超过上下文窗口和 1048576。");
+  if (thinking !== undefined && (typeof thinking.enabled !== "boolean" ||
+    Object.keys(thinking).some(key => !["enabled", "apiStyle", "budgetTokens"].includes(key)) ||
+    (thinking.apiStyle !== undefined && thinking.apiStyle !== "siliconflow" && thinking.apiStyle !== "deepseek") ||
+    (thinking.budgetTokens !== undefined && (!thinking.enabled || thinking.apiStyle === "deepseek" || !Number.isSafeInteger(thinking.budgetTokens) || thinking.budgetTokens < 128 || thinking.budgetTokens > 32768))))
+    throw new SettingsError("invalid", "思考模式或思考预算无效；DeepSeek 不支持单独的思考预算。");
+  return { maxOutputTokens, thinking };
+}
