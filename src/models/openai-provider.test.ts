@@ -105,6 +105,35 @@ test("发送正确请求并按网络分块实时产出文本", async () => {
   }
 });
 
+test("显式输出预算透传 max_tokens，非成功结束原因保留且不发布截断工具调用", async () => {
+  for (const finishReason of ["length", "content_filter", "insufficient_system_resource", "aborted"]) {
+    const server = await startOpenAIMockServer(() => ({ chunks: [{ data:
+      toolCallDelta({ id: "truncated", name: "write_files", argumentsJson: '{"files":[' }) +
+      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: finishReason }] })}\n\n` + TRANSPORT_DONE_EVENT,
+    }] }));
+    const received: ModelStreamEvent[] = [];
+    try {
+      const provider = new OpenAICompatibleProvider({
+        model: "test-model", baseUrl: server.baseUrl, apiKey: "test-secret", maxOutputTokens: 32768,
+      });
+      await assert.rejects(async () => {
+        for await (const event of provider.stream([], { signal: new AbortController().signal,
+          toolChoice: "auto", tools: [{ type: "function", function: { name: "write_files", description: "写入", parameters: { type: "object" } } }],
+        })) received.push(event);
+      }, (error: unknown) => {
+        assert.ok(error instanceof ProviderError);
+        assert.equal(error.finishReason, finishReason);
+        assert.match(error.message, new RegExp(`finish_reason=${finishReason}`));
+        if (finishReason === "length") assert.match(error.message, /32768/);
+        return true;
+      });
+      assert.equal(received.some((event) => event.type === "tool-call"), false);
+      assert.equal(server.requests.length, 1);
+      assert.match(JSON.stringify(server.requests[0].body), /"max_tokens":32768/);
+    } finally { await server.close(); }
+  }
+});
+
 test("显式关闭兼容接口的思考模式", async () => {
   const server = await startOpenAIMockServer(() => ({ chunks: [{ data: DONE_EVENT }] }));
   try {

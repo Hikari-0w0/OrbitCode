@@ -17,6 +17,7 @@ export type ManagedProvider = {
   readonly context: ContextPolicyConfig;
   readonly thinking?: ModelThinkingConfig;
   readonly transport?: ProviderTransportPolicy;
+  readonly maxOutputTokens?: number;
   readonly enabled: boolean;
 };
 

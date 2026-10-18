@@ -18,6 +18,7 @@ import type {
   ModelThinkingConfig,
   ProviderTransportPolicy,
 } from "@/models/provider";
+import { MAX_MODEL_OUTPUT_TOKENS } from "@/models/provider";
 
 const PROVIDER_FIELDS = new Set([
   "name",
@@ -28,6 +29,7 @@ const PROVIDER_FIELDS = new Set([
   "thinking",
   "transport",
   "context",
+  "max_tokens",
 ]);
 const THINKING_FIELDS = new Set(["enabled", "budget_tokens", "api_style"]);
 const TRANSPORT_FIELDS = new Set([
@@ -65,6 +67,7 @@ export type ProviderConfig = {
   readonly thinking?: ModelThinkingConfig;
   readonly transport?: ProviderTransportPolicy;
   readonly context: ContextPolicyConfig;
+  readonly maxOutputTokens?: number;
 };
 
 export type ResolvedProviderConfig = ProviderConfig & {
@@ -225,6 +228,8 @@ function validateProvider(value: unknown, index: number): ProviderConfig {
   const thinking = validateThinking(value.thinking, `${location}.thinking`);
   const transport = validateTransport(value.transport, `${location}.transport`);
   const context = validateContext(value.context, `${location}.context`);
+  const maxOutputTokens = value.max_tokens === undefined ? undefined
+    : requireSafeInteger(value.max_tokens, `${location}.max_tokens`, Math.min(MAX_MODEL_OUTPUT_TOKENS, context.windowTokens));
 
   return {
     name,
@@ -235,6 +240,7 @@ function validateProvider(value: unknown, index: number): ProviderConfig {
     ...(thinking === undefined ? {} : { thinking }),
     ...(transport === undefined ? {} : { transport }),
     context,
+    ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
   };
 }
 

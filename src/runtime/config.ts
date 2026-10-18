@@ -63,6 +63,7 @@ export async function loadProviderContext(
         baseUrl: provider.baseUrl,
         apiKeyEnvironmentVariable: provider.credential.kind === "environment" ? provider.credential.variable : "ORBITCODE_MANAGED_CREDENTIAL",
         context: provider.context,
+        ...(provider.maxOutputTokens === undefined ? {} : { maxOutputTokens: provider.maxOutputTokens }),
         ...(provider.thinking ? { thinking: provider.thinking } : {}),
         ...(provider.transport ? { transport: provider.transport } : {}),
       };

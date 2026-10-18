@@ -4,6 +4,8 @@ providers:
     model: example-model
     base_url: https://example.invalid/v1
     api_key: MODEL_API_KEY
+    # 按服务商能力显式设置单次输出预算；省略时使用服务商默认值。
+    # max_tokens: 32768
     # 官方 DeepSeek API 需要显式使用以下参数风格；SiliconFlow 可省略 api_style。
     # thinking:
     #   enabled: false

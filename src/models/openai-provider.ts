@@ -1,5 +1,7 @@
 import {
   ProviderError,
+  MAX_MODEL_OUTPUT_TOKENS,
+  type ProviderFinishReason,
   type ChatProvider,
   type ConversationMessage,
   type ModelStreamEvent,
@@ -25,6 +27,7 @@ type OpenAIProviderOptions = {
   readonly model: string;
   readonly baseUrl: string;
   readonly apiKey: string;
+  readonly maxOutputTokens?: number;
   readonly thinking?: ModelThinkingConfig;
   readonly transport?: ProviderTransportPolicy;
   readonly fetchImplementation?: typeof fetch;
@@ -63,6 +66,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
   private readonly model: string;
   private readonly endpoint: URL;
   private readonly apiKey: string;
+  private readonly maxOutputTokens?: number;
   private readonly thinking?: ModelThinkingConfig;
   private readonly transport: ProviderTransportPolicy;
   private readonly fetchImplementation: typeof fetch;
@@ -71,6 +75,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     model,
     baseUrl,
     apiKey,
+    maxOutputTokens,
     thinking,
     transport = DEFAULT_PROVIDER_TRANSPORT_POLICY,
     fetchImplementation = fetch,
@@ -78,6 +83,10 @@ export class OpenAICompatibleProvider implements ChatProvider {
     this.model = model;
     this.endpoint = new URL(`${baseUrl.replace(/\/+$/, "")}/chat/completions`);
     this.apiKey = apiKey;
+    if (maxOutputTokens !== undefined && (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > MAX_MODEL_OUTPUT_TOKENS)) {
+      throw new ProviderError("protocol", `max_tokens 必须是 1 到 ${MAX_MODEL_OUTPUT_TOKENS} 之间的整数。`);
+    }
+    this.maxOutputTokens = maxOutputTokens;
     this.thinking = thinking;
     this.transport = transport;
     this.fetchImplementation = fetchImplementation;
@@ -157,6 +166,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
           model: this.model,
           messages: messages.map(toOpenAIMessage),
           stream: true,
+          ...(this.maxOutputTokens === undefined ? {} : { max_tokens: this.maxOutputTokens }),
           stream_options: { include_usage: true },
           tool_choice: options.toolChoice,
           ...thinkingRequestFields(this.thinking),
@@ -298,7 +308,11 @@ export class OpenAICompatibleProvider implements ChatProvider {
           continue;
         }
         if (event.finishReason !== "tool_calls") {
-          throw new ProviderError("protocol", "模型响应以非成功原因结束。");
+          const finishReason = safeFinishReason(event.finishReason);
+          const detail = finishReason === "length"
+            ? `模型输出达到长度限制（finish_reason=length；max_tokens=${this.maxOutputTokens ?? "未设置，使用服务商默认值"}）。请提高该模型的输出预算或分批生成；本次不完整响应不会作为工具调用执行。`
+            : `模型响应以非成功原因结束（finish_reason=${finishReason}）。`;
+          throw new ProviderError("protocol", detail, { finishReason });
         }
         const completedCalls = completeToolCalls(toolCalls);
         for (const call of completedCalls) {
@@ -452,6 +466,19 @@ function parseOpenAIEvent(data: string): ParsedEvent {
     finishReason: typeof finishReason === "string" ? finishReason : undefined,
     usage,
   };
+}
+
+function safeFinishReason(value: string): ProviderFinishReason {
+  // 仅保留协议已知值，未知上游文本不能进入日志或页面。
+  switch (value) {
+    case "length":
+    case "content_filter":
+    case "insufficient_system_resource":
+    case "aborted":
+      return value;
+    default:
+      return "unsupported";
+  }
 }
 
 function parseToolCallDelta(

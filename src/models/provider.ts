@@ -1,5 +1,9 @@
 import type { ModelToolDefinition } from "@/tools/types";
 
+export const MAX_MODEL_OUTPUT_TOKENS = 1_048_576;
+
+export type ProviderFinishReason = "length" | "content_filter" | "insufficient_system_resource" | "aborted" | "unsupported";
+
 export type ModelThinkingConfig = {
   readonly enabled: boolean;
   readonly budgetTokens?: number;
@@ -100,6 +104,7 @@ export type ProviderErrorOptions = {
   readonly traceId?: string;
   readonly timeoutPhase?: ProviderTimeoutPhase;
   readonly retryable?: boolean;
+  readonly finishReason?: ProviderFinishReason;
   readonly cause?: unknown;
 };
 
@@ -109,6 +114,7 @@ export class ProviderError extends Error {
   readonly traceId?: string;
   readonly timeoutPhase?: ProviderTimeoutPhase;
   readonly retryable: boolean;
+  readonly finishReason?: ProviderFinishReason;
 
   constructor(
     kind: ProviderFailureKind,
@@ -121,6 +127,7 @@ export class ProviderError extends Error {
     this.status = options.status;
     this.traceId = options.traceId;
     this.timeoutPhase = options.timeoutPhase;
+    this.finishReason = options.finishReason;
     this.retryable =
       options.retryable ??
       (kind === "network" || kind === "stream" || kind === "timeout");

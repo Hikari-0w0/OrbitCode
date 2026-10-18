@@ -116,7 +116,7 @@ export async function runAgentEvals(options: {
       ...(execution.result && runLog ? {} : { evidenceGap: !execution.result ? execution.reason : "运行日志缺失。" }) });
   }
   const publicProvider = { model: provider.model, baseUrl: provider.baseUrl, context: provider.context,
-    thinking: provider.thinking, transport: provider.transport };
+    thinking: provider.thinking, transport: provider.transport, maxOutputTokens: provider.maxOutputTokens };
   const report: EvalReport = { schemaVersion: 1, fixtureVersion: FIXTURE_VERSION, createdAt: new Date().toISOString(),
     codeFingerprint, codeChangedDuringRun: codeFingerprint !== await sourceFingerprint(path.join(options.projectRoot, "src")),
     providerFingerprint: createHash("sha256").update(JSON.stringify(publicProvider)).digest("hex"),

@@ -6,6 +6,7 @@ import path from "node:path";
 
 import { EMPTY_SETTINGS, SettingsError, type ManagedSettings } from "@/runtime/settings-types";
 import { acquireSettingsLock } from "@/lib/settings-lock";
+import { MAX_MODEL_OUTPUT_TOKENS } from "@/models/provider";
 
 const MAX_BYTES = 256 * 1024;
 
@@ -123,7 +124,8 @@ function validateSettings(value: unknown): ManagedSettings {
     if (!record(provider) || !identifier(provider.id) || !shortText(provider.displayName, 80) || !shortText(provider.model, 256) || !httpUrl(provider.baseUrl) || typeof provider.enabled !== "boolean" || !record(provider.context)) throw invalid();
     const providerUrl = new URL(provider.baseUrl);
     if (providerUrl.username || providerUrl.password || providerUrl.search || providerUrl.hash) throw invalid();
-    if (Object.keys(provider).some((key) => !["id", "displayName", "model", "baseUrl", "credential", "context", "thinking", "transport", "enabled"].includes(key))) throw invalid();
+    if (Object.keys(provider).some((key) => !["id", "displayName", "model", "baseUrl", "credential", "context", "thinking", "transport", "maxOutputTokens", "enabled"].includes(key))) throw invalid();
+    if (provider.maxOutputTokens !== undefined && (!Number.isSafeInteger(provider.maxOutputTokens) || Number(provider.maxOutputTokens) < 1 || Number(provider.maxOutputTokens) > Math.min(MAX_MODEL_OUTPUT_TOKENS, Number(provider.context.windowTokens)))) throw invalid();
     if (provider.thinking !== undefined && (!record(provider.thinking) || typeof provider.thinking.enabled !== "boolean" ||
       Object.keys(provider.thinking).some((key) => !["enabled", "budgetTokens", "apiStyle"].includes(key)) ||
       (provider.thinking.budgetTokens !== undefined && (!Number.isSafeInteger(provider.thinking.budgetTokens) || Number(provider.thinking.budgetTokens) < 128 || Number(provider.thinking.budgetTokens) > 32768)) ||
