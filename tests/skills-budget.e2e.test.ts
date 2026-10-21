@@ -30,7 +30,7 @@ test("实际模型窗口不足时拒绝激活，旧状态保留且没有模型�
         await writeSkill(fixture, "large", { tools: [], body: "{{arguments}}".repeat(8) });
         const config = path.join(fixture.root, "orbitcode.yaml");
         await writeFile(config, (await readFile(config, "utf8")).replace("window_tokens: 128000", "window_tokens: 32000"));
-        await fixture.controller.handleLine(`/skill run large ${"参".repeat(4000)}`);
+        await fixture.controller.handleLine(`/skill run large ${"参".repeat(4500)}`);
         assert.equal(fixture.server.requests.length, 0);
         assert.equal((await fixture.checkpoint()).skills?.active.length, 0);
         assert.match(fixture.output(), /capacity: 激活指令超过模型上下文预算/);

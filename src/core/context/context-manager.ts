@@ -93,6 +93,10 @@ export class ContextManager {
     }
   }
 
+  delegationSnapshot(): readonly ManagedContextMessage[] { return cloneManagedMessages(this.activeTurn?.messages ?? this.committed); }
+
+  appendChildResults(messages: readonly Extract<ManagedContextMessage, {kind: "child-result"}>[]): void { this.requireTurn().messages.push(...cloneManagedMessages(messages)); }
+
   beginTurn(userContent: string): void {
     if (this.activeTurn) {
       throw new ContextManagementError("concurrent", "当前上下文会话已有进行中的 Agent 轮次。");
@@ -437,6 +441,7 @@ export class ContextManager {
 function cloneEnvelope(envelope: PromptEnvelope): PromptEnvelope {
   return {
     systemMessages: envelope.systemMessages.map((message) => ({ ...message })),
+    ...(envelope.suffixMessages ? { suffixMessages: envelope.suffixMessages.map(message => ({ ...message })) } : {}),
     tools: envelope.tools.map((tool) => ({
       ...tool,
       function: {

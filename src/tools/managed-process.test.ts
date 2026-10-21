@@ -245,3 +245,28 @@ async function availablePort(host = "127.0.0.1"): Promise<number> {
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+test('受管进程持有写入许可至退出，状态与停止不等待许可',async()=>{
+ const {WorkspaceExecutionCoordinator}=await import('@/runtime/workspace-execution-coordinator');
+ const workspace=await createWorkspaceBoundary(process.cwd());
+ const coordinator=new WorkspaceExecutionCoordinator();const signal=new AbortController().signal;
+ const release=await coordinator.acquire(workspace.root,signal);
+ const controller=new ManagedProcessController(new TestProcessSandbox(),workspace);
+ let entered=false;
+ try{
+  const task=await controller.start({command:'sleep 5',signal,takeWriteLease:()=>release});
+  const next=coordinator.acquire(workspace.root,signal).then(unlock=>{entered=true;unlock();});
+  await delay(10);assert.equal(entered,false);assert.equal(controller.status(task.processId).status,'running');
+  await controller.stop(task.processId);await next;assert.equal(entered,true);
+ }finally{await controller.close();release();}
+});
+test('停止失败保留错误与写许可，不把失败当作已退出',async()=>{
+ const {WorkspaceExecutionCoordinator}=await import('@/runtime/workspace-execution-coordinator');
+ const workspace=await createWorkspaceBoundary(process.cwd()),coordinator=new WorkspaceExecutionCoordinator();
+ let finish!:(value:{exitCode:number|null;terminationSignal:NodeJS.Signals|null})=>void;
+ const completion=new Promise<{exitCode:number|null;terminationSignal:NodeJS.Signals|null}>(resolve=>{finish=resolve;});
+ const sandbox:CommandSandbox={probe:async()=>({available:true}),run:async()=>{throw new Error('不用命令执行');},start:async()=>({pid:process.pid,stdout:null,stderr:null,completion,stop:async()=>{throw new Error('停止失败');}})};
+ const controller=new ManagedProcessController(sandbox,workspace);const signal=new AbortController().signal,release=await coordinator.acquire(workspace.root,signal);
+ let entered=false;
+ try{const task=await controller.start({command:'受控替身',signal,takeWriteLease:()=>release});const next=coordinator.acquire(workspace.root,signal).then(unlock=>{entered=true;unlock();});await assert.rejects(controller.stop(task.processId),/停止失败/);assert.equal(controller.status(task.processId).status,'running');assert.equal(entered,false);finish({exitCode:1,terminationSignal:null});await next;assert.equal(controller.status(task.processId).status,'exited');}finally{finish({exitCode:1,terminationSignal:null});await controller.close();release();}
+});

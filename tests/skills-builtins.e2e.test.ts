@@ -19,7 +19,7 @@ test('内置 commit 在隔离 Git 仓库仅提交明确授权文件，无推送'
         await exec('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=SkillFixture', '-c', 'user.email=skill@example.invalid', 'commit', '--no-gpg-sign', '-qm', 'baseline'], { cwd: fixture.root });
         await writeFile(path.join(fixture.root, 'allowed.txt'), 'new');
         await writeFile(path.join(fixture.root, 'other.txt'), 'unrelated');
-        await fixture.controller.handleLine('/permissions permissive');
+
         await fixture.controller.handleLine('/skill run commit allowed.txt');
         const changed = await exec('git', ['show', '--format=', '--name-only', 'HEAD'], { cwd: fixture.root });
         assert.equal(changed.stdout.trim(), 'allowed.txt');
@@ -38,7 +38,7 @@ test('内置 test 保留 npm 检查失败的退出码及 stdout/stderr', async (
     try {
         await fixture.runtime.memory.setEnabled(false);
         await writeFile(path.join(fixture.root, 'package.json'), JSON.stringify({ scripts: { lint: 'node -e "console.log(123)"', typecheck: 'node -e "console.error(456);process.exit(7)"', build: 'node -e "console.log(789)"' } }));
-        await fixture.controller.handleLine('/permissions permissive');
+
         await fixture.controller.handleLine('/skill run test npm检查');
         const saved = await fixture.checkpoint();
         const tools = saved.displayMessages.at(-1)?.toolExecutions ?? [];

@@ -60,7 +60,6 @@ export type PermissionReason =
 
 export type PermissionEvaluation =
   | { readonly kind: "allow"; readonly reason: PermissionReason }
-  | { readonly kind: "ask"; readonly reason: PermissionReason }
   | {
       readonly kind: "deny";
       readonly reason: PermissionReason;

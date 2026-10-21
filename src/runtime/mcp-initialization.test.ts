@@ -23,7 +23,7 @@ test("多个 Server 故障隔离，工作区工具数／定义容量有界且目
     });
     const snapshot: McpConfigSnapshot = { diagnostics: [], servers: ["bad", "good1", "good2", "good3"].map(name => ({ name, workspaceRoot: process.cwd(), configurationId:name, secrets:[],config:{type:"stdio",command:"unused",args:[],env:{}} })) };
     const workspace = await createWorkspaceBoundary(process.cwd());
-    const gateway = new PermissionGateway({agentMode:"do",permissionMode:"default",workspace,broker:{hasSessionGrant:()=>false,request(){throw new Error("不应询问");}},loadRules:async()=>[parsePermissionRule({expression:"mcp_connect(*)",decision:"allow",source:"local",toolTargets:new Map()})]});
+    const gateway = new PermissionGateway({agentMode:"do",permissionMode:"default",workspace,loadRules:async()=>[parsePermissionRule({expression:"mcp_connect(*)",decision:"allow",source:"local",toolTargets:new Map()})]});
     const leases: McpConnectionLease[]=[];
     try {
       const generator=initializeMcpWorkspace({workspaceRoot:process.cwd(),mode:"do",signal:new AbortController().signal,deadlineMs:Date.now()+2000,load:async()=>snapshot,manager,gateway,leases});

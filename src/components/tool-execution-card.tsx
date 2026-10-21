@@ -1,11 +1,9 @@
 "use client";
 import { memo, useMemo } from "react";
 import type { VisibleToolExecution } from "./message-list";
-import type { PermissionUserDecision } from "@/core/permissions/approval";
 import { PermissionRequestCard } from "./permission-request-card";
-export const ToolExecutionCard = memo(function ToolExecutionCard({ execution, onPermissionDecision, }: {
+export const ToolExecutionCard = memo(function ToolExecutionCard({ execution, }: {
     readonly execution: VisibleToolExecution;
-    readonly onPermissionDecision: (requestId: string, decision: PermissionUserDecision) => void;
 }) {
     const result = execution.result;
     const detail = useMemo(() => result?.ok
@@ -28,7 +26,7 @@ export const ToolExecutionCard = memo(function ToolExecutionCard({ execution, on
         <summary>{summary}</summary>
         <pre>{detail}</pre>
       </details>
-      {execution.permission && (<PermissionRequestCard request={execution.permission} onDecision={onPermissionDecision}/>)}
+      {execution.permission && (<PermissionRequestCard request={execution.permission}/>)}
     </section>);
 });
 function toolStateLabel(state: VisibleToolExecution["state"]): string {

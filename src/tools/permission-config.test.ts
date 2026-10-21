@@ -36,8 +36,8 @@ test("仓库权限示例可由真实配置解析器读取", async () => {
     snapshot.rules.map(({ expression, decision }) => ({ expression, decision })),
     [
       { expression: "read_file(README.md)", decision: "allow" },
-      { expression: "write_file(src/**)", decision: "ask" },
-      { expression: "run_command(git *)", decision: "ask" },
+      { expression: "write_file(src/**)", decision: "allow" },
+      { expression: "run_command(git *)", decision: "allow" },
       { expression: "run_command(git push *)", decision: "deny" },
     ],
   );

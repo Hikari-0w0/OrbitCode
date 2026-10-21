@@ -47,7 +47,7 @@ test("标准输入未关闭时外层时限仍会终止单次运行", async () =>
   assert.equal(input.destroyed, true);
 });
 
-test("CLI JSONL 只输出一个终态，未授权写入阻塞且策略可放行", async () => {
+test("CLI JSONL 只输出一个终态，默认直接写入且兼容显式allow策略", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "orbitcode-once-permission-"));
   let requests = 0;
   const server = await startOpenAIMockServer(() => ({ chunks: [{ data: ++requests % 2 === 1
@@ -71,12 +71,11 @@ test("CLI JSONL 只输出一个终态，未授权写入阻塞且策略可放行"
       const events = output.trim().split("\n").map((line) => JSON.parse(line) as { type: string; sequence: number; result?: { outcome: string; policyId: string | null; approvalBlocked: boolean } });
       assert.deepEqual(events.map((event) => event.sequence), events.map((_event, index) => index + 1));
       assert.equal(events.filter((event) => event.type === "finished").length, 1);
-      assert.equal(events.at(-1)?.result?.outcome, allowed ? "completed" : "blocked");
-      assert.equal(events.at(-1)?.result?.approvalBlocked, !allowed);
+      assert.equal(events.at(-1)?.result?.outcome, "completed");
+      assert.equal(events.at(-1)?.result?.approvalBlocked, false);
       assert.equal(Boolean(events.at(-1)?.result?.policyId), allowed);
-      assert.equal(exit, allowed ? 0 : 3);
-      if (allowed) assert.equal(await readFile(path.join(root, "result.txt"), "utf8"), "written");
-      else await assert.rejects(readFile(path.join(root, "result.txt")));
+      assert.equal(exit, 0);
+      assert.equal(await readFile(path.join(root, "result.txt"), "utf8"), "written");
     }
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });

@@ -10,14 +10,14 @@ import { ChatComposer } from "./chat-composer";
 import { MessageList } from "./message-list";
 import { ProviderSelector } from "./provider-selector";
 import { WorkspaceSelector } from "./workspace-selector";
-import { PermissionModeControl } from "./permission-mode-control";
 import { ContextCompressionControl } from "./context-compression-control";
+import { AgentTaskPanel, AgentTaskIndicator } from "./agent-task-panel";
 import { SkillPanel } from "./skill-panel";
 import { ConversationBackgroundPanel } from "./conversation-background-panel";
 import { ConversationCleanupPanel } from "./conversation-cleanup-panel";
 import { ThemeControl } from "./theme-control";
 import { Popover } from "./ui/popover";
-const managementNames: Record<ManagementView, string> = { skills: "Skills", background: "背景与记忆", cleanup: "历史清理", environment: "工作环境与权限" };
+const managementNames: Record<ManagementView, string> = { agents: "子 Agent 与任务", skills: "Skills", background: "背景与记忆", cleanup: "历史清理", environment: "工作环境与权限" };
 export function ChatWorkspace() {
     const chat = useChatWorkspace();
     const { session } = chat;
@@ -32,7 +32,7 @@ export function ChatWorkspace() {
         setPanel(undefined); }
     const navigation = <><div className="brandBlock"><span className="brandSymbol" aria-hidden="true">◎</span><strong>OrbitCode</strong><span className="localBadge">LOCAL</span></div>
     <ConversationList conversations={chat.conversations} selectedId={session.conversationId} disabled={chat.isStreaming || chat.conversationState !== "ready"} actionsDisabled={chat.catalogState !== "ready"} onSelect={id => void chat.loadConversation(id)} onCreate={() => void chat.createConversation(session.selectedWorkspaceId, session.selectedProvider)} onRename={() => void chat.renameConversation()} onDelete={() => void chat.deleteConversation()}/>
-    <nav className="sidebarTools" aria-label="工作台管理"><span className="sectionLabel">工作台</span>{(["skills", "background", "cleanup"] as const).map(view => <button key={view} type="button" onClick={() => setPanel(view)}><span aria-hidden="true">{view === "skills" ? "◇" : view === "background" ? "▤" : "◷"}</span>{managementNames[view]}</button>)}<details className="settingsMenu"><summary>设置</summary>{([['models', '模型'], ['workspaces', '工作区'], ['mcp', 'MCP'], ['runtime', '运行偏好'], ['recovery', '配置恢复'], ['appearance', '外观']] as const).map(([id, name]) => <button key={id} type="button" onClick={() => void chat.openSettings(id)}>{name}</button>)}</details></nav>
+    <nav className="sidebarTools" aria-label="工作台管理"><span className="sectionLabel">工作台</span>{(["agents", "skills", "background", "cleanup"] as const).map(view => <button key={view} type="button" onClick={() => setPanel(view)}><span aria-hidden="true">{view === "skills" ? "◇" : view === "background" ? "▤" : "◷"}</span>{managementNames[view]}</button>)}<details className="settingsMenu"><summary>设置</summary>{([['models', '模型'], ['workspaces', '工作区'], ['mcp', 'MCP'], ['runtime', '运行偏好'], ['recovery', '配置恢复'], ['appearance', '外观']] as const).map(([id, name]) => <button key={id} type="button" onClick={() => void chat.openSettings(id)}>{name}</button>)}</details></nav>
     <div className="sidebarBottom"><ThemeControl /><p><span className="statusDot"/> 本地工作区 · 安全边界由服务端执行</p></div></>;
     return <WorkspaceShell navigation={navigation}><section className="chatPanel" aria-label="OrbitCode 对话工作区">
     <header className="chatHeader">
@@ -43,16 +43,16 @@ export function ChatWorkspace() {
             <span>{chat.workspaces.find(item => item.id === session.selectedWorkspaceId)?.name ?? "选择工作区"} / {chat.currentProvider?.displayName ?? chat.currentProvider?.name ?? "选择模型"}</span>
             <span aria-hidden="true">⌄</span>
           </button>
-          <span className="permissionBadge" data-mode={chat.permissionSession.mode} aria-label="当前权限模式">{chat.permissionSession.mode === "strict" ? "严格审批" : chat.permissionSession.mode === "permissive" ? "放行模式" : "默认审批"}</span>
+          <span className="permissionBadge" aria-label="执行策略">自主执行</span>
         </div>
       </div>
-      <div className="headerActions">
+      <div className="headerActions"><AgentTaskIndicator key={session.conversationId} conversationId={session.conversationId} onOpen={()=>setPanel("agents")}/>
         <span className="connectionState" role="status"><i />{chat.isStreaming ? session.requestState === "stopping" ? "正在停止" : "Agent 运行中" : chat.catalogState === "ready" ? "准备就绪" : "等待配置"}</span>
         <Popover className="conversationMenu" label="•••" accessibleLabel="会话操作"><div><button type="button" onClick={() => void chat.renameConversation()} disabled={chat.controlsDisabled}>重命名</button><button className="exportButton" type="button" aria-label="导出完整对话" disabled={chat.conversationExporting || chat.isStreaming || !session.conversationId} onClick={() => void chat.exportConversation()}>{chat.conversationExporting ? "导出中…" : "导出对话"}</button><button type="button" onClick={() => void chat.clearConversation()} disabled={chat.isStreaming || !session.messages.length}>清空</button><button type="button" className="dangerText" onClick={() => void chat.deleteConversation()} disabled={chat.controlsDisabled}>删除会话</button></div></Popover>
       </div>
     </header>
-    <div className="noticeSlot"><EnvironmentStatus availability={availability} detail={chat.notice} onSettings={() => void chat.openSettings()} onReload={chat.reload} onRetry={() => void chat.retryUnsavedTurn()}/>{chat.isAwaitingPermission && <button type="button" className="approvalBanner" onClick={() => (() => { const card = document.querySelector<HTMLElement>('.permissionCard[data-pending]'); card?.scrollIntoView({ block: "center" }); card?.focus({ preventScroll: true }); })()}>需要你的授权 · 查看待处理请求 ↓</button>}{chat.skillRunStatus && <p className="skillRunStatus" role="status">{chat.skillRunStatus}</p>}</div>
-    <MessageList messages={session.messages} currentRunStartedAtMs={chat.isStreaming ? chat.runStartedAt : undefined} onSuggestion={chat.changeDraft} executablePlanMessageId={session.executablePlanMessageId} planActionDisabled={chat.controlsDisabled} onExecutePlan={chat.executePlan} onPermissionDecision={(id, decision) => void chat.submitPermissionDecision(id, decision)}/>
+    <div className="noticeSlot"><EnvironmentStatus availability={availability} detail={chat.notice} onSettings={() => void chat.openSettings()} onReload={chat.reload} onRetry={() => void chat.retryUnsavedTurn()}/>{chat.skillRunStatus && <p className="skillRunStatus" role="status">{chat.skillRunStatus}</p>}</div>
+    <MessageList messages={session.messages} currentRunStartedAtMs={chat.isStreaming ? chat.runStartedAt : undefined} onSuggestion={chat.changeDraft} executablePlanMessageId={session.executablePlanMessageId} planActionDisabled={chat.controlsDisabled} onExecutePlan={chat.executePlan}/>
     <div className="inputDock">
       <ChatComposer
         value={session.draft}
@@ -62,18 +62,23 @@ export function ChatWorkspace() {
         isStreaming={chat.isStreaming}
         isStopping={session.requestState === "stopping"}
         onModeChange={chat.selectMode}
+        delegationKind={chat.delegationKind}
+        onDelegationKindChange={chat.setDelegationKind}
+        parentExecutionMode={chat.parentExecutionMode}
+        onParentExecutionChange={chat.setParentExecutionMode}
         onChange={chat.changeDraft}
         onSubmit={chat.submitMessage}
         onStop={chat.stopGeneration}
         contextControl={<Popover className="composerPopover contextMenu" label={<>上下文{chat.compressionState.status === "compressing" ? " · 压缩中" : chat.compressionState.status === "failed" || chat.compressionState.status === "circuit-open" ? " · 需处理" : ""}</>}>
           <div className="composerPopoverContent">
-            <ContextCompressionControl state={chat.compressionState} disabled={session.conversationAvailability !== "ready" || chat.isStreaming || chat.isAwaitingPermission} onCompress={() => void chat.compressContext()}/>
+            <ContextCompressionControl state={chat.compressionState} disabled={session.conversationAvailability !== "ready" || chat.isStreaming} onCompress={() => void chat.compressContext()}/>
           </div>
         </Popover>}
       />
     </div>
   </section><ManagementPanel title={panel ? managementNames[panel] : "管理"} open={Boolean(panel)} onClose={closePanel}>{discardPanel && <div><p>这里有未保存的编辑。放弃后将关闭面板。</p><div className="dialogActions"><button type="button" onClick={() => setDiscardPanel(false)}>继续编辑</button><button type="button" className="dangerText" onClick={() => { setDiscardPanel(false); setPanelDirty(false); setPanel(undefined); }}>放弃编辑</button></div></div>}<div hidden={discardPanel}>
-    {panel === "environment" && <><WorkspaceSelector workspaces={chat.workspaces} selectedWorkspaceId={session.selectedWorkspaceId} disabled={chat.bindingControlsDisabled} onChange={chat.selectWorkspace}/><ProviderSelector providers={chat.providers} selected={session.selectedProvider} disabled={chat.bindingControlsDisabled} onChange={chat.selectProvider}/><PermissionModeControl mode={chat.permissionSession.mode} disabled={chat.permissionSession.status !== "ready"} updating={chat.permissionModeUpdating} onChange={mode => void chat.selectPermissionMode(mode)}/><p className="fieldHint">Plan/Do 决定工具范围；权限模式决定工具是否需要审批。</p></>}
+    {panel === "environment" && <><WorkspaceSelector workspaces={chat.workspaces} selectedWorkspaceId={session.selectedWorkspaceId} disabled={chat.bindingControlsDisabled} onChange={chat.selectWorkspace}/><ProviderSelector providers={chat.providers} selected={session.selectedProvider} disabled={chat.bindingControlsDisabled} onChange={chat.selectProvider}/><p className="fieldHint">无需人工审批；Plan/Do 决定工具范围，工作区边界与拒绝规则继续生效。</p></>}
+    {panel === "agents" && <AgentTaskPanel key={session.conversationId} conversationId={session.conversationId}/>}
     {panel === "skills" && <SkillPanel conversationId={session.conversationId} revision={session.revision} disabled={chat.isStreaming} onRun={(command, revision) => { setPanel(undefined); void chat.submitInput(command, session.mode, undefined, revision); }} onChanged={() => chat.loadConversation(session.conversationId, undefined, false)}/>}
     {panel === "background" && <ConversationBackgroundPanel key={session.conversationId} conversationId={session.conversationId} disabled={chat.isStreaming} onDirtyChange={setPanelDirty}/>}
     {panel === "cleanup" && <ConversationCleanupPanel onChanged={chat.onCleanup}/>}

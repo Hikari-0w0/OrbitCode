@@ -10,7 +10,7 @@ import {
   summarizePermissionSubject,
 } from "@/tools/permission-target";
 import type { PreparedToolCall } from "@/tools/registry";
-import { createWorkspaceBoundary } from "@/tools/workspace";
+import { WorkspaceError, createWorkspaceBoundary } from "@/tools/workspace";
 
 test("文件目标经真实路径解析后形成规范 Workspace 相对目标", async () => {
   const fixture = await createFixture();
@@ -136,3 +136,11 @@ async function createFixture() {
     cleanup: () => rm(root, { recursive: true, force: true }),
   };
 }
+
+for (const [reason, kind] of [["not-directory", "invalid-arguments"], ["not-file", "invalid-arguments"], ["not-found", "not-found"], ["invalid-path", "workspace-boundary"], ["protected-path", "protected-path"]] as const) test(`目标解析区分 ${reason}，诊断不保存原始错误正文`, () => {
+  const result = permissionTargetFailure(new WorkspaceError(reason, "secret /outside/private/path"));
+  assert.equal(result.ok, false);
+  assert.equal(result.ok ? undefined : result.error.kind, kind);
+  assert.deepEqual(result.output, { targetFailureReason: reason });
+  assert.doesNotMatch(JSON.stringify(result), /secret|outside/);
+});

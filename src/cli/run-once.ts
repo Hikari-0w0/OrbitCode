@@ -106,30 +106,23 @@ export async function runOnce(options: {
     let finished: Extract<RuntimeTurnEvent, { type: "finished" }> | undefined;
     const warnings: string[] = [];
     const blockingWarnings: string[] = [];
-    let approvalBlocked = false;
+
     for await (const item of runtime.streamTurn({
       conversationId, expectedRevision: checkpoint.summary.revision,
-      permissionSessionId: permissionId, input: prompt, mode: checkpoint.mode,
-      modeTurn: checkpoint.modeTurn + 1, source: "cli", signal: controller.signal,
+      permissionSessionId: permissionId, input: prompt, mode: checkpoint.mode,parentExecution:args.parentExecution,
+      modeTurn: checkpoint.modeTurn + 1, source: "cli", interactive:false, signal: controller.signal,
     })) {
       if (item.type === "warning") { warnings.push(item.detail); if (item.kind !== "memory") blockingWarnings.push(item.detail); }
       if (item.type === "agent") writeEvent({ type: "agent", eventType: item.event.type, ...(item.event.type === "skill-run" ? { skillRun: item.event } : {}) });
       if (item.type === "initialization") writeEvent({ type: "initialization", eventType: item.event.type });
-      const approval = item.type === "agent" && item.event.type === "skill-run" && item.event.event.type === "permission-requested" ? item.event.event.prompt
-        : ((item.type === "agent" && item.event.type === "permission-requested") || (item.type === "initialization" && item.event.type === "runtime-permission-requested")) ? item.event.prompt : undefined;
-      if (approval) {
-        approvalBlocked = true;
-        permissions.resolveDecision(permissionId, approval.requestId, "deny");
-        controller.abort();
-      }
       if (item.type === "finished") finished = item;
     }
     const runs = await log.findAllForConversation(conversationId);
     const runLog = runs.findLast((item) => item.revisionBefore === checkpoint.summary.revision);
     runId = runLog?.runId ?? null;
-    const outcome = approvalBlocked ? "blocked" : timeout ? "timed-out" : controller.signal.aborted ? "cancelled"
+    const outcome = timeout ? "timed-out" : controller.signal.aborted ? "cancelled"
       : finished?.stopped.reason === "final-response" && finished.persistence.status === "saved" && blockingWarnings.length === 0 && runId ? "completed" : "failed";
-    exitCode = outcome === "completed" ? 0 : outcome === "blocked" ? 3 : outcome === "timed-out" ? 124 : outcome === "cancelled" ? 130 : 1;
+    exitCode = outcome === "completed" ? 0 : outcome === "timed-out" ? 124 : outcome === "cancelled" ? 130 : 1;
     final = {
       outcome, stopReason: finished?.stopped.reason ?? null,
       finalResponse: finished?.stopped.finalMessage?.content ?? "",
@@ -137,7 +130,7 @@ export async function runOnce(options: {
       persistence: finished?.persistence ?? null,
       durationMs: finished?.stopped.durationMs ?? null,
       warnings,
-      approvalBlocked,
+      approvalBlocked: false,
       policyId,
       configSource: context.managedSettings ? "managed" : "legacy",
       usage: runLog?.usage ?? null,
@@ -154,7 +147,7 @@ export async function runOnce(options: {
     process.off("SIGINT", onInterrupt);
     process.off("SIGTERM", onInterrupt);
     permissions.closeSession(permissionId);
-    try { await runtime.close(); } catch {
+    try { await runtime.close(); if(conversationId){const scope=await runtime.taskScope(conversationId);const tasks=runtime.tasks.list(scope);if(tasks.length)final={...final,childTasks:tasks};} } catch {
       final = { ...final, ...(final.outcome === "completed" ? { outcome: "failed" } : {}), cleanupWarning: "运行资源清理失败。" };
       if (exitCode === 0) exitCode = 1;
     }

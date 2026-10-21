@@ -1,3 +1,4 @@
+import { parseSubAgentLimits } from "@/core/sub-agents/types";
 import type { ModelThinkingConfig } from "@/models/provider";
 import { reconcileWebMcpSettings } from "@/web/settings-mcp";
 import { webSettingsStore } from "@/web/storage-paths";
@@ -54,7 +55,7 @@ function parsePayload(value: unknown): { expectedRevision: number; action: Setti
     "workspace-add": ["name", "rootPath"], "workspace-rename": ["id", "name"], "workspace-enable": ["id", "enabled"],
     "workspace-default": ["id"], "workspace-remove": ["id"],
     "mcp-upsert": ["name", "scope", "workspaceId", "config"], "mcp-enable": ["name", "scope", "workspaceId", "enabled"],
-    "mcp-remove": ["name", "scope", "workspaceId"], "preferences-set": ["maxIterations", "maxRuntimeMinutes", "defaultPermissionMode"],
+    "mcp-remove": ["name", "scope", "workspaceId"], "preferences-set": ["maxIterations", "maxRuntimeMinutes", "defaultPermissionMode", "subAgents"],
   };
   if (typeof action.type !== "string" || !Object.hasOwn(fields, action.type) || Object.keys(action).some((key) => key !== "type" && !fields[String(action.type)].includes(key)))
     throw new SettingsError("invalid", "设置操作含未知字段。");
@@ -109,7 +110,7 @@ function parsePayload(value: unknown): { expectedRevision: number; action: Setti
       if (typeof action.maxIterations === "number" && typeof action.maxRuntimeMinutes === "number" &&
         (action.defaultPermissionMode === "strict" || action.defaultPermissionMode === "default" || action.defaultPermissionMode === "permissive"))
         return { expectedRevision: Number(value.expectedRevision), action: { type: "preferences-set", maxIterations: action.maxIterations,
-          maxRuntimeMinutes: action.maxRuntimeMinutes, defaultPermissionMode: action.defaultPermissionMode } };
+          maxRuntimeMinutes: action.maxRuntimeMinutes, defaultPermissionMode: action.defaultPermissionMode, ...(action.subAgents===undefined?{}:{subAgents:parseWebSubAgentLimits(action.subAgents)}) } };
       break;
   }
   throw new SettingsError("invalid", "设置操作或字段无效。");
@@ -150,3 +151,5 @@ function advanced(action: Record<string, unknown>): { maxOutputTokens?: number |
   return { ...(typeof action.maxOutputTokens === "number" || action.maxOutputTokens === null ? { maxOutputTokens: action.maxOutputTokens } : {}),
     ...(thinking === undefined ? {} : { thinking }) };
 }
+
+function parseWebSubAgentLimits(value:unknown) { try { return parseSubAgentLimits(value); } catch { throw new SettingsError("invalid","子 Agent 预算无效。"); } }

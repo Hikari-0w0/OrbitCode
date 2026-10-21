@@ -44,7 +44,7 @@ test("同批次 load_skill 后旧列表中的写工具无法执行", async () =>
     const fixture = await runtimeFixture(() => ++count === 1 ? { chunks: [{ data: toolCallDelta({ name: 'load_skill', id: 'load', index: 0, argumentsJson: '{"name":"tight","arguments":""}' }) + toolCallDelta({ name: 'write_file', id: 'write', index: 1, argumentsJson: '{"path":"escape.txt","content":"bad"}' }) + TOOL_FINISH_EVENT + TRANSPORT_DONE_EVENT }] } : say('受限'));
     try {
         await writeSkill(fixture, 'tight', { tools: [] });
-        await fixture.controller.handleLine('/permissions permissive');
+
         await fixture.controller.handleLine('处理');
         await assert.rejects(readFile(path.join(fixture.root, 'escape.txt')));
         assert.match(fixture.output(), /permission-denied/);

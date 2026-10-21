@@ -10,6 +10,7 @@ export type RecoverableChatError =
       readonly message: string;
     }
   | { readonly kind: "protocol"; readonly message: string }
+  | { readonly kind: "budget"; readonly message: string }
   | { readonly kind: "stream"; readonly message: string };
 
 export class ConversationStateError extends Error {

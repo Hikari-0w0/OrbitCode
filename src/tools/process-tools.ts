@@ -61,6 +61,7 @@ export function createProcessTools(controller: ManagedProcessController) {
     async execute(input, context) {
       try {
         const snapshot = await controller.start({
+          takeWriteLease: context.takeWriteLease,
           command: input.command,
           cwd: input.cwd,
           readyPort: input.ready_port,

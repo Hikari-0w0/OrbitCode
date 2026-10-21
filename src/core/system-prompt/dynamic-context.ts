@@ -74,6 +74,8 @@ export function buildOptionalContextMessages(
   }
   for (const [tag, content, limit] of [
     ["orbitcode_available_skills", context.availableSkills, 16 * 1024],
+    ["orbitcode_available_agents", context.availableAgents, 16 * 1024],
+    ["orbitcode_child_role", context.childRole, 64 * 1024 + 512],
     ["orbitcode_project_instructions", context.projectInstructions, 50_000],
     ["orbitcode_memory_index", context.memoryIndex, 51_000],
     ["orbitcode_resume_reminder", context.resumeReminder, 2_000],
@@ -82,6 +84,8 @@ export function buildOptionalContextMessages(
     if (!content.trim() || new TextEncoder().encode(content).length > limit) throw new AgentConfigurationError("运行背景内容无效或过长。");
     messages.push(taggedMessage(tag, content));
   }
+  if (context.delegationKind) messages.push(taggedMessage("orbitcode_delegation_kind", `本轮用户限定新子任务类型为 ${context.delegationKind}。所有 agent start 必须使用该类型；失败时修正调用，不得自行切换类型。`));
+  if (context.parentExecution === "delegate-only") messages.push(taggedMessage("orbitcode_parent_execution", "本轮父级执行契约：仅委派与汇总。只能调用 agent 创建/等待/控制任务或分页读取其结果。不得代做子任务；接管由用户在下一轮显式切换协作模式。子任务的能力另受角色与权限限制，不继承父级的编排工具限制。"));
   return messages;
 }
 

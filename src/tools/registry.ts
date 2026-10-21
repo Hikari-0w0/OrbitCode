@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { normalizeToolTermination } from "./tool-termination";
 
 import type { PermissionTargetKind } from "@/core/permissions/types";
 import {
@@ -163,18 +164,18 @@ async function executePrepared(
   }
 
   const executionController = new AbortController();
-  const abortExecution = (): void => executionController.abort();
+  let stopReason: "cancelled" | "timeout" | undefined;
+  const abortExecution = (): void => { stopReason ??= "cancelled"; executionController.abort(); };
   context.signal.addEventListener("abort", abortExecution, { once: true });
   const remainingMs = Math.max(0, context.deadlineMs - Date.now());
-  let timedOut = false;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const timeoutResult = new Promise<ToolExecutionResult>((resolve) => {
     timeout = setTimeout(() => {
-      timedOut = true;
+      stopReason ??= "timeout";
       executionController.abort();
       resolve(
-        toolFailure("timeout", "工具执行超时。", {
-          retryable: true,
+        toolFailure(stopReason, stopReason === "timeout" ? "工具执行超时。" : "工具执行已取消。", {
+          retryable: stopReason === "timeout",
           durationMs: Date.now() - startedAt,
           sideEffect: tool.mutability === "read-only" ? "none" : "possible",
         }),
@@ -197,13 +198,7 @@ async function executePrepared(
 
   try {
     const result = await Promise.race([execution, timeoutResult]);
-    if (context.signal.aborted && !timedOut) {
-      return toolFailure("cancelled", "工具执行已取消。", {
-        durationMs: Date.now() - startedAt,
-        sideEffect: tool.mutability === "read-only" ? "none" : "possible",
-      });
-    }
-    return result;
+    return stopReason ? normalizeToolTermination(result, stopReason) : result;
   } finally {
     if (timeout !== undefined) clearTimeout(timeout);
     context.signal.removeEventListener("abort", abortExecution);

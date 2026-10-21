@@ -97,6 +97,7 @@ export type ProviderFailureKind =
   | "protocol"
   | "stream"
   | "timeout"
+  | "budget"
   | "cancelled";
 
 export type ProviderErrorOptions = {
@@ -135,12 +136,15 @@ export class ProviderError extends Error {
 }
 
 export interface ChatProvider {
+  readonly supportsRequestTokenLimit?: boolean;
   stream(
     messages: readonly ConversationMessage[],
     options: {
       readonly signal: AbortSignal;
       readonly tools?: readonly ModelToolDefinition[];
       readonly toolChoice: "auto" | "none";
+      readonly beforeRequest?: (attempt: number) => void;
+      readonly maxOutputTokens?: number;
     },
   ): AsyncIterable<ModelStreamEvent>;
 }

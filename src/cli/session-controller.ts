@@ -1,3 +1,4 @@
+import {parseAgentCommand} from "@/cli/agent-commands";
 import { parseSkillCommand } from "@/runtime/skill-commands";
 import {ConversationCleanup} from "@/runtime/conversation-cleanup";
 import {readBounded} from "@/lib/bounded-files";
@@ -6,7 +7,6 @@ import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { ConversationCheckpoint } from "@/core/conversations/types";
-import type { PermissionUserDecision } from "@/core/permissions/approval";
 import type { PermissionMode } from "@/core/permissions/types";
 import { executablePlanId, PLAN_EXECUTION_PROMPT } from "@/core/conversations/plan-execution";
 import { LocalConversationExporter } from "@/lib/local-conversation-exporter";
@@ -34,10 +34,13 @@ export type SessionControllerOptions = {
 export class CliInteractionError extends Error {}
 
 export class SessionController {
+  private delegationKind: import("@/core/sub-agents/parent-execution").DelegationKind | undefined;
+  private parentExecutionMode: import("@/core/sub-agents/parent-execution").ParentExecutionMode = "collaborate";
   private cleanupConfirmation?: {token:string;candidates:readonly {id:string;expectedRevision:number}[]};
   private checkpoint?: ConversationCheckpoint;
   private permissionId: string;
   private active?: AbortController;
+  private taskWait?: AbortController;
   private plan?: { readonly revision: number; readonly id: string };
   private confirmation?: { readonly token: string; readonly kind: "clear" | "delete"; readonly id: string; readonly revision: number };
   private unsaved = false;
@@ -53,7 +56,7 @@ export class SessionController {
     if (this.options.defaultPermissionMode) this.options.permissions.setMode(id, this.options.defaultPermissionMode);
     return id;
   }
-  get busy(): boolean { return this.active !== undefined; }
+  get busy(): boolean { return this.active !== undefined || this.taskWait !== undefined; }
   async initialize(selection: { readonly providerName?: string; readonly workspaceId?: string; readonly resumeId?: string }): Promise<void> {
     if (selection.resumeId) await this.resume(selection.resumeId);
     else {
@@ -65,7 +68,7 @@ export class SessionController {
     }
     this.status();
   }
-  cancel(): void { this.confirmation = undefined; this.active?.abort(); }
+  cancel(): void { this.confirmation = undefined; if(this.taskWait)this.taskWait.abort();else this.active?.abort(); }
   close(): void {
     this.exitRequested = true;
     this.cancel();
@@ -73,6 +76,19 @@ export class SessionController {
   }
   async handleLine(line: string): Promise<void> {
     try {
+      const agentCommand=parseAgentCommand(line);
+      if(agentCommand){
+        const runtime=this.options.runtime,scope=await runtime.taskScope(this.current().summary.id);
+        let result:unknown;
+        if(agentCommand.kind==="agents")result=await runtime.inspectAgents(scope.conversationId);
+        else if(agentCommand.kind==="tasks")result=runtime.tasks.list(scope);
+        else if(agentCommand.action==="show")result={task:runtime.tasks.get(scope,agentCommand.id)};
+        else if(agentCommand.action==="result")result=await runtime.readTaskReply(scope.conversationId,agentCommand.id,agentCommand.offset??0);
+        else if(agentCommand.action==="cancel")result=await runtime.tasks.cancel(scope,agentCommand.id);
+        else if(agentCommand.action==="background"){runtime.tasks.detach(scope,agentCommand.id);result=runtime.tasks.get(scope,agentCommand.id);}
+        else {if(this.taskWait)throw new CliInteractionError("已有前台等待。");const controller=new AbortController();this.taskWait=controller;try{result=await runtime.tasks.wait(scope,agentCommand.id,30000,controller.signal);}finally{this.taskWait=undefined;}}
+        this.options.renderer.content(JSON.stringify(result,null,2));return;
+      }
       const skill = parseSkillCommand(line);
       if (skill?.kind === "run") { if (this.busy) throw new CliInteractionError("当前会话正在运行。"); await this.run(line); return; }
       if (skill) {
@@ -89,7 +105,7 @@ export class SessionController {
         }
         if (parsed.name === "cancel") { this.cancel(); return; }
         if (parsed.name === "status") { this.status(); return; }
-        if (parsed.name === "approve") { this.approve(parsed.argument); return; }
+        if (parsed.name === "approve") throw new CliInteractionError("人工审批已移除，工具按权限规则直接执行或拒绝。");
         if (this.busy) throw new CliInteractionError("当前操作尚未结束，请稍后重试。可使用 /cancel。");
         if (this.unsaved && !["history", "tool", "export", "retry-save", "help"].includes(parsed.name))
           throw new CliInteractionError("本轮尚未保存，请先 /retry-save；退出将丢失进程内未保存结果。");
@@ -143,22 +159,15 @@ export class SessionController {
   }
   private status(): void {
     const c = this.checkpoint;
-    this.options.renderer.notice(c ? `会话 ${c.summary.id} revision ${c.summary.revision}；Provider ${c.summary.providerId}；Workspace ${c.summary.workspaceId}；${c.mode.toUpperCase()}；权限 ${this.permissionMode()}；${this.unsaved ? "未保存" : this.busy ? "运行中" : "空闲"}` : "没有当前会话。");
+    this.options.renderer.notice(c ? `会话 ${c.summary.id} revision ${c.summary.revision}；Provider ${c.summary.providerId}；Workspace ${c.summary.workspaceId}；${c.mode.toUpperCase()}；自主执行；父级 ${this.parentExecutionMode}；子类型 ${this.delegationKind ?? "自动"}；${this.unsaved ? "未保存" : this.busy ? "运行中" : "空闲"}` : "没有当前会话。");
   }
   private permissionMode() {
     try { return this.options.permissions.getSession(this.permissionId).mode; }
     catch {
       this.permissionId = this.createPermissionSession();
-      this.options.renderer.notice("权限会话已过期，旧授权失效，恢复默认权限模式。");
+      this.options.renderer.notice("权限会话已过期，已重建会话。");
       return this.options.defaultPermissionMode ?? "default";
     }
-  }
-  private approve(argument: string): void {
-    if (!this.options.terminal) throw new CliInteractionError("非交互输入不能提交人工授权。");
-    const [id, scope, extra] = argument.split(/\s+/);
-    const choices: Readonly<Record<string, PermissionUserDecision>> = { once: "allow-once", session: "allow-session", permanent: "allow-permanent", deny: "deny" };
-    if (!id || !Object.hasOwn(choices, scope) || extra) throw new CliInteractionError("用法：/approve <request-id> <once|session|permanent|deny>");
-    this.options.permissions.resolveDecision(this.permissionId, id, choices[scope]);
   }
   private async run(text: string, signal?: AbortSignal): Promise<void> {
     if (this.unsaved) throw new CliInteractionError("本轮尚未保存，请先 /retry-save。");
@@ -174,18 +183,12 @@ export class SessionController {
       const modeTurn = current.modeTurn + 1;
       for await (const item of this.options.runtime.streamTurn({
         conversationId: current.summary.id, expectedRevision: current.summary.revision,
-        input: text, mode: current.mode, modeTurn, permissionSessionId: this.permissionId,
-        source: "cli", signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
+        input: text, mode: current.mode, modeTurn, permissionSessionId: this.permissionId,parentExecution:{version:1,mode:this.parentExecutionMode,...(this.delegationKind?{delegationKind:this.delegationKind}:{})},
+        source: "cli", interactive:this.options.terminal, signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
       })) {
         this.options.renderer.event(item);
         if (item.type === "agent" && item.event.type === "tool-result")
           this.latestResults.set(item.event.callId, JSON.stringify(item.event.result, null, 2));
-        const approval = item.type === "agent" && item.event.type === "skill-run" && item.event.event.type === "permission-requested" ? item.event.event.prompt
-          : ((item.type === "agent" && item.event.type === "permission-requested") || (item.type === "initialization" && item.event.type === "runtime-permission-requested")) ? item.event.prompt : undefined;
-        if (approval && !this.options.terminal) {
-          this.options.renderer.notice("非交互输入无法审批，本次拒绝。");
-          this.options.permissions.resolveDecision(this.permissionId, approval.requestId, "deny");
-        }
         if (item.type === "finished") {
           this.unsaved = item.persistence.status !== "saved";
           if (!this.unsaved) this.checkpoint = await this.options.conversations.load(current.summary.id);
@@ -200,6 +203,13 @@ export class SessionController {
   private async command(name: string, argument: string, signal: AbortSignal): Promise<void> {
     const { renderer, conversations } = this.options;
     switch (name) {
+      case "delegation": {
+        const [mode, kind, ...extra] = argument.split(/\s+/);
+        if ((mode !== "collaborate" && mode !== "delegate-only") || extra.length || kind !== undefined && !["auto", "defined", "fork"].includes(kind)) throw new CliInteractionError("使用 /delegation collaborate|delegate-only [auto|defined|fork]。");
+        this.parentExecutionMode = mode;
+        this.delegationKind = kind === "defined" || kind === "fork" ? kind : undefined;
+        renderer.notice(`父级分工：${mode}；新子任务类型：${this.delegationKind ?? "自动选择"}，后续轮次生效。`); return;
+      }
       case "background": renderer.content(JSON.stringify(await this.options.runtime.inspectBackground(this.current().summary.id), null, 2)); return;
       case "memory": {
         const parts = argument.trim().split(/\s+/);
@@ -252,9 +262,7 @@ export class SessionController {
         this.checkpoint = await conversations.setMode({ ...this.mutation(), mode: "do" });
         await this.run(PLAN_EXECUTION_PROMPT, signal); return;
       }
-      case "permissions":
-        if (argument !== "strict" && argument !== "default" && argument !== "permissive") throw new CliInteractionError("权限模式必须为 strict/default/permissive。");
-        this.options.permissions.setMode(this.permissionId, argument); this.status(); return;
+      case "permissions": throw new CliInteractionError("人工审批模式已移除，Plan/Do和拒绝规则继续生效。");
       case "history": {
         const pending = conversations.manager.pendingSave(this.current().summary.id);
         renderer.content(JSON.stringify(pending?.checkpoint.displayMessages ?? this.current().displayMessages, null, 2)); return;

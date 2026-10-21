@@ -9,6 +9,7 @@ export const MAX_TOOL_ARGUMENTS_JSON_CHARS = 2 * 1024 * 1024;
 
 export type ToolName = LocalToolName | `mcp__${string}`;
 export type LocalToolName =
+  | "agent"
   | "load_skill"
   | "read_skill_resource"
   | "read_file"
@@ -22,8 +23,7 @@ export type LocalToolName =
   | "read_memory"
   | "start_process"
   | "process_status"
-  | "stop_process"
-  | "report_completion";
+  | "stop_process";
 
 export type SchemaIssue = {
   readonly path: string;
@@ -142,7 +142,19 @@ export interface WorkspaceBoundary {
   replaceSnapshot(snapshot: TextFileSnapshot, content: string): Promise<void>;
 }
 
+export interface WorkspaceWriteCoordinator {
+  acquire(root: string, signal: AbortSignal): Promise<() => void>;
+  acquireRead?(root: string, signal: AbortSignal): Promise<() => void>;
+}
+
+export class WorkspaceAccessError extends Error {
+  constructor(readonly kind: "conflict" | "permission-denied", message: string) {
+    super(message);
+  }
+}
+
 export type ToolExecutionContext = {
+  readonly takeWriteLease?: () => (() => void) | undefined;
   readonly callId?: string;
   readonly emitSkillEvent?: (event: import("@/core/skills/types").SkillRunEvent) => Promise<void>;
   readonly workspace: WorkspaceBoundary;

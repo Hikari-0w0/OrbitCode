@@ -118,6 +118,7 @@ export async function runCli({
           local: path.join(workspaceRoot, ".orbitcode", "permissions.local.yaml") }) } : {}),
     });
     conversations.configureMemory(runtime.memory, checkpoint => runtime.scheduleSaved(checkpoint));
+conversations.configureTasks(checkpoint => runtime.invalidateTasks(checkpoint));
     const session = new SessionController({ cwd, terminal, runtime, conversations, permissions,
       log: actualLog, loadConfig, loadWorkspaces, renderer: new TerminalRenderer(output, errorOutput),
       defaultPermissionMode: storedSettings?.defaultPermissionMode });

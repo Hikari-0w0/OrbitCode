@@ -15,6 +15,8 @@ import type { ConversationRuntimeManager, ConversationOperationKind } from "@/ru
 export type ConversationMutation = { readonly conversationId: string; readonly expectedRevision: number };
 export class ConversationService {
   private memory?: MemoryService;
+  private invalidateTasks?: (checkpoint:ConversationCheckpoint)=>Promise<void>;
+  configureTasks(invalidate:(checkpoint:ConversationCheckpoint)=>Promise<void>) { this.invalidateTasks=invalidate; }
   private scheduleSaved?: (checkpoint: ConversationCheckpoint) => Promise<void>;
   configureMemory(memory: MemoryService, scheduleSaved: (checkpoint: ConversationCheckpoint) => Promise<void>) { this.memory = memory; this.scheduleSaved = scheduleSaved; }
   constructor(
@@ -31,7 +33,8 @@ export class ConversationService {
   }
   clear(input: ConversationMutation) {
     this.memory?.cancelConversation(input.conversationId);
-    return this.mutate(input, "clear", async () => {
+    return this.mutate(input, "clear", async (previous) => {
+      await this.invalidateTasks?.(previous);
       const checkpoint = saved(await this.store.clear(input));
       // 清空已经提交后，旧回合的待保存结果和恢复标记都不再属于当前会话生命周期。
       this.manager.clearPendingSave(input.conversationId);
@@ -41,7 +44,8 @@ export class ConversationService {
   }
   delete(input: ConversationMutation) {
     this.memory?.cancelConversation(input.conversationId);
-    return this.mutate(input, "delete", async () => {
+    return this.mutate(input, "delete", async (previous) => {
+      await this.invalidateTasks?.(previous);
       await this.store.delete(input);
       this.manager.clearPendingSave(input.conversationId);
     });
@@ -54,6 +58,7 @@ export class ConversationService {
       if (!Number.isFinite(timestamp) || timestamp > cutoff) throw new ConversationRepositoryError("conflict", "会话不再满足 30 天期限。");
       if (this.manager.pendingSave(input.conversationId) || (await this.store.inspectActivity(input.conversationId, operation.lease.ownerToken)).status !== "idle" || pendingToolCalls(checkpoint.context.messages).length) throw new ConversationRepositoryError("busy", "会话有待处理状态。");
       this.memory?.cancelConversation(input.conversationId);
+      await this.invalidateTasks?.(checkpoint);
       await this.store.delete(input);
     });
   }

@@ -1,3 +1,4 @@
+import { searchContextContent, type ContextSearchInput } from "@/core/context/context-search";
 import { randomUUID } from "node:crypto";
 import {
   chmod,
@@ -76,17 +77,21 @@ export class LocalContextStore implements ContextStore {
     readonly limit: number;
     readonly signal: AbortSignal;
   }): Promise<ContextChunk> {
+    if (!Number.isSafeInteger(input.offset) || input.offset < 0 || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > MAX_CONTEXT_READ_CHARACTERS) throw referenceError();
+    const characters = Array.from(await this.readContent(input));
+    if (input.offset > characters.length) throw referenceError();
+    const content = characters.slice(input.offset, input.offset + input.limit).join("");
+    const nextOffset = input.offset + Array.from(content).length;
+    return { content, offset: input.offset, nextOffset, totalCharacters: characters.length, hasMore: nextOffset < characters.length };
+  }
+
+  async search(input: ContextSearchInput & { readonly sessionId: string }) {
+    return searchContextContent(await this.readContent(input), input);
+  }
+
+  private async readContent(input: { readonly sessionId: string; readonly reference: string; readonly signal: AbortSignal }): Promise<string> {
     assertSessionId(input.sessionId);
     const objectId = parseReference(input.reference);
-    if (
-      !Number.isSafeInteger(input.offset) ||
-      input.offset < 0 ||
-      !Number.isSafeInteger(input.limit) ||
-      input.limit < 1 ||
-      input.limit > MAX_CONTEXT_READ_CHARACTERS
-    ) {
-      throw referenceError();
-    }
     if (input.signal.aborted) throw cancelled();
 
     const sessionDirectory = path.join(this.root, input.sessionId);
@@ -107,17 +112,7 @@ export class LocalContextStore implements ContextStore {
       if (targetStat.size > MAX_STORED_CONTEXT_BYTES) throw referenceError();
       const content = await readFile(targetRealPath, "utf8");
       if (input.signal.aborted) throw cancelled();
-      const characters = Array.from(content);
-      if (input.offset > characters.length) throw referenceError();
-      const chunk = characters.slice(input.offset, input.offset + input.limit).join("");
-      const nextOffset = input.offset + Array.from(chunk).length;
-      return {
-        content: chunk,
-        offset: input.offset,
-        nextOffset,
-        totalCharacters: characters.length,
-        hasMore: nextOffset < characters.length,
-      };
+      return content;
     } catch (error) {
       if (error instanceof ContextManagementError) throw error;
       throw referenceError();

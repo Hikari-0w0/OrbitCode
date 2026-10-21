@@ -1,3 +1,4 @@
+import { isTargetFailureReason, type TargetFailureReason } from "@/tools/target-failure-reason";
 import { isModelUsageSummary, type ModelUsageSummary } from "@/models/usage-tracker";
 import { isMcpInitializationRecord, type McpInitializationRecord } from "@/core/mcp-events";
 import { createReadStream } from "node:fs";
@@ -63,6 +64,8 @@ export type AgentRunLogEntry = {
       | "unfinished";
     readonly durationMs?: number;
     readonly errorKind?: string;
+    readonly targetFailureReason?: TargetFailureReason;
+    readonly iteration?: number;
     readonly authorization?: {
       readonly status:
         | "awaiting"
@@ -200,6 +203,7 @@ function toStoredEntry(entry: AgentRunLogEntry): StoredAgentRunLogEntry {
       purpose: category.purpose, requests: category.requests, reportedRequests: category.reportedRequests,
       failedRequests: category.failedRequests, durationMs: category.durationMs,
       promptTokens: category.promptTokens, completionTokens: category.completionTokens, totalTokens: category.totalTokens,
+      ...(category.cache ? { cache: { ...category.cache } } : {}),
     })) } } : {}),
     ...(entry.initialization?.length ? { initialization: entry.initialization } : {}),
     runId: entry.runId,
@@ -251,6 +255,8 @@ function toStoredEntry(entry: AgentRunLogEntry): StoredAgentRunLogEntry {
       status: tool.status,
       ...(tool.durationMs === undefined ? {} : { durationMs: tool.durationMs }),
       ...(tool.errorKind === undefined ? {} : { errorKind: tool.errorKind }),
+      ...(tool.targetFailureReason === undefined ? {} : { targetFailureReason: tool.targetFailureReason }),
+      ...(tool.iteration === undefined ? {} : { iteration: tool.iteration }),
       ...(tool.authorization === undefined
         ? {}
         : { authorization: { ...tool.authorization } }),
@@ -363,7 +369,7 @@ function isToolLog(value: unknown): boolean {
     hasAllowedFields(
       value,
       ["name", "status"],
-      ["durationMs", "errorKind", "authorization", "mcp", "callId"],
+      ["durationMs", "errorKind", "authorization", "mcp", "callId", "targetFailureReason", "iteration"],
     ) &&
     typeof value.name === "string" &&
     (value.callId === undefined || (typeof value.callId === "string" && value.callId.length > 0 && value.callId.length <= 1024)) &&
@@ -373,6 +379,8 @@ function isToolLog(value: unknown): boolean {
     ["succeeded", "failed", "timed-out", "cancelled", "unfinished"].includes(String(value.status)) &&
     (value.durationMs === undefined || isNonNegativeInteger(value.durationMs)) &&
     (value.errorKind === undefined || typeof value.errorKind === "string") &&
+    (value.targetFailureReason === undefined || isTargetFailureReason(value.targetFailureReason)) &&
+    (value.iteration === undefined || (isNonNegativeInteger(value.iteration) && value.iteration > 0)) &&
     (value.authorization === undefined || isAuthorizationLog(value.authorization));
 }
 

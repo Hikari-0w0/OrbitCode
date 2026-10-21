@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 import { isAlias, isMap, isScalar, isSeq, parseDocument, visit } from "yaml";
 import { SkillError, type SkillDefinition, type SkillHistory } from "@/core/skills/types";
 import type { ToolName } from "@/tools/types";
-export const LOCAL_SKILL_TOOLS = new Set<string>(["read_file", "write_file", "write_files", "edit_file", "run_command", "find_files", "search_code", "read_context", "read_memory", "start_process", "process_status", "stop_process", "report_completion", "load_skill", "read_skill_resource"]);
+export const LOCAL_SKILL_TOOLS = new Set<string>(["agent", "read_file", "write_file", "write_files", "edit_file", "run_command", "find_files", "search_code", "read_context", "read_memory", "start_process", "process_status", "stop_process", "load_skill", "read_skill_resource"]);
+// 旧元数据可继续加载；忽略已下线的工具，不能借兼容入口扩大白名单。
+export const RETIRED_METADATA_TOOLS: ReadonlySet<string> = new Set(["report_completion"]);
 export const hashText = (text: string): string => createHash("sha256").update(text).digest("hex");
 export const record = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const fail = (message: string): never => { throw new SkillError("invalid-definition", message); };
@@ -14,12 +16,12 @@ export function parseSkillMetadata(value: unknown): SkillDefinition {
     if (typeof value.description !== "string" || !value.description.trim() || Array.from(value.description).length > 200 || /[\r\n]/u.test(value.description))
         return fail("description 必须为 1—200 字符单行简介。");
     const tools = value["allowed-tools"];
-    if (!Array.isArray(tools) || tools.length > 64 || tools.some(tool => typeof tool !== "string" || (!LOCAL_SKILL_TOOLS.has(tool) && !/^mcp__[A-Za-z0-9_-]+$/.test(tool))) || new Set(tools).size !== tools.length)
+    if (!Array.isArray(tools) || tools.length > 64 || tools.some(tool => typeof tool !== "string" || (!LOCAL_SKILL_TOOLS.has(tool) && !RETIRED_METADATA_TOOLS.has(tool) && !/^mcp__[A-Za-z0-9_-]+$/.test(tool))) || new Set(tools).size !== tools.length)
         return fail("allowed-tools 必须是无重复的精确工具名称数组。");
     if (value.model !== undefined && (typeof value.model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value.model)))
         return fail("model 必须引用已有模型配置 ID。");
     // 前面的逐项运行时校验建立 ToolName 边界，不接受任意字符串。
-    const allowedTools = tools as ToolName[];
+    const allowedTools = tools.filter(tool => !RETIRED_METADATA_TOOLS.has(tool)) as ToolName[];
     const base = { name: value.name, description: value.description, allowedTools, ...(typeof value.model === "string" ? { model: value.model } : {}) };
     if (value.mode === "shared") {
         if (value.history !== undefined)

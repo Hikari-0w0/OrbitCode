@@ -107,3 +107,22 @@ test("拒绝路径形式和符号链接引用", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("全文搜索沿用引用会话、符号链接和取消限制", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbit-context-search-"));
+  try {
+    const store = new LocalContextStore(root), signal = new AbortController().signal;
+    const stored = await store.write({ sessionId: "session", content: "😀secret😀", signal });
+    const args = { sessionId: "session", reference: stored.reference, query: "secret", signal };
+    assert.equal((await store.search(args)).matches[0].offset, 1);
+    await assert.rejects(store.search({ ...args, sessionId: "another" }));
+    await assert.rejects(store.search({ ...args, reference: "../../secret" }));
+    await assert.rejects(store.search({ ...args, signal: AbortSignal.abort() }), /取消/);
+    const target = path.join(root, "session", stored.reference.split("/").at(-1) + ".txt");
+    await rm(target);
+    const outside = path.join(root, "outside.txt");
+    await writeFile(outside, "secret");
+    await symlink(outside, target);
+    await assert.rejects(store.search(args));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

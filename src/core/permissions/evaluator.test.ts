@@ -11,11 +11,11 @@ const targets = new Map([
   ["run_command", "command"],
 ] as const);
 
-test("无匹配规则时使用三档权限模式矩阵", () => {
+test("旧三档模式兼容读取但统一无需人工审批", () => {
   const subjects = [readSubject(), writeSubject(), commandSubject()] as const;
   const expected: Record<PermissionMode, readonly string[]> = {
-    strict: ["ask", "ask", "ask"],
-    default: ["allow", "ask", "ask"],
+    strict: ["allow", "allow", "allow"],
+    default: ["allow", "allow", "allow"],
     permissive: ["allow", "allow", "allow"],
   };
   for (const mode of Object.keys(expected) as PermissionMode[]) {

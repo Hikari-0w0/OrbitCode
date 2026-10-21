@@ -3,6 +3,10 @@ import { useLayoutEffect, useRef, type KeyboardEvent, type ReactNode } from "rea
 import { MAX_WEB_CHAT_INPUT_LENGTH, type WebChatRequest, } from "@/web/chat-contract";
 import { Popover } from "./ui/popover";
 type ChatComposerProps = {
+    readonly delegationKind?: import("@/core/sub-agents/parent-execution").DelegationKind;
+    readonly onDelegationKindChange?: (kind: import("@/core/sub-agents/parent-execution").DelegationKind | undefined) => void;
+    readonly parentExecutionMode?: import("@/core/sub-agents/parent-execution").ParentExecutionMode;
+    readonly onParentExecutionChange?: (mode: import("@/core/sub-agents/parent-execution").ParentExecutionMode) => void;
     readonly blockedReason?: string;
     readonly value: string;
     readonly mode: WebChatRequest["mode"];
@@ -15,7 +19,7 @@ type ChatComposerProps = {
     readonly onStop: () => void;
     readonly contextControl?: ReactNode;
 };
-export function ChatComposer({ value, blockedReason, mode, disabled, isStreaming, isStopping, onModeChange, onChange, onSubmit, onStop, contextControl, }: ChatComposerProps) {
+export function ChatComposer({ value, blockedReason, mode, disabled, isStreaming, isStopping, onModeChange, onChange, onSubmit, onStop, contextControl, delegationKind, onDelegationKindChange, parentExecutionMode="collaborate",onParentExecutionChange }: ChatComposerProps) {
     const input = useRef<HTMLTextAreaElement>(null);
     useLayoutEffect(() => {
         const element = input.current;
@@ -54,8 +58,10 @@ export function ChatComposer({ value, blockedReason, mode, disabled, isStreaming
                 执行
               </button>
             </div>
+            {onDelegationKindChange && <label>子任务类型 <select aria-label="子任务类型" value={delegationKind ?? "auto"} disabled={disabled || isStreaming} onChange={event => { const value = event.target.value; onDelegationKindChange(value === "defined" || value === "fork" ? value : undefined); }}><option value="auto">自动选择</option><option value="defined">定义式角色</option><option value="fork">Fork 继承上下文</option></select></label>}
+            {onParentExecutionChange && <label>父级分工 <select aria-label="父级分工" value={parentExecutionMode} disabled={disabled||isStreaming} onChange={event=>{const value=event.target.value;if(value==="collaborate"||value==="delegate-only")onParentExecutionChange(value);}}><option value="collaborate">协作与接管</option><option value="delegate-only">仅委派汇总</option></select></label>}
             <span className="composerHint">
-              {mode === "plan" ? "只读文件、查找与搜索" : "允许完整 Workspace 工具"}
+              {parentExecutionMode === "delegate-only" ? "父级仅委派汇总，子任务仍受角色和权限限制" : mode === "plan" ? "只读文件、查找与搜索" : "允许完整 Workspace 工具"}
               <span className="composerShortcut"><kbd>Enter</kbd> 发送</span>
             </span>
             {contextControl}

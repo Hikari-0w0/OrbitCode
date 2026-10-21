@@ -77,6 +77,7 @@ export type ConversationSummary = ConversationBinding & {
 };
 
 export type PersistedLastTurn = {
+  readonly parentExecution?: import("@/core/sub-agents/parent-execution").ParentExecutionContract;
   readonly turnId: string;
   readonly endedAt: string;
   readonly stopReason: AgentStopReason;
@@ -84,6 +85,7 @@ export type PersistedLastTurn = {
 };
 
 export type ConversationCheckpoint = {
+  readonly childResultReceipts?: readonly string[];
   readonly skills?: SkillState;
   readonly lastTurn?: PersistedLastTurn;
   readonly lifecycleEpoch?: string;

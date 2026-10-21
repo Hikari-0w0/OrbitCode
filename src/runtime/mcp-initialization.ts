@@ -11,6 +11,7 @@ import type { PermissionOperation, RegisteredTool } from "@/tools/registry";
 import { toolFailure, type ToolExecutionResult } from "@/tools/types";
 
 export async function* initializeMcpWorkspace(options: {
+  readonly writes?: import("@/tools/types").WorkspaceWriteCoordinator;
   readonly workspaceRoot: string;
   readonly mode: AgentMode;
   readonly signal: AbortSignal;
@@ -42,22 +43,19 @@ export async function* initializeMcpWorkspace(options: {
       permissionTarget: { kind: "mcp", operation: "connect", serverName: server.name, configurationId: server.configurationId, summary: connectionSummary(server, redact) },
       revalidate,
     };
-    let authorization = await options.gateway.authorizeConnection(operation, `mcp-start-${randomUUID()}`, options.signal);
-    if (authorization.kind === "awaiting") {
-      const { prompt } = authorization;
-      yield { type: "runtime-permission-requested", serverName: server.name, prompt };
-      authorization = await authorization.resolve();
-      yield { type: "runtime-permission-resolved", serverName: server.name, requestId: prompt.requestId, status: authorization.kind === "allowed" ? "allowed" : authorization.kind === "denied" ? authorization.approvalStatus ?? "invalid" : "invalid", ...(authorization.kind === "allowed" && authorization.approvalScope ? { scope: authorization.approvalScope } : {}) };
-    }
+    const authorization = await options.gateway.authorizeConnection(operation, `mcp-start-${randomUUID()}`, options.signal);
     if (authorization.kind !== "allowed") {
-      yield { type: "mcp-status", serverName: server.name, phase: "unavailable", detail: "MCP 连接未获授权。", durationMs: Date.now() - started, authorization: authorization.kind === "denied" ? authorization.approvalStatus ?? "denied" : "invalid" };
+      yield { type: "mcp-status", serverName: server.name, phase: "unavailable", detail: "MCP 连接未获授权。", durationMs: Date.now() - started, authorization: "denied" };
       continue;
     }
     const allowed = authorization;
     let lease: McpConnectionLease | undefined;
+    let releaseWrite: (()=>void)|undefined;
     try {
       const failure = await allowed.revalidate(options.signal);
       if (failure) throw new McpError("cancelled", "MCP 连接授权已失效。");
+      releaseWrite=await options.writes?.acquire(options.workspaceRoot,options.signal);
+      options.signal.throwIfAborted();
       yield { type: "mcp-status", serverName: server.name, phase: "connecting", detail: "正在初始化 MCP Server。", durationMs: Date.now() - started, authorization: "allowed" };
       lease = await options.manager.acquire({ server, signal: options.signal, deadlineMs: options.deadlineMs, revalidate: async (signal) => {
         const denied = await allowed.revalidate(signal);
@@ -88,7 +86,7 @@ export async function* initializeMcpWorkspace(options: {
     } catch (error) {
       await lease?.release();
       yield { type: "mcp-status", serverName: server.name, phase: "unavailable", durationMs: Date.now() - started, authorization: "allowed", detail: error instanceof McpError ? error.message : "MCP Server 初始化失败。" };
-    }
+    } finally { releaseWrite?.(); }
   }
   return tools;
 }

@@ -69,7 +69,8 @@ test("固定模块包含核心行为且不混入运行态标签", () => {
   assert.match(prompt, /批量写入代码后优先运行一次类型检查或构建/u);
   assert.match(prompt, /修改或覆盖已有文件前.*read_file/u);
   assert.match(prompt, /未经实际执行和验证不要声称成功/u);
-  assert.match(prompt, /Do 模式完成变更后.*report_completion/u);
+  assert.doesNotMatch(prompt, /report_completion/u);
+  assert.match(prompt, /无需额外提交完成报告/u);
   assert.match(prompt, /工作区约定和已有项目脚本.*lint、test、typecheck、build/u);
   assert.match(prompt, /不得只选择已经通过的检查/u);
   assert.match(prompt, /最终回复先给结果/u);

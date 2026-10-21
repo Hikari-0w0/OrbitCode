@@ -1,3 +1,4 @@
+import { targetFailureReason } from "@/tools/target-failure-reason";
 import type { ModelUsageSummary } from "@/models/usage-tracker";
 import type { McpInitializationRecord } from "@/core/mcp-events";
 import { randomUUID } from "node:crypto";
@@ -151,6 +152,8 @@ export class AgentRunTracker {
         callId: event.callId,
         name: event.name,
         status: toolLogStatus(event.result),
+        iteration: event.iteration,
+        ...(targetFailureReason(event.result) ? { targetFailureReason: targetFailureReason(event.result) } : {}),
         durationMs: event.result.meta.durationMs,
         ...(!event.result.ok ? { errorKind: event.result.error.kind } : {}),
         ...(previous?.authorization === undefined
@@ -234,6 +237,8 @@ export class AgentRunTracker {
         status: tool.status,
         ...(tool.durationMs === undefined ? {} : { durationMs: tool.durationMs }),
         ...(tool.errorKind === undefined ? {} : { errorKind: tool.errorKind }),
+        ...(tool.targetFailureReason === undefined ? {} : { targetFailureReason: tool.targetFailureReason }),
+        ...(tool.iteration === undefined ? {} : { iteration: tool.iteration }),
         ...(tool.authorization === undefined
           ? {}
           : { authorization: { ...tool.authorization } }),

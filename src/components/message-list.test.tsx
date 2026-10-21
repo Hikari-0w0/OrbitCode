@@ -225,7 +225,7 @@ test("验证标签只说明所列检查通过，不宣称全部需求完成", ()
     planActionDisabled={false}
     onExecutePlan={() => undefined}
     onSuggestion={() => undefined}
-    onPermissionDecision={() => undefined}
+
   />);
   assert.match(markup, /所列检查通过/u);
   assert.match(markup, /不代表全部需求已验收/u);
@@ -241,7 +241,7 @@ test("外部调用结果只显示运行证据，不显示任务已验证", () =>
     planActionDisabled={false}
     onExecutePlan={() => undefined}
     onSuggestion={() => undefined}
-    onPermissionDecision={() => undefined}
+
   />);
   assert.match(markup, /运行证据：外部调用结果已记录/u);
   assert.match(markup, /答复内容未验收/u);

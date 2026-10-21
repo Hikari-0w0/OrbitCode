@@ -38,3 +38,4 @@ export const webConversationService = new ConversationService(
 );
 
 webConversationService.configureMemory(webAgentRuntime.memory, checkpoint => webAgentRuntime.scheduleSaved(checkpoint));
+webConversationService.configureTasks(checkpoint => webAgentRuntime.invalidateTasks(checkpoint));

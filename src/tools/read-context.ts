@@ -1,7 +1,8 @@
+import type { ContextSearchInput, ContextSearchResult } from "@/core/context/context-search";
 import { ContextManagementError } from "@/core/context/context-errors";
 import type { ContextChunk } from "@/core/context/types";
 import { defineTool, successfulToolResult } from "@/tools/registry";
-import { integerSchema, objectSchema, stringSchema } from "@/tools/schema";
+import { integerSchema, objectSchema, optionalSchema, stringSchema } from "@/tools/schema";
 import { toolFailure } from "@/tools/types";
 
 export const MAX_CONTEXT_CHUNK_CHARACTERS = 32 * 1024;
@@ -13,12 +14,20 @@ export type ContextContentReader = (input: {
   readonly signal: AbortSignal;
 }) => Promise<ContextChunk>;
 
-export function createReadContextTool(read: ContextContentReader) {
+export type ContextContentAccess = ContextContentReader | {
+  readonly read: ContextContentReader;
+  readonly search: (input: ContextSearchInput) => Promise<ContextSearchResult>;
+};
+
+export function createReadContextTool(access: ContextContentAccess) {
+  const read = typeof access === "function" ? access : access.read;
+  const search = typeof access === "function" ? undefined : access.search;
   return defineTool({
     name: "read_context",
     description:
-      "按上下文压缩产生的 context:// 引用分块读取完整工具结果。只接受当前会话提供的引用；不要传入文件路径。",
+      "按上下文压缩产生的 context:// 引用分块读取完整工具结果。逐字复制当前会话提供的引用，不猜引用、不传文件路径。可按搜索返回的偏移定位阅读；需要完整顺序扫描时从 offset=0 开始，按返回的 nextOffset 继续，不猜偏移或跳过未读内容。单页 hasMore=false 只表示已到结尾，不证明前面区间读完。limit 最大32768字符；覆盖不完整时不能声称目标不存在。" + (search ? " 查找已知文本优先提供 query（区分大小写的字面量，非正则），offset=0；运行时搜索整个引用，返回完整扫描范围、精确匹配数及最多4段摘录。无匹配只证明该字面量不存在，不证明语义事实不存在。" : ""),
     inputSchema: objectSchema({
+      query: optionalSchema(stringSchema({ minLength: 1, maxLength: 128, description: "在整个引用中搜索字面量；搜索时 offset 必须为0，limit仅用于普通读取。" })),
       reference: stringSchema({
         minLength: 1,
         maxLength: 256,
@@ -45,6 +54,11 @@ export function createReadContextTool(read: ContextContentReader) {
     },
     async execute(input, context) {
       try {
+        if (input.query !== undefined) {
+          if (!search) return toolFailure("invalid-arguments", "当前引用适配器不支持全文搜索。", { retryable: false });
+          if (input.offset !== 0) return toolFailure("invalid-arguments", "全文搜索的 offset 必须为0；定位阅读时省略 query。", { retryable: true });
+          return successfulToolResult({ reference: input.reference, ...await search({ reference: input.reference, query: input.query, signal: context.signal }) });
+        }
         const chunk = await read({ ...input, signal: context.signal });
         return successfulToolResult({
           reference: input.reference,

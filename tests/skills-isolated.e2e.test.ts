@@ -1,23 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
-import { readFile } from "node:fs/promises";
-import { runtimeFixture, waitUntil } from "./helpers/runtime-fixture";
+import { readFile, writeFile } from "node:fs/promises";
+import { runtimeFixture } from "./helpers/runtime-fixture";
 import { writeSkill, say, call } from "./helpers/skill-fixture";
-for (const choice of ['once', 'deny'] as const)
-    test(`独立 Skill 实时审批 ${choice} 并回传有证据摘要`, async () => {
+for (const choice of ['direct', 'deny'] as const)
+    test(`独立 Skill 无审批执行策略 ${choice} 并回传有证据摘要`, async () => {
         let count = 0;
         const fixture = await runtimeFixture(() => ++count === 1 ? call('write_file', { path: 'child.txt', content: 'child' }, 'child-write') : say(count === 2 ? '子执行完成' : '主回复'), { terminal: true });
         try {
             await writeSkill(fixture, 'worker', { mode: 'isolated', tools: ['write_file'] });
-            const running = fixture.controller.handleLine('/skill run worker 参数');
-            await waitUntil(() => /\/approve ([\w-]+) </.test(fixture.output()));
-            const id = /\/approve ([\w-]+) </.exec(fixture.output())?.[1];
-            assert.ok(id);
-            assert.equal(fixture.server.requests.length, 1);
-            await fixture.controller.handleLine(`/approve ${id} ${choice}`);
-            await running;
-            if (choice === 'once')
+            if(choice==='deny')await writeFile(path.join(fixture.root,'.orbitcode/permissions.yaml'),'rules:\n  "write_file(child.txt)": deny\n');
+            await fixture.controller.handleLine('/skill run worker 参数');
+            if (choice === 'direct')
                 assert.equal(await readFile(path.join(fixture.root, 'child.txt'), 'utf8'), 'child');
             else
                 await assert.rejects(readFile(path.join(fixture.root, 'child.txt')));
@@ -27,7 +22,7 @@ for (const choice of ['once', 'deny'] as const)
             assert.equal(fixture.errors(), '');
             const parent = await fixture.log.findAllForConversation(saved.summary.id);
             assert.equal(parent.length, 1);
-            assert.equal(parent[0].sideEffect, choice === 'once' ? 'applied' : 'none');
+            assert.equal(parent[0].sideEffect, choice === 'direct' ? 'applied' : 'none');
             assert.ok(saved.displayMessages.at(-1)?.toolExecutions?.some(tool => tool.name === 'Skill worker / write_file'));
             assert.ok(!JSON.stringify(saved.context).includes('child-write'));
         }
@@ -35,7 +30,7 @@ for (const choice of ['once', 'deny'] as const)
             await fixture.close();
         }
     });
-test('子独立递归拒绝且父取消能结束审批等待', async () => {
+test('子独立递归仍被拒绝', async () => {
     let count = 0;
     const fixture = await runtimeFixture(() => ++count === 1 ? call('load_skill', { name: 'worker', arguments: '' }) : say('子结束'), { terminal: true });
     try {

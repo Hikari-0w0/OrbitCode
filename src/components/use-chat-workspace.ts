@@ -9,11 +9,11 @@ import { waitForCancelledTurnCheckpoint } from "@/components/cancelled-turn-reco
 import { type ContextCompressionUiState, } from "@/components/context-compression-control";
 import { chatSessionReducer, INITIAL_CHAT_SESSION_STATE, } from "@/components/chat-session-state";
 import type { AgentMode } from "@/core/agent-events";
+import type { ParentExecutionMode } from "@/core/sub-agents/parent-execution";
 import type { ConversationSummary, } from "@/core/conversations/types";
-import type { PermissionUserDecision } from "@/core/permissions/approval";
 import type { PermissionMode } from "@/core/permissions/types";
 import type { PlainConversationMessage } from "@/models/provider";
-import { parseProviderCatalogResponse, parseConversationCatalogResponse, parseConversationDetailResponse, parseContextCompressionResponse, parsePermissionDecisionResponse, parsePermissionSessionResponse, parseWebApiError, parseWebChatEvents, parseWorkspaceCatalogResponse, readWebStream, type ProviderSummary, type ConversationDetailResponse, type WebApiError, type WebChatRequest, type WorkspaceSummary, } from "@/web/chat-contract";
+import { parseProviderCatalogResponse, parseConversationCatalogResponse, parseConversationDetailResponse, parseContextCompressionResponse, parsePermissionSessionResponse, parseWebApiError, parseWebChatEvents, parseWorkspaceCatalogResponse, readWebStream, type ProviderSummary, type ConversationDetailResponse, type WebApiError, type WebChatRequest, type WorkspaceSummary, } from "@/web/chat-contract";
 import { createDraftStore } from "./draft-store";
 import { useDialogRequest } from "./ui/use-dialog-request";
 import { useBeforeUnload } from "./navigation-guard";
@@ -34,6 +34,8 @@ type PermissionSessionUi = {
 };
 type ConversationUiState = "loading" | "ready" | "error";
 export function useChatWorkspace() {
+    const [delegationKind, setDelegationKind] = useState<import("@/core/sub-agents/parent-execution").DelegationKind | undefined>();
+    const [parentExecutionMode, setParentExecutionMode] = useState<ParentExecutionMode>("collaborate");
     const { ask, dialog } = useDialogRequest();
     const [drafts] = useState(() => createDraftStore(() => typeof window === "undefined" ? undefined : window.sessionStorage));
     const loadSequence = useRef(0);
@@ -54,7 +56,6 @@ export function useChatWorkspace() {
         status: "loading",
         mode: "default",
     });
-    const [permissionModeUpdating, setPermissionModeUpdating] = useState(false);
     const [compressionState, setCompressionState] = useState<ContextCompressionUiState>({ status: "idle" });
     const [conversationExporting, setConversationExporting] = useState(false);
     const settlingRef = useRef(false);
@@ -224,7 +225,6 @@ export function useChatWorkspace() {
     }, []);
     const currentProvider = providers.find((provider) => provider.name === session.selectedProvider);
     const isStreaming = session.requestState === "streaming" || session.requestState === "stopping";
-    const isAwaitingPermission = session.messages.some((message) => message.runtimePermissions?.some(request => request.state === "awaiting") || message.toolExecutions?.some((execution) => execution.state === "awaiting-approval"));
     const status: UiStatus = isStreaming
         ? session.requestState
         : catalogState === "ready"
@@ -239,7 +239,7 @@ export function useChatWorkspace() {
         conversationState !== "ready" ||
         session.conversationAvailability !== "ready" ||
         !session.conversationId ||
-        (isStreaming && !isAwaitingPermission);
+        isStreaming;
     const notice = catalogError ??
         (permissionSession.status === "error" ? permissionSession.error : undefined) ??
         conversationError ??
@@ -538,37 +538,7 @@ export function useChatWorkspace() {
             setConversationExporting(false);
         }
     }
-    async function selectPermissionMode(mode: PermissionMode): Promise<void> {
-        const current = permissionSessionRef.current;
-        if (current.status !== "ready" || permissionModeUpdating || current.mode === mode) {
-            return;
-        }
-        setPermissionModeUpdating(true);
-        try {
-            const response = await fetch(`/api/permission-sessions/${current.id}`, {
-                method: "PATCH",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({ mode }),
-            });
-            const value: unknown = await response.json();
-            if (!response.ok) {
-                throw new Error(parseWebApiError(value)?.error ?? "无法更新权限模式。");
-            }
-            const updated = parsePermissionSessionResponse(value);
-            if (permissionSessionRef.current.status === "ready" && permissionSessionRef.current.id === updated.sessionId) {
-                setPermissionSession({ status: "ready", id: updated.sessionId, mode: updated.mode });
-            }
-        }
-        catch (error) {
-            dispatch({
-                type: "notice-set",
-                notice: safeErrorMessage(error, "无法更新权限模式。"),
-            });
-        }
-        finally {
-            setPermissionModeUpdating(false);
-        }
-    }
+
     function selectMode(mode: AgentMode, clearDraft = false): void {
         if (controlsDisabled)
             return;
@@ -663,6 +633,7 @@ export function useChatWorkspace() {
                     mode: requestMode,
                     modeTurn,
                     input,
+                    parentExecution: {version:1,mode:parentExecutionMode,...(delegationKind?{delegationKind}:{})},
                 } satisfies WebChatRequest),
                 signal: controller.signal,
             });
@@ -685,7 +656,7 @@ export function useChatWorkspace() {
                     if (event.event.type === "progress")
                         setSkillRunStatus(`Skill ${event.name}：${event.event.phase === "model" ? "请求模型" : "执行工具"}`);
                     else if (event.event.type === "permission-requested")
-                        setSkillRunStatus(`Skill ${event.name}：等待审批`);
+                        setSkillRunStatus(`Skill ${event.name}：历史授权记录（审批已移除）`);
                     else if (event.event.type === "stopped")
                         setSkillRunStatus(`Skill ${event.name}：${event.event.reason}`);
                     const child = skillDisplayEvent(event);
@@ -846,32 +817,6 @@ export function useChatWorkspace() {
             setConversationError(safeErrorMessage(error, "无法同步停止后的会话记录。"));
         }
     }
-    async function submitPermissionDecision(requestId: string, decision: PermissionUserDecision): Promise<void> {
-        const current = permissionSessionRef.current;
-        if (current.status !== "ready")
-            return;
-        dispatch({ type: "permission-submitting", requestId });
-        try {
-            const response = await fetch(`/api/permission-sessions/${current.id}/decisions`, {
-                method: "POST",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({ requestId, decision }),
-            });
-            const value: unknown = await response.json();
-            if (!response.ok) {
-                throw new Error(parseWebApiError(value)?.error ?? "无法提交授权决定。");
-            }
-            parsePermissionDecisionResponse(value);
-            dispatch({ type: "permission-submitted", requestId });
-        }
-        catch (error) {
-            dispatch({
-                type: "permission-submit-failed",
-                requestId,
-                error: safeErrorMessage(error, "无法提交授权决定，请重试。"),
-            });
-        }
-    }
     async function compressContext(): Promise<void> {
         if (!sessionRef.current.conversationId ||
             sessionRef.current.conversationAvailability !== "ready" ||
@@ -947,12 +892,12 @@ export function useChatWorkspace() {
         else
             void refreshConversationList();
     }
-    return { session, providers, workspaces, conversations, catalogState, conversationState, permissionSession,
-        permissionModeUpdating, compressionState, conversationExporting, isStreaming, isAwaitingPermission, status,
+    return { session, providers, workspaces, conversations, catalogState, conversationState, permissionSession, delegationKind, setDelegationKind, parentExecutionMode, setParentExecutionMode,
+        compressionState, conversationExporting, isStreaming, status,
         bindingControlsDisabled, controlsDisabled, notice, currentProvider, skillRunStatus,
         runStartedAt: runStartedAtRef.current, dialog, loadConversation, createConversation, renameConversation,
-        deleteConversation, clearConversation, exportConversation, selectWorkspace, selectProvider, selectPermissionMode,
-        selectMode, submitMessage, submitInput, executePlan, stopGeneration, submitPermissionDecision, compressContext,
+        deleteConversation, clearConversation, exportConversation, selectWorkspace, selectProvider,
+        selectMode, submitMessage, submitInput, executePlan, stopGeneration, compressContext,
         retryUnsavedTurn, changeDraft, reload, openSettings, onCleanup };
 }
 class WebRequestError extends Error {

@@ -23,34 +23,25 @@ export function evaluatePermission(options: {
       source: "rules" as const,
       risk: permissionRisk(options.subject),
       matches: merged.matches,
-      message: `匹配 ${merged.matches.length} 条权限规则，合并结果为 ${merged.decision}。`,
+      message: `匹配 ${merged.matches.length} 条权限规则，结果为 ${merged.decision === "deny" ? "拒绝" : "允许"}${merged.decision === "ask" ? "（旧 ask 规则兼容为直接允许）" : ""}。`,
     };
     return toEvaluation(merged.decision, reason);
   }
-  const decision = defaultDecision(options.mode, options.subject.toolKind);
+  const decision = "allow";
   const reason = {
     source: "mode" as const,
     risk: permissionRisk(options.subject),
     mode: options.mode,
-    message: `没有匹配规则，使用 ${options.mode} 权限模式的默认结果 ${decision}。`,
+    message: "没有匹配拒绝规则，按自主执行策略直接允许。",
   };
   return toEvaluation(decision, reason);
-}
-
-function defaultDecision(
-  mode: PermissionMode,
-  toolKind: PermissionSubject["toolKind"],
-): PermissionDecision {
-  if (mode === "strict") return "ask";
-  if (mode === "permissive") return "allow";
-  return toolKind === "read" ? "allow" : "ask";
 }
 
 function toEvaluation(
   decision: PermissionDecision,
   reason: PermissionEvaluation["reason"],
 ): PermissionEvaluation {
-  if (decision === "allow") return { kind: "allow", reason };
-  if (decision === "ask") return { kind: "ask", reason };
+  // 旧 ask 配置继续可读，但运行时不再建立审批等待。
+  if (decision !== "deny") return { kind: "allow", reason };
   return { kind: "deny", reason, errorKind: "permission-denied" };
 }

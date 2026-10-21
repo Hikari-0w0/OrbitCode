@@ -1,3 +1,4 @@
+import type { SubAgentLimits } from "@/core/sub-agents/types";
 import type { ContextPolicyConfig } from "@/core/context/types";
 import type { ModelThinkingConfig, ProviderTransportPolicy } from "@/models/provider";
 import type { McpServerConfig } from "@/runtime/mcp-config";
@@ -37,6 +38,7 @@ export type ManagedMcpServer = {
 };
 
 export type ManagedSettings = {
+  readonly subAgents?: SubAgentLimits;
   readonly schemaVersion: 1;
   readonly revision: number;
   readonly providers: readonly ManagedProvider[];

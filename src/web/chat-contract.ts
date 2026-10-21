@@ -26,7 +26,8 @@ import type {
   ConversationCheckpoint,
   ConversationSummary,
 } from "@/core/conversations/types";
-import { isCompletionAssessment } from "@/core/completion-tracker";
+import { isCompletionAssessment } from "@/core/completion-assessment";
+import { isParentExecutionContract, type ParentExecutionContract } from "@/core/sub-agents/parent-execution";
 import { parseConversationCheckpoint } from "@/core/conversations/validation";
 import { parseServerSentEvents, SseError } from "@/models/sse";
 import type {
@@ -51,6 +52,7 @@ export const MAX_CONTEXT_SESSION_ID_LENGTH = 128;
 const MAX_WEB_AGENT_ITERATION = Number.MAX_SAFE_INTEGER;
 
 export type WebChatRequest = {
+  readonly parentExecution?: ParentExecutionContract;
   readonly skillCatalogRevision?: string;
   readonly conversationId: string;
   readonly revision: number;
@@ -168,6 +170,7 @@ export function parseWebChatRequest(value: unknown): WebChatRequest {
       "mode",
       "modeTurn",
       "input",
+      ...(value.parentExecution === undefined ? [] : ["parentExecution"]),
       ...(value.skillCatalogRevision === undefined ? [] : ["skillCatalogRevision"]),
     ])
   ) {
@@ -198,9 +201,11 @@ export function parseWebChatRequest(value: unknown): WebChatRequest {
     );
   }
 
+  if (value.parentExecution !== undefined && !isParentExecutionContract(value.parentExecution)) throw new WebChatContractError("父级执行契约无效。");
   if (value.skillCatalogRevision !== undefined && (typeof value.skillCatalogRevision !== "string" || !/^[a-f0-9]{64}$/.test(value.skillCatalogRevision))) throw new WebChatContractError("Skill 目录修订号无效。");
   return {
     ...(typeof value.skillCatalogRevision === "string" ? { skillCatalogRevision: value.skillCatalogRevision } : {}),
+    ...(isParentExecutionContract(value.parentExecution) ? { parentExecution: value.parentExecution } : {}),
     conversationId: value.conversationId,
     revision: value.revision,
     permissionSessionId: value.permissionSessionId,

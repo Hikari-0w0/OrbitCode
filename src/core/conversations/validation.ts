@@ -1,3 +1,4 @@
+import {isParentExecutionContract} from "@/core/sub-agents/parent-execution";
 import { validSkillState } from "@/core/skills/types";
 import { isMcpInitializationRecord } from "@/core/mcp-events";
 import {
@@ -8,7 +9,7 @@ import {
   type ConversationCheckpoint,
   type ConversationSummary,
 } from "@/core/conversations/types";
-import { isCompletionAssessment } from "@/core/completion-tracker";
+import { isCompletionAssessment } from "@/core/completion-assessment";
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const STOP_REASONS = new Set([
@@ -71,7 +72,7 @@ export function parseConversationSummary(value: unknown): ConversationSummary {
 export function parseConversationCheckpoint(value: unknown, options: { readonly allowIncompleteTools?: boolean } = {}): ConversationCheckpoint {
   if (
     !isRecord(value) ||
-    !hasAllowedFields(value, ["schemaVersion", "summary", "mode", "modeTurn", "displayMessages", "context"], ["lastTurn", "lifecycleEpoch", "skills"]) ||
+    !hasAllowedFields(value, ["schemaVersion", "summary", "mode", "modeTurn", "displayMessages", "context"], ["lastTurn", "lifecycleEpoch", "skills", "childResultReceipts"]) ||
     value.schemaVersion !== CONVERSATION_SCHEMA_VERSION ||
     !Array.isArray(value.displayMessages) ||
     !isRecord(value.context) ||
@@ -87,8 +88,10 @@ export function parseConversationCheckpoint(value: unknown, options: { readonly 
   if (value.lifecycleEpoch !== undefined && (typeof value.lifecycleEpoch !== "string" || !SAFE_ID.test(value.lifecycleEpoch) || value.lifecycleEpoch.length > 128)) throw invalidStoredConversation();
   if (value.lastTurn !== undefined) {
     const turn = value.lastTurn;
-    if (!isRecord(turn) || !hasExactFields(turn, ["turnId", "endedAt", "stopReason", "memoryEligibility"]) || typeof turn.turnId !== "string" || !SAFE_ID.test(turn.turnId) || turn.turnId.length > 128 || typeof turn.endedAt !== "string" || !Number.isFinite(Date.parse(turn.endedAt)) || !STOP_REASONS.has(String(turn.stopReason)) || typeof turn.memoryEligibility !== "boolean" || (turn.memoryEligibility && turn.stopReason !== "final-response")) throw invalidStoredConversation();
+    if(isRecord(turn)&&turn.parentExecution!==undefined&&!isParentExecutionContract(turn.parentExecution))throw invalidStoredConversation();
+    if (!isRecord(turn) || !hasAllowedFields(turn, ["turnId", "endedAt", "stopReason", "memoryEligibility"], ["parentExecution"]) || typeof turn.turnId !== "string" || !SAFE_ID.test(turn.turnId) || turn.turnId.length > 128 || typeof turn.endedAt !== "string" || !Number.isFinite(Date.parse(turn.endedAt)) || !STOP_REASONS.has(String(turn.stopReason)) || typeof turn.memoryEligibility !== "boolean" || (turn.memoryEligibility && turn.stopReason !== "final-response")) throw invalidStoredConversation();
   }
+  if (value.childResultReceipts !== undefined && (!Array.isArray(value.childResultReceipts) || value.childResultReceipts.length > 256 || new Set(value.childResultReceipts).size !== value.childResultReceipts.length || value.childResultReceipts.some(id => typeof id !== "string" || !SAFE_ID.test(id) || id.length > 128))) throw invalidStoredConversation();
   if (value.skills !== undefined && !validSkillState(value.skills)) throw invalidStoredConversation();
   const summary = parseConversationSummary(value.summary);
   for (const message of value.displayMessages) validateDisplayMessage(message);
@@ -166,6 +169,10 @@ function validateDisplayMessage(value: unknown): void {
 function validateManagedMessage(value: unknown): void {
   if (!isRecord(value) || typeof value.kind !== "string") {
     throw invalidStoredConversation();
+  }
+  if (value.kind === "child-result") {
+    if (!hasExactFields(value, ["kind", "taskId", "content"]) || typeof value.taskId !== "string" || !SAFE_ID.test(value.taskId) || typeof value.content !== "string" || Buffer.byteLength(value.content) > 16384) throw invalidStoredConversation();
+    return;
   }
   if (value.kind === "user" || value.kind === "assistant" || value.kind === "boundary") {
     if (!hasExactFields(value, ["kind", "content"]) || typeof value.content !== "string") throw invalidStoredConversation();

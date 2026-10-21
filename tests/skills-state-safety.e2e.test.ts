@@ -52,7 +52,7 @@ test("Skill 保存失败后仅重试保存，不重放已经应用的写入", as
     const fixture = await runtimeFixture(() => ++requests === 1 ? call("write_file", { path: "once.txt", content: "first" }) : say("已写入"), { storeFactory: root => new FailOnceSkillStore(root) });
     try {
         await writeSkill(fixture, "writer", { tools: ["write_file"] });
-        await fixture.controller.handleLine("/permissions permissive");
+
         await fixture.controller.handleLine("/skill run writer");
         assert.equal(await readFile(path.join(fixture.root, "once.txt"), "utf8"), "first");
         const before = await fixture.checkpoint(), pending = fixture.manager.pendingSave(before.summary.id);

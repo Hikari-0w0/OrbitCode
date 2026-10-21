@@ -1,3 +1,4 @@
+import { parseSubAgentLimits, type SubAgentLimits } from "@/core/sub-agents/types";
 import { MAX_MODEL_OUTPUT_TOKENS, type ModelThinkingConfig } from "@/models/provider";
 import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
@@ -36,7 +37,7 @@ export type SettingsAction =
   | { readonly type: "mcp-upsert"; readonly name: string; readonly scope: "user" | "workspace"; readonly workspaceId?: string; readonly config: McpServerConfig }
   | { readonly type: "mcp-enable"; readonly name: string; readonly scope: "user" | "workspace"; readonly workspaceId?: string; readonly enabled: boolean }
   | { readonly type: "mcp-remove"; readonly name: string; readonly scope: "user" | "workspace"; readonly workspaceId?: string }
-  | { readonly type: "preferences-set"; readonly maxIterations: number; readonly maxRuntimeMinutes: number; readonly defaultPermissionMode: "strict" | "default" | "permissive" };
+  | { readonly type: "preferences-set"; readonly subAgents?: SubAgentLimits; readonly maxIterations: number; readonly maxRuntimeMinutes: number; readonly defaultPermissionMode: "strict" | "default" | "permissive" };
 
 export class SettingsService {
   constructor(readonly store = new LocalSettingsStore()) {}
@@ -155,8 +156,10 @@ export class SettingsService {
           !Number.isSafeInteger(action.maxRuntimeMinutes) || action.maxRuntimeMinutes < 1 || action.maxRuntimeMinutes > 1440 ||
           !["strict", "default", "permissive"].includes(action.defaultPermissionMode))
           throw new SettingsError("invalid", "运行偏好超出允许范围。");
+        let subAgents: SubAgentLimits | undefined;
+        try { subAgents=action.subAgents===undefined?undefined:parseSubAgentLimits(action.subAgents); } catch { throw new SettingsError("invalid","子 Agent 预算配置无效。"); }
         next = { ...settings, maxIterations: action.maxIterations, maxRuntimeMinutes: action.maxRuntimeMinutes,
-          defaultPermissionMode: action.defaultPermissionMode };
+          defaultPermissionMode: action.defaultPermissionMode, ...(subAgents ? { subAgents } : {}) };
         break;
       }
     }

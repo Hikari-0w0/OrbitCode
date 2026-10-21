@@ -1,3 +1,16 @@
+import { readOutputArtifact } from "@/runtime/child-execution/output-verifier";
+import { ModelRequestBudget } from "@/runtime/child-execution/request-budget";
+import { childWorkspaceAccess } from "@/runtime/child-execution/workspace-policy";
+import {ParentExecutionPolicy} from "@/tools/parent-execution-policy";
+import {isParentExecutionContract} from "@/core/sub-agents/parent-execution";
+import { aggregateTaskUsage, combineModelUsage } from "@/runtime/sub-agent-usage";
+import { BackgroundTaskManager } from "@/runtime/background-task-manager";
+import { WorkspaceExecutionCoordinator } from "@/runtime/workspace-execution-coordinator";
+import { ChildResultDelivery } from "@/runtime/child-result-delivery";
+import { loadAgentCatalog } from "@/runtime/agents/catalog";
+import { createDelegationTool } from "@/runtime/agents/delegation";
+import { resolveSubAgentLimits } from "@/runtime/config";
+import type { TaskScope } from "@/core/sub-agents/types";
 import { createIsolatedSkillSession } from "@/runtime/skills/session-factory";
 import { ModelUsageTracker } from "@/models/usage-tracker";
 import { loadSkillCatalog } from "@/runtime/skills/catalog";
@@ -13,6 +26,7 @@ import { preloadSkill } from "@/runtime/skills/preload";
 import { parseSkillCommand } from "@/runtime/skill-commands";
 import { approximatePromptTokens } from "@/core/context/token-estimator";
 import { buildSystemPromptMessages } from "@/core/system-prompt/assemble";
+import { toolFailure } from "@/tools/types";
 import { successfulToolResult, type ToolRegistry } from "@/tools/registry";
 import {sourceKey} from "@/runtime/memory-store";
 import {serializeNote} from "@/runtime/memory-validation";
@@ -39,7 +53,7 @@ import { createDefaultToolRegistry } from "@/tools/default-registry";
 import type { CommandSandbox } from "@/tools/command-sandbox";
 import { ManagedProcessController } from "@/tools/managed-process";
 import { PermissionGateway } from "@/tools/permission-gateway";
-import { addLocalPermissionAllow, loadPermissionRules, type PermissionConfigLocations } from "@/tools/permission-config";
+import { loadPermissionRules, type PermissionConfigLocations } from "@/tools/permission-config";
 import { resolveRuntimeProvider, type ProviderContext } from "@/runtime/config";
 import { resolveWorkspaceBoundary, WorkspaceCatalogError, type WorkspaceCatalog } from "@/runtime/workspace-config";
 import { createPromptEnvironment } from "@/runtime/prompt-environment";
@@ -49,6 +63,8 @@ import type { ConversationOperationGuard, GuardedConversationOperation } from "@
 import { runAgentTurn, type PreparedAgentTurn } from "@/runtime/run-agent-turn";
 
 export type RunTurnInput = {
+  readonly parentExecution?: import("@/core/sub-agents/parent-execution").ParentExecutionContract;
+  readonly interactive?: boolean;
   readonly skillCatalogRevision?: string;
   readonly conversationId: string;
   readonly expectedRevision: number;
@@ -75,11 +91,30 @@ export type AgentRuntimeOptions = {
   readonly permissionLocations?: (workspaceRoot: string) => PermissionConfigLocations;
 };
 export class AgentRuntime {
+  private readonly activeModes=new Map<string,AgentMode>();
+  private readonly shutdown=new AbortController();
+  private readonly parentUsage=new Map<string, import("@/models/usage-tracker").ModelUsageSummary>();
+  private readonly requestBudgets=new Map<string,{scope:TaskScope;budget:ModelRequestBudget;active:boolean}>();
+  private pruneRequestBudgets() {
+    for(const [id,entry] of this.requestBudgets) {
+      if(this.requestBudgets.size<=128)break;
+      if(!entry.active&&entry.budget.snapshot().inFlight===0&&!this.tasks.list(entry.scope).some(task=>task.state.status!=="terminal"&&task.admission?.requestBudget.id===id))this.requestBudgets.delete(id);
+    }
+  }
+  usageFor(scope:TaskScope) { return {...aggregateTaskUsage(this.parentUsage.get(scope.conversationId)??{scope:"self",categories:[]},this.tasks.list(scope).flatMap(task=>task.state.status==="terminal"?[{id:task.id,usage:task.state.result.usage}]:[])),requestBudgets:[...this.requestBudgets.values()].filter(entry=>entry.scope.conversationId===scope.conversationId&&entry.scope.lifecycleEpoch===scope.lifecycleEpoch).map(entry=>entry.budget.snapshot())}; }
+  readonly tasks = new BackgroundTaskManager();
+  async readTaskReply(conversationId:string,taskId:string,offset=0,limit=4000,signal=new AbortController().signal) { return this.options.store.childResults.read(await this.taskScope(conversationId),taskId,offset,limit,signal); }
+  private readonly writes = new WorkspaceExecutionCoordinator();
+  private readonly taskScopes = new Map<string, TaskScope>();
+  async taskScope(conversationId:string):Promise<TaskScope> { const cp=await this.options.store.load(conversationId); return {conversationId,lifecycleEpoch:cp.lifecycleEpoch??this.taskScopes.get(conversationId)?.lifecycleEpoch??"unstarted"}; }
+  async inspectAgents(conversationId:string) { const cp=await this.options.store.load(conversationId);const config=await this.options.loadConfig();const workspace=await resolveWorkspaceBoundary(await this.options.loadWorkspaces(config),cp.summary.workspaceId);const catalog=await loadAgentCatalog({workspaceRoot:workspace.root,userRoot:this.options.userConfigRoot??userConfigurationRoot()});return {entries:[...catalog.entries.values()],complete:catalog.complete,diagnostics:catalog.diagnostics}; }
+  async invalidateTasks(cp:ConversationCheckpoint) { this.parentUsage.delete(cp.summary.id); for(const [id,entry] of this.requestBudgets)if(entry.scope.conversationId===cp.summary.id)this.requestBudgets.delete(id); await this.tasks.invalidate({conversationId:cp.summary.id,lifecycleEpoch:cp.lifecycleEpoch??this.taskScopes.get(cp.summary.id)?.lifecycleEpoch??"unstarted"});this.taskScopes.delete(cp.summary.id); }
+
   private readonly pendingMemory = new Map<string, {turnId: string; workspaceRoot: string; config: ResolvedProviderConfig}>();
   readonly memory: MemoryService;
   private readonly mcp: McpConnectionManager;
   constructor(private readonly options: AgentRuntimeOptions) { this.mcp = options.mcpConnections ?? new McpConnectionManager(); this.memory = new MemoryService(options.userConfigRoot ?? userConfigurationRoot(), options.store, options.guard); }
-  async close(): Promise<void> { this.pendingMemory.clear(); await Promise.all([this.memory.close(), this.mcp.close()]); }
+  async close(): Promise<void> { this.shutdown.abort(); await this.tasks.close(); this.requestBudgets.clear(); this.pendingMemory.clear(); await Promise.all([this.memory.close(), this.mcp.close()]); }
   async memoryStoresFor(conversationId: string) {
     const checkpoint = await this.options.store.load(conversationId);
     const context = await this.options.loadConfig();
@@ -146,18 +181,23 @@ export class AgentRuntime {
     this.pendingMemory.delete(checkpoint.summary.id);
     this.memory.scheduleSavedTurn(checkpoint, pending.workspaceRoot, pending.config, this.options.createProvider?.(pending.config));
   }
-  async scheduleSaved(checkpoint: ConversationCheckpoint): Promise<void> { this.scheduleOriginalSaved(checkpoint); }
+  async scheduleSaved(checkpoint: ConversationCheckpoint): Promise<void> { const scope=await this.taskScope(checkpoint.summary.id);for(const id of checkpoint.childResultReceipts??[]) {try{this.tasks.commit(scope,id,checkpoint.summary.revision);}catch{}} this.scheduleOriginalSaved(checkpoint); }
   async *streamTurn(input: RunTurnInput) {
     const turn = await this.prepare(input);
     yield* runAgentTurn({ ...turn, signal: input.signal });
   }
   async prepare(input: RunTurnInput): Promise<PreparedAgentTurn> {
+    input={...input,signal:AbortSignal.any([input.signal,this.shutdown.signal])};
+    input.signal.throwIfAborted();
+    if(input.parentExecution!==undefined&&!isParentExecutionContract(input.parentExecution))throw new Error("父级执行契约无效。");
+    const parentExecution=input.parentExecution??{version:1,mode:"collaborate"} as const;
     let activeTurn: { readonly sessionId: string; readonly turnId: string } | undefined;
     let activeConversation: GuardedConversationOperation | undefined;
     let managedProcesses: ManagedProcessController | undefined;
     let savedTurn = false;
     let savedCheckpoint: ConversationCheckpoint | undefined;
     const mcpLeases: McpConnectionLease[] = [];
+    let requestBudgetId: string | undefined;
     const cleanup = async () => {
       const outcomes = await Promise.allSettled([
         ...mcpLeases.map((lease) => lease.release()),
@@ -172,6 +212,9 @@ export class AgentRuntime {
         }),
       ]);
       await activeConversation?.finish();
+      if(activeConversation)this.activeModes.delete(input.conversationId);
+      if(savedTurn)this.taskScopes.delete(input.conversationId);
+      if(requestBudgetId){const entry=this.requestBudgets.get(requestBudgetId);if(entry)entry.active=false;this.pruneRequestBudgets();}
       if (outcomes.some((result) => result.status === "rejected")) throw new Error("运行资源清理失败。");
     };
     try {
@@ -216,14 +259,22 @@ export class AgentRuntime {
         input.signal,
       );
       activeConversation = conversationOperation;
+      this.activeModes.set(input.conversationId,input.mode);
       const locked = await this.options.store.load(input.conversationId);
       if (locked.summary.revision !== input.expectedRevision) throw new ConversationRepositoryError("conflict", "会话已更新，请重新加载。");
       const runtimeTurnId = randomUUID();
       const lifecycleEpoch = checkpoint.lifecycleEpoch ?? randomUUID();
+      const taskScope = {conversationId:input.conversationId,lifecycleEpoch};
+      this.taskScopes.set(input.conversationId,taskScope);
+      const childDelivery = new ChildResultDelivery(this.tasks,taskScope,runtimeTurnId,locked.childResultReceipts);
+      const subLimits=resolveSubAgentLimits(context);this.tasks.configure(subLimits);
+      const agentCatalog=await loadAgentCatalog({workspaceRoot:workspace.root,userRoot:this.options.userConfigRoot??userConfigurationRoot(),signal:input.signal});
       const background = await prepareBackground({ workspaceRoot: workspace.root, userConfigRoot: this.options.userConfigRoot ?? userConfigurationRoot(), checkpoint: locked, signal: input.signal });
       const readMemory = background.snapshot.optional.memoryIndex ? background.readMemory : undefined;
       const modelUsage = new ModelUsageTracker();
-      const baseProvider = this.options.createProvider?.(providerConfig) ?? createChatProvider(providerConfig);
+      const requestBudget=new ModelRequestBudget(runtimeTurnId,subLimits.groupRequests,subLimits.groupTokens);
+      requestBudgetId=runtimeTurnId;this.requestBudgets.set(runtimeTurnId,{scope:taskScope,budget:requestBudget,active:true});this.pruneRequestBudgets();
+      const baseProvider = requestBudget.wrap(this.options.createProvider?.(providerConfig) ?? createChatProvider(providerConfig),providerConfig.maxOutputTokens);
       const provider = modelUsage.wrap(baseProvider, "agent");
       const contextManager = new ContextManager({
         sessionId: input.conversationId,
@@ -233,7 +284,7 @@ export class AgentRuntime {
         summaryProvider: modelUsage.wrap(baseProvider, "summary"),
         initialState: checkpoint.context,
       });
-      const readContext = (request: {
+      const readContext = { read: (request: {
         readonly reference: string;
         readonly offset: number;
         readonly limit: number;
@@ -241,14 +292,13 @@ export class AgentRuntime {
       }) => this.options.store.read({
         sessionId: input.conversationId,
         ...request,
-      });
+      }), search: (request: import("@/core/context/context-search").ContextSearchInput) => this.options.store.search({ sessionId: input.conversationId, ...request }) };
       managedProcesses = new ManagedProcessController(this.options.sandbox, workspace);
       const completionTracker = new CompletionTracker();
       const registry = createDefaultToolRegistry(
         this.options.sandbox,
         readContext,
         managedProcesses,
-        completionTracker,
         [],
         readMemory,
       );
@@ -266,22 +316,15 @@ export class AgentRuntime {
             permissionMode: () =>
               this.options.permissions.getSession(input.permissionSessionId).mode,
             workspace,
-            broker: turn.broker,
             loadRules: async () =>
               (await loadPermissionRules({
                 workspaceRoot: workspace.root,
                 toolTargets,
                 ...(this.options.permissionLocations ? { locations: this.options.permissionLocations(workspace.root) } : {}),
               })).rules,
-            persistAllow: async (expression) => {
-              await addLocalPermissionAllow({
-                workspaceRoot: workspace.root,
-                toolTargets,
-                expression,
-                ...(this.options.permissionLocations ? { locations: this.options.permissionLocations(workspace.root) } : {}),
-              });
-            },
+
           });
+      const parentRules=(await loadPermissionRules({workspaceRoot:workspace.root,toolTargets,...(this.options.permissionLocations?{locations:this.options.permissionLocations(workspace.root)}:{})})).rules;
       const catalog = await loadSkillCatalog({ workspaceRoot: workspace.root, userRoot: this.memory.userConfigRoot, signal: input.signal });
       if (input.skillCatalogRevision && input.skillCatalogRevision !== catalog.revision) throw new ConversationRepositoryError("conflict", "Skill 目录已更新，请刷新列表后重新选择。");
       let skillSession: SkillSession | undefined;
@@ -290,7 +333,7 @@ export class AgentRuntime {
       const buildAgent = (externalTools: readonly RegisteredTool[], deadlineMs: number) => {
         for (const tool of externalTools) if (tool.externalIdentity) toolIdentities.set(tool.name, tool.externalIdentity);
         const modelIds = new Set(context.providers.map(provider => provider.name));
-        const common = { maxIterations: context.maxIterations, maxRuntimeMs: Math.max(1, Math.min(context.maxRuntimeMs, deadlineMs - Date.now())), promptEnvironment: createPromptEnvironment({ workspace: binding.workspace }), optionalPromptContext: background.snapshot.optional };
+        const common = { writes:this.writes, consumeChildResults:()=>childDelivery.consume(), maxIterations: context.maxIterations, maxRuntimeMs: Math.max(1, Math.min(context.maxRuntimeMs, deadlineMs - Date.now())), promptEnvironment: createPromptEnvironment({ workspace: binding.workspace }), optionalPromptContext: {...background.snapshot.optional,availableAgents:agentCatalog.summary || undefined,parentExecution:parentExecution.mode,delegationKind:parentExecution.delegationKind} };
         const skills = new SkillSession(locked.skills, catalog, { tools: () => new Set(combinedRegistry.descriptors().map(tool => tool.name)), providerId: binding.providerId, modelIds,
           validateCapacity: (active: readonly ActivatedSkill[]) => {
             const optional = { ...background.snapshot.optional, activatedSkills: active.map(item => item.instructions).join("\n\n") || undefined };
@@ -301,24 +344,37 @@ export class AgentRuntime {
         const resources = new SkillResources(skills, workspace);
         const load: SkillLoader = async (request, execution) => {
           try {
-            const { activation } = await skills.resolve(request.name, request.arguments, execution.signal);
+            const releaseRead = await this.writes.acquireRead(workspace.root, execution.signal);
+            const { activation } = await skills.resolve(request.name, request.arguments, execution.signal).finally(releaseRead);
             if (activation.definition.mode === "shared") { skills.activate(activation); return successfulToolResult({ name: request.name, instructions: activation.instructions, generation: skills.snapshot().generation }); }
             if (++isolatedCount > 4) throw new SkillError("capacity", "本回合独立 Skill 调用最多 4 次。");
             const parentTools = new Set(combinedRegistry.descriptors().map(tool => tool.name).filter(name => skills.active().every(item => item.definition.allowedTools.includes(name))));
-            return runIsolatedSkill({ activation, parentId: input.conversationId, parentHistory: locked.context.messages, parentStore: this.options.store, mode: input.mode, context: execution, iterations: context.maxIterations === "unlimited" ? 16 : context.maxIterations,
+            // 共享并发池的等待也计入独立 Skill 原有五分钟预算，不能排队后重新计时。
+            const isolatedDeadline=Math.min(execution.deadlineMs,Date.now()+300000);
+            const isolatedSignal=AbortSignal.any([execution.signal,AbortSignal.timeout(Math.max(1,isolatedDeadline-Date.now()))]);
+            let cleanupFailed=false;
+            let workspaceLease:import("@/runtime/workspace-execution-coordinator").TaskWorkspaceLease|undefined;
+            const skillTools=new Set([...parentTools].filter(name=>activation.definition.allowedTools.includes(name)));
+            const access=childWorkspaceAccess(skillTools,combinedRegistry.descriptors());
+            return this.tasks.withForeground(isolatedSignal, ownedSignal => {
+              if(!workspaceLease)throw new Error("独立 Skill 工作区资源未接纳。");
+              return workspaceLease.run(()=>runIsolatedSkill({ onCleanupFailure:()=>{cleanupFailed=true;}, activation, parentId: input.conversationId, parentHistory: locked.context.messages, parentStore: this.options.store, mode: input.mode, context: {...execution,signal:ownedSignal,deadlineMs:isolatedDeadline}, iterations: context.maxIterations === "unlimited" ? 16 : context.maxIterations,
               runLog: { sink: this.options.log, source: input.source, conversationId: input.conversationId, providerId: activation.definition.model ?? binding.providerId, workspaceId: binding.workspace.id, revisionBefore: input.expectedRevision, parentRunId: runtimeTurnId, parentCallId: execution.callId ?? `preload:${activation.definition.name}` },
               create: async child => {
                 const childConfig = resolveRuntimeProvider(context, activation.definition.model ?? binding.providerId);
                 return createIsolatedSkillSession({ child, config: childConfig,
-                  provider: this.options.createProvider?.(childConfig) ?? createChatProvider(childConfig),
+                  provider: requestBudget.wrap(this.options.createProvider?.(childConfig) ?? createChatProvider(childConfig),childConfig.maxOutputTokens),
                   sandbox: this.options.sandbox, workspace, catalog, activation, modelIds, parentTools, externalTools, readMemory,
                   options: { ...common, permissionGatewayForMode: gatewayForMode } });
-              } });
+              } }));
+            },{acquire:async ownedSignal=>{workspaceLease=await this.writes.acquireTask(workspace.root,access,ownedSignal);},close:async()=>{workspaceLease?.release(cleanupFailed?"failed":"complete");}}).catch(error=>isolatedSignal.aborted ? toolFailure(execution.signal.aborted?"cancelled":"timeout","独立 Skill 等待或执行预算已结束。") : skillFailure(error,execution.signal));
           } catch (error) { return skillFailure(error, execution.signal); }
         };
-        const combinedRegistry: ToolRegistry = createDefaultToolRegistry(this.options.sandbox, readContext, managedProcesses, completionTracker, [...externalTools, createLoadSkillTool(load), createReadSkillResourceTool(resources)], readMemory);
-        const agent = createAgentSession({ provider, registry: combinedRegistry, workspace, skills, resources, options: { ...common, contextManager, completionTracker, permissionGatewayForMode: gatewayForMode } });
+        const delegation=createDelegationTool({requestBudget,parentExecution,verifyRead:(path,execution)=>readOutputArtifact({path,context:execution,gateway:gatewayForMode(input.mode),writes:this.writes,tools:async()=>{const current=(await this.options.store.load(input.conversationId)).skills?.active??[];return new Set(combinedRegistry.descriptors().map(t=>t.name).filter(name=>skills.active().every(active=>active.definition.allowedTools.includes(name))&&current.every(active=>active.definition.allowedTools.includes(name))));}}),childResults:this.options.store.childResults,readMemory,tasks:this.tasks,limits:subLimits,scope:taskScope,turnId:runtimeTurnId,workspace,contextManager,parentStore:this.options.store,toolDescriptors:()=>combinedRegistry.descriptors(),currentTools:async()=>{const current=(await this.options.store.load(input.conversationId)).skills?.active??[];return new Set(combinedRegistry.descriptors().map(t=>t.name).filter(name=>skills.active().every(active=>active.definition.allowedTools.includes(name))&&current.every(active=>active.definition.allowedTools.includes(name))));},catalog:signal=>loadAgentCatalog({workspaceRoot:workspace.root,userRoot:this.options.userConfigRoot??userConfigurationRoot(),signal}),skills:catalog,active:()=>skills.active(),parentTools:()=>new Set(combinedRegistry.descriptors().map(t=>t.name).filter(name=>skills.active().every(active=>active.definition.allowedTools.includes(name)))),modelIds,parentConfig:providerConfig,resolveConfig:id=>resolveRuntimeProvider(context,id),provider:config=>this.options.createProvider?.(config)??createChatProvider(config),parentIterations:context.maxIterations==="unlimited"?32:context.maxIterations,parentRuntimeMs:context.maxRuntimeMs,mode:input.mode,parentMode:this.options.permissions.getSession(input.permissionSessionId).mode,rules:parentRules,currentPermissions:async()=>({agentMode:this.activeModes.get(input.conversationId)??(await this.options.store.load(input.conversationId)).mode,mode:this.options.permissions.getSession(input.permissionSessionId).mode,rules:(await loadPermissionRules({workspaceRoot:workspace.root,toolTargets,...(this.options.permissionLocations?{locations:this.options.permissionLocations(workspace.root)}:{})})).rules}),sandbox:this.options.sandbox,optional:background.snapshot.optional,environment:common.promptEnvironment,writes:this.writes,runLog:{sink:this.options.log,source:input.source,conversationId:input.conversationId,providerId:binding.providerId,workspaceId:binding.workspace.id,revisionBefore:input.expectedRevision},initialize:async(gateway,signal,deadlineAt,leases)=>{const ownLeases:McpConnectionLease[]=[];try{const generator=initializeMcpWorkspace({writes:this.writes,workspaceRoot:workspace.root,mode:input.mode,signal,deadlineMs:deadlineAt,load:loadMcp,manager:mcpManager,gateway,leases:ownLeases});for(;;){const next=await generator.next();if(next.done)return next.value;}}finally{leases.push(...ownLeases);}}});
+        const combinedRegistry: ToolRegistry = createDefaultToolRegistry(this.options.sandbox, readContext, managedProcesses, [...externalTools, delegation, createLoadSkillTool(load), createReadSkillResourceTool(resources)], readMemory);
+        const agent = createAgentSession({ provider, registry: combinedRegistry, workspace, skills, resources, restrict:access=>new ParentExecutionPolicy(access,parentExecution), options: { ...common, contextManager, completionTracker, permissionGatewayForMode: gatewayForMode } });
         const command = parseSkillCommand(input.input);
+        if (command && parentExecution.mode==="delegate-only") throw new SkillError("invalid-arguments", "仅委派模式不能直接执行父级 Skill，请由子任务加载或切换协作模式。");
         if (command && command.kind !== "run") throw new SkillError("invalid-arguments", "管理命令请通过 Skill 列表或 CLI 交互入口执行。");
         return command?.kind === "run" ? preloadSkill(agent, command, load, workspace, deadlineMs) : agent;
       };
@@ -332,16 +388,17 @@ export class AgentRuntime {
         ownerToken: conversationOperation.lease.ownerToken,
       });
       const mcpManager = this.mcp;
+      const writes=this.writes;
       const loadMcp = () => this.options.loadMcp?.(workspace.root, context) ?? loadMcpConfig({ workspaceRoot: workspace.root,
         environment: context.environment, managedSettings: context.managedSettings ?? null });
       return {
         initialize: async function* (signal, deadlineMs) {
-          const externalTools = yield* initializeMcpWorkspace({ workspaceRoot: workspace.root, mode: input.mode, signal, deadlineMs,
+          const externalTools = yield* initializeMcpWorkspace({ writes, workspaceRoot: workspace.root, mode: input.mode, signal, deadlineMs,
             load: loadMcp, manager: mcpManager, gateway: gatewayForMode(input.mode), leases: mcpLeases });
           return buildAgent(externalTools, deadlineMs);
         },
         maxRuntimeMs: context.maxRuntimeMs, input: input.input, mode: input.mode, modeTurn: input.modeTurn,
-        operationSignal: conversationOperation.signal,
+        operationSignal: AbortSignal.any([conversationOperation.signal,this.shutdown.signal]),
         persistTurn: async (events, initialization) => {
           const terminal = events.findLast(
             (event) => event.type === "stopped",
@@ -355,8 +412,9 @@ export class AgentRuntime {
             expectedRevision: input.expectedRevision,
             checkpoint: {
               lifecycleEpoch,
+              childResultReceipts:childDelivery.snapshot(),
               skills: skillSession?.snapshot() ?? locked.skills,
-              lastTurn: { turnId: runtimeTurnId, endedAt: new Date().toISOString(), stopReason: terminal.reason, memoryEligibility: terminal.reason === "final-response" && Boolean(terminal.finalMessage?.content.trim()) && pendingToolCalls(contextManager.persistentSnapshot().messages).length === 0 },
+              lastTurn: { parentExecution, turnId: runtimeTurnId, endedAt: new Date().toISOString(), stopReason: terminal.reason, memoryEligibility: terminal.reason === "final-response" && Boolean(terminal.finalMessage?.content.trim()) && pendingToolCalls(contextManager.persistentSnapshot().messages).length === 0 },
               schemaVersion: checkpoint.schemaVersion,
               summary: {
                 ...summary,
@@ -376,6 +434,8 @@ export class AgentRuntime {
               context: contextManager.persistentSnapshot(),
             },
           } as const;
+          this.parentUsage.set(input.conversationId,combineModelUsage(this.parentUsage.get(input.conversationId)??{scope:"self",categories:[]},modelUsage.snapshot()));
+          if(this.parentUsage.size>64){const key=this.parentUsage.keys().next().value;if(key)this.parentUsage.delete(key);}
           this.options.manager.setPendingSave(saveInput);
           if (saveInput.checkpoint.lastTurn.memoryEligibility) {
             this.pendingMemory.set(input.conversationId, {turnId: runtimeTurnId, workspaceRoot: workspace.root, config: providerConfig});
@@ -386,6 +446,7 @@ export class AgentRuntime {
             throw new Error("会话已在其他页面更新，本轮结果未覆盖磁盘记录。请刷新后重试。");
           }
           this.options.manager.clearPendingSave(input.conversationId);
+          childDelivery.commit(result.checkpoint.summary.revision);
           savedTurn = true;
           savedCheckpoint = result.checkpoint;
           return { status: "saved", revision: result.checkpoint.summary.revision };

@@ -74,22 +74,17 @@ export function summarizePermissionSubject(
 }
 
 export function permissionTargetFailure(error: unknown): ToolExecutionResult {
-  if (!(error instanceof WorkspaceError)) {
-    return toolFailure("workspace-boundary", "无法验证工具目标是否位于 Workspace 内。", {
-      retryable: true,
-    });
-  }
-  if (error.kind === "protected-path") {
-    return toolFailure("protected-path", "工具不能访问受保护的配置或凭据路径。", {
-      retryable: true,
-    });
-  }
-  if (error.kind === "not-found") {
-    return toolFailure("not-found", "工具目标不存在。", { retryable: true });
-  }
-  return toolFailure("workspace-boundary", "工具目标超出授权 Workspace 或路径无效。", {
-    retryable: true,
-  });
+  const reason = error instanceof WorkspaceError ? error.kind : "unresolved";
+  const result = error instanceof WorkspaceError && (error.kind === "not-directory" || error.kind === "not-file")
+    ? toolFailure("invalid-arguments", error.kind === "not-directory"
+      ? "工具目标要求目录，但收到文件；search_code.path 只能传目录，单文件使用 file_pattern。"
+      : "工具目标要求文件，但收到目录；先用 find_files 查找文件。", { retryable: true })
+    : error instanceof WorkspaceError && error.kind === "protected-path"
+      ? toolFailure("protected-path", "工具不能访问受保护的配置或凭据路径。", { retryable: true })
+      : error instanceof WorkspaceError && error.kind === "not-found"
+        ? toolFailure("not-found", "工具目标不存在，请先查找实际路径。", { retryable: true })
+        : toolFailure("workspace-boundary", "无法验证目标位于授权 Workspace；请使用合法相对路径。", { retryable: true });
+  return { ...result, output: { targetFailureReason: reason } };
 }
 
 async function resolvePathTarget(
