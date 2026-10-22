@@ -1,6 +1,7 @@
 import { parseSubAgentLimits, type SubAgentLimits } from "@/core/sub-agents/types";
 import { MAX_MODEL_OUTPUT_TOKENS, type ModelThinkingConfig } from "@/models/provider";
 import { randomUUID } from "node:crypto";
+import type { AgentIterationLimit } from "@/core/agent-events";
 import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
@@ -37,7 +38,7 @@ export type SettingsAction =
   | { readonly type: "mcp-upsert"; readonly name: string; readonly scope: "user" | "workspace"; readonly workspaceId?: string; readonly config: McpServerConfig }
   | { readonly type: "mcp-enable"; readonly name: string; readonly scope: "user" | "workspace"; readonly workspaceId?: string; readonly enabled: boolean }
   | { readonly type: "mcp-remove"; readonly name: string; readonly scope: "user" | "workspace"; readonly workspaceId?: string }
-  | { readonly type: "preferences-set"; readonly subAgents?: SubAgentLimits; readonly maxIterations: number; readonly maxRuntimeMinutes: number; readonly defaultPermissionMode: "strict" | "default" | "permissive" };
+  | { readonly type: "preferences-set"; readonly subAgents?: SubAgentLimits; readonly maxIterations: AgentIterationLimit; readonly maxRuntimeMinutes: number; readonly defaultPermissionMode: "strict" | "default" | "permissive" };
 
 export class SettingsService {
   constructor(readonly store = new LocalSettingsStore()) {}
@@ -152,7 +153,7 @@ export class SettingsService {
         break;
       }
       case "preferences-set": {
-        if (!Number.isSafeInteger(action.maxIterations) || action.maxIterations < 1 || action.maxIterations > 32 ||
+        if ((action.maxIterations !== "unlimited" && (!Number.isSafeInteger(action.maxIterations) || action.maxIterations < 1 || action.maxIterations > 32)) ||
           !Number.isSafeInteger(action.maxRuntimeMinutes) || action.maxRuntimeMinutes < 1 || action.maxRuntimeMinutes > 1440 ||
           !["strict", "default", "permissive"].includes(action.defaultPermissionMode))
           throw new SettingsError("invalid", "运行偏好超出允许范围。");

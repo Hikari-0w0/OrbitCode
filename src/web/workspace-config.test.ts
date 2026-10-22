@@ -6,13 +6,17 @@ import test from "node:test";
 
 import { createWorkspaceBoundary } from "@/tools/workspace";
 import {
-  loadWorkspaceCatalog,
+  loadWorkspaceCatalog as loadWebWorkspaceCatalog,
   MAX_WORKSPACE_ID_LENGTH,
   MAX_WORKSPACE_NAME_LENGTH,
   MAX_WORKSPACES,
   resolveWorkspaceBoundary,
   WorkspaceCatalogError,
 } from "@/web/workspace-config";
+
+// 本组验证旧 YAML 契约，显式选择来源，不让开发者的全局设置遮蔽夹具。
+const loadWorkspaceCatalog = (options: Parameters<typeof loadWebWorkspaceCatalog>[0]) =>
+  loadWebWorkspaceCatalog({ ...options, preferLegacy: true });
 
 test("配置缺失时使用启动目录作为唯一默认 Workspace", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "orbitcode-catalog-fallback-"));

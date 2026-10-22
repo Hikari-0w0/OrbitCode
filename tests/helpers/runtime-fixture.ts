@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
 import { LocalConversationStore } from "@/lib/local-conversation-store";
+import { LocalSettingsStore } from "@/lib/local-settings-store";
 import { LocalAgentRunLog } from "@/lib/local-agent-run-log";
 import { AgentRuntime } from "@/runtime/agent-runtime";
 import { ConversationService } from "@/runtime/conversation-service";
@@ -27,19 +28,21 @@ export async function runtimeFixture(responder: (request: MockRequest) => MockRe
 } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "orbit-parity-"));
   const server = await startOpenAIMockServer(responder);
+  // 模拟运行只读取夹具配置，避免用户的全局模型和工作区改变测试目标。
+  const settingsStore = new LocalSettingsStore(path.join(root, ".test-settings"));
   await writeFile(path.join(root, "orbitcode.yaml"), `providers:\n  - name: primary\n    protocol: openai\n    model: test-model\n    base_url: ${server.baseUrl}\n    api_key: FIXTURE_KEY\n    context:\n      window_tokens: 128000\n${options.context ?? ""}`);
   const loadConfig = async () => {
-    const context = await loadProviderContext(root, { FIXTURE_KEY: "synthetic-fixture-secret", ...(options.iterations ? { ORBITCODE_MAX_AGENT_ITERATIONS: options.iterations } : {}) });
+    const context = await loadProviderContext(root, { FIXTURE_KEY: "synthetic-fixture-secret", ...(options.iterations ? { ORBITCODE_MAX_AGENT_ITERATIONS: options.iterations } : {}) }, undefined, false, settingsStore, false);
     return options.subAgentLimits ? { ...context, managedSettings: { schemaVersion: 1 as const, revision: 0, providers: [], workspaces: [], mcpServers: [], subAgents: { ...DEFAULT_SUB_AGENT_LIMITS, ...options.subAgentLimits } } } : context;
   };
-  const loadWorkspaces = () => loadWorkspaceCatalog({ cwd: root });
+  const loadWorkspaces = () => loadWorkspaceCatalog({ cwd: root, settingsStore });
   const store = options.storeFactory?.(path.join(root, ".conversations")) ?? new LocalConversationStore(path.join(root, ".conversations"));
   const log = new LocalAgentRunLog(path.join(root, ".logs"));
   const manager = new ConversationRuntimeManager();
   const guard = new ConversationOperationGuard(manager, store);
   const permissions = new PermissionSessionManager();
   const runtime = new AgentRuntime({ userConfigRoot: path.join(root, ".test-user"), store, manager, guard, permissions, log,
-    loadMcp: async (workspaceRoot) => loadMcpConfig({ workspaceRoot, userHome: path.join(root, ".home"), environment: (await loadConfig()).environment }),
+    loadMcp: async (workspaceRoot) => loadMcpConfig({ workspaceRoot, userHome: path.join(root, ".home"), settingsStore, environment: (await loadConfig()).environment }),
     loadConfig, loadWorkspaces, sandbox: new MacOsSeatbeltCommandSandbox() });
   const conversations = new ConversationService(store, manager, guard, loadConfig);
   let output = "";

@@ -3,10 +3,32 @@ import { access, chmod, mkdtemp, realpath, readFile, rm, writeFile } from "node:
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { LocalSettingsStore } from "@/lib/local-settings-store";
+import { LocalSettingsStore, validateSettings } from "@/lib/local-settings-store";
 import { loadProviderContext, resolveRuntimeProvider, summarizeProviders } from "@/runtime/config";
 import { SettingsService } from "@/runtime/settings-service";
 import { loadWorkspaceCatalog, resolveWorkspaceBoundary } from "@/runtime/workspace-config";
+
+test("不限轮数可保存并进入两端运行快照，切回有限值不改变旧快照", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-unlimited-settings-"));
+  try {
+    const store = new LocalSettingsStore(root);
+    const service = new SettingsService(store);
+    const saved = await service.apply(0, { type: "preferences-set", maxIterations: "unlimited", maxRuntimeMinutes: 180, defaultPermissionMode: "default" });
+    assert.equal(saved.maxIterations, "unlimited");
+    assert.equal((await new LocalSettingsStore(root).load())?.maxIterations, "unlimited");
+    const snapshot = await loadProviderContext(root, {}, undefined, false, store, false);
+    assert.equal(snapshot.maxIterations, "unlimited");
+    assert.equal(snapshot.maxRuntimeMs, 180 * 60_000);
+    await service.apply(1, { type: "preferences-set", maxIterations: 16, maxRuntimeMinutes: 60, defaultPermissionMode: "default" });
+    assert.equal((await loadProviderContext(root, {}, undefined, false, store, false)).maxIterations, 16);
+    assert.equal(snapshot.maxIterations, "unlimited");
+    const valid = (await store.load())!;
+    for (const maxIterations of [0, 33, -1, 1.5, "infinite", "32", null]) {
+      assert.throws(() => validateSettings({ ...valid, maxIterations }));
+    }
+    assert.equal((await store.load())?.revision, 2);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test("模型改名保留身份和凭据，替换/停用/默认/清除不误用旧密钥", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "orbitcode-settings-life-"));

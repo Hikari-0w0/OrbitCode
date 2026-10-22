@@ -19,6 +19,7 @@ export function fileToolFailure(
     case "protected-path":
       return toolFailure("protected-path", error.message, { retryable: true, sideEffect });
     case "not-found":
+      return toolFailure("not-found", "目标在当前 Workspace 根目录下不可见；不能据此判断工作区外的文件是否存在。核对相对路径，原失败测试不可读时请用户提供 import 与原始断言。", { retryable: true, sideEffect });
     case "not-file":
     case "not-directory":
       return toolFailure("not-found", error.message, { retryable: true, sideEffect });

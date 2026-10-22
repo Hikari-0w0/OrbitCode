@@ -16,9 +16,10 @@ export async function loadAgentCatalog(input: { workspaceRoot: string; userRoot:
     const layer = new Map<string, AgentRoleEntry | undefined>();
     try {
       signal.throwIfAborted();
-      const canonical = await realpath(root);
+      // 外部工作区路径在运行时解析；内置角色由 next.config.ts 显式打包。
+      const canonical = await realpath(/* turbopackIgnore: true */ root);
       if (source === "project" && !within(await realpath(input.workspaceRoot), canonical)) throw new Error("角色目录越界。");
-      const directory = await opendir(root), files: string[] = [];
+      const directory = await opendir(/* turbopackIgnore: true */ root), files: string[] = [];
       let count = 0;
       for await (const file of directory) {
         if (++count > 1024) throw new Error("目录项超限。");
@@ -30,7 +31,7 @@ export async function loadAgentCatalog(input: { workspaceRoot: string; userRoot:
         let name = path.basename(file, ".md");
         let knownName = false;
         try {
-          const read = await readBounded(canonical, path.join(root, file), 65536, signal);
+          const read = await readBounded(canonical, path.join(/* turbopackIgnore: true */ root, file), 65536, signal);
           // 损坏 YAML 无法可信解析名称时保守禁用整个目录，不允许低层定义意外提权。
           const recovered = /^name:\s*([a-z][a-z0-9-]{0,63})\s*$/m.exec(read.content);
           if (recovered) { name = recovered[1]; knownName = true; }

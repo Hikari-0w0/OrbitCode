@@ -281,6 +281,47 @@ function toolContext(workspace: Awaited<ReturnType<typeof createWorkspaceBoundar
   };
 }
 
+test("长行搜索围绕实际命中返回片段并保留列偏移", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-search-long-line-"));
+  try {
+    const content = "前".repeat(650) + "TARGET_729" + "尾".repeat(700);
+    await writeFile(path.join(root, "long.ts"), content);
+    const workspace = await createWorkspaceBoundary(root);
+    const result = await searchCodeTool.execute({ query: "TARGET_729" }, toolContext(workspace));
+    assert.ok(result.ok);
+    const output = result.output;
+    assert.ok(output && typeof output === "object" && !Array.isArray(output) && "matches" in output && Array.isArray(output.matches));
+    const match = output.matches[0];
+    assert.ok(match && typeof match === "object" && !Array.isArray(match));
+    assert.equal(match.column, 651);
+    assert.equal(typeof match.text, "string");
+    assert.match(String(match.text), /TARGET_729/);
+    assert.equal(match.textTruncated, true);
+    assert.equal(content.slice(Number(match.textStartColumn) - 1, Number(match.textStartColumn) - 1 + String(match.text).length), match.text);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("分段读取保留连续原文、实际行号及文件指纹，完整读取兼容原返回", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-read-lines-"));
+  try {
+    await writeFile(path.join(root, "lines.ts"), "first\r\n第二行\r\nthird\n");
+    const workspace = await createWorkspaceBoundary(root);
+    const prepared = readFileTool.prepareUnknown({ path: "lines.ts", start_line: 2, end_line: 2 });
+    assert.equal(prepared.kind, "ready");
+    if (prepared.kind !== "ready") return;
+    const result = await prepared.call.execute(toolContext(workspace));
+    assert.ok(result.ok);
+    assert.ok(isRecord(result.output));
+    assert.equal(result.output.content, "第二行\r\n");
+    assert.deepEqual(result.output.range, { startLine: 2, endLine: 2, totalLines: 3, complete: false });
+    assert.match(String(result.output.sha256), /^[a-f0-9]{64}$/);
+    const invalid = readFileTool.prepareUnknown({ path: "lines.ts", start_line: 3, end_line: 2 });
+    assert.equal(invalid.kind, "failure");
+    const whole = await readFileTool.execute({ path: "lines.ts" }, toolContext(workspace));
+    assert.deepEqual(whole.ok && whole.output, { path: "lines.ts", content: "first\r\n第二行\r\nthird\n", byteLength: 24 });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

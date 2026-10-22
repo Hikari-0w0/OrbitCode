@@ -7,6 +7,7 @@ export class GlobPatternError extends Error {
 
 export interface GlobMatcher {
   matches(relativePath: string): boolean;
+  canDescend(relativeDirectory: string): boolean;
 }
 
 export function compileGlob(pattern: string): GlobMatcher {
@@ -41,12 +42,16 @@ export function compileGlob(pattern: string): GlobMatcher {
       const pathSegments = relativePath.split("/").filter(Boolean);
       return matchSegments(segments, pathSegments);
     },
+    canDescend(relativeDirectory) {
+      return matchSegments(segments, relativeDirectory.split("/").filter(Boolean), true);
+    },
   };
 }
 
 function matchSegments(
   pattern: readonly string[],
   value: readonly string[],
+  directoryPrefix = false,
 ): boolean {
   const cache = new Map<string, boolean>();
   function visit(patternIndex: number, valueIndex: number): boolean {
@@ -54,7 +59,9 @@ function matchSegments(
     const cached = cache.get(key);
     if (cached !== undefined) return cached;
     let matched: boolean;
-    if (patternIndex === pattern.length) {
+    if (directoryPrefix && valueIndex === value.length) {
+      matched = patternIndex < pattern.length;
+    } else if (patternIndex === pattern.length) {
       matched = valueIndex === value.length;
     } else if (pattern[patternIndex] === "**") {
       matched =

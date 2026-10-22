@@ -1,4 +1,5 @@
 import type { SubAgentLimits } from "@/core/sub-agents/types";
+import type { AgentIterationLimit } from "@/core/agent-events";
 import type { ContextPolicyConfig } from "@/core/context/types";
 import type { ModelThinkingConfig, ProviderTransportPolicy } from "@/models/provider";
 import type { McpServerConfig } from "@/runtime/mcp-config";
@@ -46,7 +47,7 @@ export type ManagedSettings = {
   readonly mcpServers: readonly ManagedMcpServer[];
   readonly defaultProviderId?: string;
   readonly defaultWorkspaceId?: string;
-  readonly maxIterations?: number;
+  readonly maxIterations?: AgentIterationLimit;
   readonly maxRuntimeMinutes?: number;
   readonly defaultPermissionMode?: PermissionMode;
 };

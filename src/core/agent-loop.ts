@@ -1,3 +1,4 @@
+import { iterationReviewMessages } from "@/core/iteration-review";
 import type {
   AgentEvent,
   AgentIterationLimit,
@@ -228,13 +229,15 @@ export class AgentLoop implements AgentSession {
         const budgetMessages: readonly ConversationMessage[] = this.childBudgetReminder && this.maxIterations !== "unlimited" && this.maxIterations - iteration < 3
           ? [{ role: "user", content: `运行时预算提示：子任务本次是第 ${iteration}/${this.maxIterations} 轮模型请求，含本轮最多剩余 ${this.maxIterations - iteration + 1} 次。请收敛已有证据并直接回复已确认结果、来源与未完成项；最后一轮请求工具不会执行。不要重复失败搜索，也不要编造结论。${this.childExecutionFacts ? `\n当前子执行事实：${this.childExecutionFacts()}` : ""}` }]
           : [];
-        const promptEnvelope = { systemMessages, tools: toolDefinitions, suffixMessages: budgetMessages } as const;
+        // 进度复核只进入当前请求，不写入历史，也不改变迭代或运行时预算。
+        const reviewMessages = iterationReviewMessages(iteration);
+        const promptEnvelope = { systemMessages: [...systemMessages, ...reviewMessages], tools: toolDefinitions, suffixMessages: budgetMessages } as const;
         const modelMessages = this.contextManager
           ? (await this.contextManager.prepareForModel(
               promptEnvelope,
               signal,
             )).messages
-          : [...transcript, ...budgetMessages];
+          : [...transcript, ...reviewMessages, ...budgetMessages];
         const response = this.collectModelResponse(
           modelMessages,
           toolDefinitions,

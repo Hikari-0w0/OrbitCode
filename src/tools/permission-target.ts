@@ -82,7 +82,7 @@ export function permissionTargetFailure(error: unknown): ToolExecutionResult {
     : error instanceof WorkspaceError && error.kind === "protected-path"
       ? toolFailure("protected-path", "工具不能访问受保护的配置或凭据路径。", { retryable: true })
       : error instanceof WorkspaceError && error.kind === "not-found"
-        ? toolFailure("not-found", "工具目标不存在，请先查找实际路径。", { retryable: true })
+        ? toolFailure("not-found", "目标在当前 Workspace 根目录下不可见；请核对根目录内的相对路径。这不能证明工作区外的同名文件不存在、已删除或属于旧副本。若原失败测试位于工作区外，请用户提供 import 与原始断言，不要猜测被测入口。", { retryable: true })
         : toolFailure("workspace-boundary", "无法验证目标位于授权 Workspace；请使用合法相对路径。", { retryable: true });
   return { ...result, output: { targetFailureReason: reason } };
 }

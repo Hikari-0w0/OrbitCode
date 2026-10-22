@@ -183,7 +183,7 @@ function validateSettings(value: unknown): ManagedSettings {
   }
   if (value.defaultProviderId !== undefined && (!providerIds.has(String(value.defaultProviderId)) || !value.providers.some((p: unknown) => record(p) && p.id === value.defaultProviderId && p.enabled))) throw invalid();
   if (value.defaultWorkspaceId !== undefined && (!workspaceIds.has(String(value.defaultWorkspaceId)) || !value.workspaces.some((w: unknown) => record(w) && w.id === value.defaultWorkspaceId && w.enabled))) throw invalid();
-  if (value.maxIterations !== undefined && (!Number.isSafeInteger(value.maxIterations) || Number(value.maxIterations) < 1 || Number(value.maxIterations) > 32)) throw invalid();
+  if (value.maxIterations !== undefined && value.maxIterations !== "unlimited" && (!Number.isSafeInteger(value.maxIterations) || Number(value.maxIterations) < 1 || Number(value.maxIterations) > 32)) throw invalid();
   if (value.maxRuntimeMinutes !== undefined && (!Number.isSafeInteger(value.maxRuntimeMinutes) || Number(value.maxRuntimeMinutes) < 1 || Number(value.maxRuntimeMinutes) > 1440)) throw invalid();
   if (value.defaultPermissionMode !== undefined && !["strict", "default", "permissive"].includes(String(value.defaultPermissionMode))) throw invalid();
   try { parseSubAgentLimits(value.subAgents); } catch { throw invalid(); }

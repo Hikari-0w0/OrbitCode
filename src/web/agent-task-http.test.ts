@@ -1,4 +1,20 @@
 import test from 'node:test';import assert from 'node:assert/strict';import{subAgentFixture}from '../../tests/helpers/sub-agent-fixture';import{agentTaskHttp}from './agent-task-http';
+test('任务计数摘要不返回正文或用量并隔离会话作用域',async()=>{
+ const f=await subAgentFixture();
+ try{
+  await f.controller.handleLine('委派');const cp=await f.checkpoint();
+  const request=(suffix='')=>new Request(`http://localhost/tasks?view=summary${suffix}`,{headers:{host:'localhost',origin:'http://localhost'}});
+  const response=await agentTaskHttp(request(),cp.summary.id,f.runtime);
+  assert.equal(response.status,200);assert.deepEqual(await response.json(),{count:1,running:1});
+  assert.equal((await agentTaskHttp(request(),'00000000-0000-4000-8000-000000000000',f.runtime)).status,400);
+  const scope=await f.runtime.taskScope(cp.summary.id),task=f.runtime.tasks.list(scope)[0];
+  assert.equal((await agentTaskHttp(request(),cp.summary.id,f.runtime,task.id)).status,400);
+  f.release();await f.runtime.tasks.wait(scope,task.id,3000,new AbortController().signal);
+  assert.deepEqual(await (await agentTaskHttp(request(),cp.summary.id,f.runtime)).json(),{count:1,running:0});
+  await f.runtime.tasks.invalidate(scope);
+  assert.deepEqual(await (await agentTaskHttp(request(),cp.summary.id,f.runtime)).json(),{count:0,running:0});
+ }finally{await f.close();}
+});
 test('有权任务仍拒绝无效等待时间和多余控制字段，不扩大等待或取消范围',async()=>{const f=await subAgentFixture();try{await f.controller.handleLine('委派');const cp=await f.checkpoint(),scope=await f.runtime.taskScope(cp.summary.id),task=f.runtime.tasks.list(scope)[0];for(const [action,body]of [['wait',{timeoutMs:'forever'}],['wait',{timeoutMs:0}],['cancel',{workspace:'/'}]]as const){const request=new Request('http://localhost/task',{method:'POST',headers:{host:'localhost',origin:'http://localhost','content-type':'application/json'},body:JSON.stringify(body)});assert.equal((await agentTaskHttp(request,cp.summary.id,f.runtime,task.id,action)).status,400);}assert.equal(f.runtime.tasks.get(scope,task.id).state.status,'running');}finally{await f.close();}});
 test('正文接口拒绝伪造会话和分页越界，读取不改变投递状态',async()=>{const f=await subAgentFixture();try{await f.controller.handleLine('委派');const cp=await f.checkpoint(),scope=await f.runtime.taskScope(cp.summary.id),task=f.runtime.tasks.list(scope)[0];f.release();await f.runtime.tasks.wait(scope,task.id,3000,new AbortController().signal);const request=(body:object)=>new Request('http://localhost/task',{method:'POST',headers:{host:'localhost',origin:'http://localhost','content-type':'application/json'},body:JSON.stringify(body)});for(const body of [{offset:-1},{limit:4001},{offset:'0'},{conversationId:'other'}])assert.equal((await agentTaskHttp(request(body),cp.summary.id,f.runtime,task.id,'result')).status,400);const before=f.runtime.tasks.get(scope,task.id).delivery;const response=await agentTaskHttp(request({offset:0,limit:1000}),cp.summary.id,f.runtime,task.id,'result');assert.equal(response.status,200);assert.match((await response.json()).content,/子回复/);assert.deepEqual(f.runtime.tasks.get(scope,task.id).delivery,before);}finally{await f.close();}});
 

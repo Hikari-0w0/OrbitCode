@@ -107,7 +107,7 @@ function parsePayload(value: unknown): { expectedRevision: number; action: Setti
           : { type: "mcp-enable", name: action.name, scope: action.scope, ...(action.workspaceId ? { workspaceId: action.workspaceId } : {}), enabled: action.enabled as boolean } };
       break;
     case "preferences-set":
-      if (typeof action.maxIterations === "number" && typeof action.maxRuntimeMinutes === "number" &&
+      if ((typeof action.maxIterations === "number" || action.maxIterations === "unlimited") && typeof action.maxRuntimeMinutes === "number" &&
         (action.defaultPermissionMode === "strict" || action.defaultPermissionMode === "default" || action.defaultPermissionMode === "permissive"))
         return { expectedRevision: Number(value.expectedRevision), action: { type: "preferences-set", maxIterations: action.maxIterations,
           maxRuntimeMinutes: action.maxRuntimeMinutes, defaultPermissionMode: action.defaultPermissionMode, ...(action.subAgents===undefined?{}:{subAgents:parseWebSubAgentLimits(action.subAgents)}) } };
