@@ -12,6 +12,44 @@ import type {
   StoredContextReference,
 } from "@/core/context/types";
 
+for (const readTool of ["read_context", "agent"] as const) test(`${readTool} 分页按预算返回资源游标，连续读取无二次卸载且不遗漏Unicode`, async () => {
+  const store = new MemoryContextStore();
+  const content = '原文😀\\"\n'.repeat(2000);
+  const characters = Array.from(content);
+  let offset = 0, reconstructed = "", calls = 0;
+  while (offset < characters.length) {
+    const serialized = JSON.stringify({ ok: true, output: { ...(readTool === "read_context" ? {reference:"context://v1/original"} : {taskId:"child",source:"child-model-reply"}), content: characters.slice(offset).join(""), offset, nextOffset: null, totalCharacters: characters.length, hasMore: false }, evidence_call_id: "actual-evidence" });
+    const result = await compactToolResults({ messages: [{ kind: "assistant-tool-call", content: null, toolCalls: [{ id: "read", name: readTool, argumentsJson: "{}" }] }, { kind: "tool-result", toolCallId: "read", payload: { storage: "inline", content: serialized } }], sessionId: "session", config: config({ singleToolResultTokens: 1200, toolResultGroupTokens: 2000 }), store, signal: new AbortController().signal });
+    assert.equal(result.createdReferences.length, 0);
+    const message = result.messages[1];
+    assert.equal(message.kind, "tool-result");
+    if (message.kind !== "tool-result" || message.payload.storage !== "inline") throw new Error("读取出口不应再次卸载");
+    assert.ok(approximateTextTokens(message.payload.content) <= 1200);
+    const payload = JSON.parse(message.payload.content);
+    if(readTool==="read_context")assert.equal(payload.output.reference, "context://v1/original");else{assert.equal(payload.output.taskId,"child");assert.equal(payload.output.source,"child-model-reply");}
+    assert.equal(payload.evidence_call_id, "actual-evidence");
+    reconstructed += payload.output.content;
+    assert.equal(payload.output.offset, offset);
+    const next = payload.output.nextOffset ?? characters.length;
+    assert.ok(next > offset);
+    offset = next;
+    assert.ok(++calls < 100);
+  }
+  assert.equal(reconstructed, content);
+  assert.deepEqual(store.contents, []);
+});
+
+test("并行read_context共享批次预算，预算不足明确停止而不制造引用链", async () => {
+  const messages: ManagedContextMessage[] = [{ kind: "assistant-tool-call", content: null, toolCalls: ["a", "b"].map(id => ({ id, name: "read_context", argumentsJson: "{}" })) }, ...["a", "b"].map(id => ({ kind: "tool-result" as const, toolCallId: id, payload: { storage: "inline" as const, content: JSON.stringify({ ok: true, output: { reference: `context://v1/${id}`, content: "long".repeat(5000), offset: 0, nextOffset: null, totalCharacters: 20000, hasMore: false } }) } }))];
+  const store = new MemoryContextStore();
+  const result = await compactToolResults({ messages, sessionId: "s", config: config({ singleToolResultTokens: 1200, toolResultGroupTokens: 1000 }), store, signal: new AbortController().signal });
+  assert.equal(result.createdReferences.length, 0);
+  const tokens = result.messages.reduce((total, message) => total + (message.kind === "tool-result" ? approximateTextTokens(renderContextPayload(message.payload)) : 0), 0);
+  assert.ok(tokens <= 1000);
+  await assert.rejects(compactToolResults({ messages, sessionId: "s", config: config({ singleToolResultTokens: 1, toolResultGroupTokens: 2 }), store, signal: new AbortController().signal }), /预算不足/);
+  assert.deepEqual(store.contents, []);
+});
+
 test("超过单结果阈值的内容会原子卸载且保持用户原文", async () => {
   const store = new MemoryContextStore();
   const messages: ManagedContextMessage[] = [

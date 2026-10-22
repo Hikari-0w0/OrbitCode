@@ -1,5 +1,8 @@
 # Agent 单次运行与独立评测
 
+> 2026-10-22执行策略更新：主/子Agent、独立Skill及MCP均不进行人工审批，未匹配deny的操作直接执行；旧ask兼容为allow，旧mode字段不改变执行。旧JSON的approvalBlocked保留为false，历史blocked/退出码3说明仅适用于旧版本；显式deny返回模型工具失败，completed不代表任务验收通过。最新证据见[审批移除](approval-removal-2026-10-22.md)。
+
+
 状态：配置与单次评测链路已实现；2026-10-14 已补齐异常恢复、管理操作和每例三次真实回归，见 [收尾验收](interaction-closeout-2026-10-14.md)。[2026-10-13 初始评测](deepseek-flash-2026-10-13.md) 保留原始单次样本结论，不与后续结果混算。
 
 单次运行默认总时限为 180 秒，包含标准输入等待；评测器预先生成并向 CLI 传入 executionId，在子进程没有合法终态时仍保留执行清单。报告记录代码、模型配置和用例版本摘要；对比前通过 `compareEvalConditions` 检查预算、模型和验收版本一致。

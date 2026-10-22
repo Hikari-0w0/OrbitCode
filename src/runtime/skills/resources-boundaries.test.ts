@@ -13,7 +13,6 @@ import { writeFileTool } from "@/tools/write-file";
 import { SkillToolPolicy } from "@/tools/skill-policy";
 import { createModeToolPolicy } from "@/tools/mode-policy";
 import { PermissionGateway } from "@/tools/permission-gateway";
-import { PermissionSessionManager } from "@/runtime/permission-session-manager";
 
 async function resourceFixture(source: "project" | "user" = "project") {
     const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "skill-resource-boundary-")));
@@ -69,11 +68,9 @@ test("超大资源返回明确的 limit-exceeded，不退化为不明加载错�
     } finally { await fixture.close(); }
 });
 
-for (const timing of ["before-approval", "after-approval"]) test(`已引用资源在 ${timing} 变化，原写审批不能绕过资源复检`, async () => {
+for (const timing of ["before-execution", "after-permission"]) test(`已引用资源在 ${timing} 变化，无需审批仍不能绕过资源复检`, async () => {
     const fixture = await resourceFixture();
-    const manager = new PermissionSessionManager();
-    const permissions = manager.createSession();
-    const turn = manager.beginTurn(permissions.id, { workspace: { id: "workspace", name: "Workspace" }, providerId: "p" });
+
     try {
         await writeFile(path.join(fixture.entry, "rules.md"), "原资源");
         await fixture.resources.read("example", "rules.md", fixture.signal);
@@ -81,18 +78,15 @@ for (const timing of ["before-approval", "after-approval"]) test(`已引用资�
         const prepared = policy.prepare("write_file", { path: "not-created.txt", content: "禁止旧资源副作用" });
         assert.equal(prepared.kind, "ready");
         if (prepared.kind !== "ready") throw new Error("准备失败");
-        const gateway = new PermissionGateway({ agentMode: "do", permissionMode: () => "strict", workspace: fixture.workspace, broker: turn.broker, loadRules: async () => [] });
+        const gateway = new PermissionGateway({ agentMode: "do", permissionMode: () => "strict", workspace: fixture.workspace, loadRules: async () => [] });
         const authorization = await gateway.authorize(prepared.call, "write", fixture.signal);
-        assert.equal(authorization.kind, "awaiting");
-        if (authorization.kind !== "awaiting") throw new Error("未产生审批");
-        if (timing === "before-approval") await writeFile(path.join(fixture.entry, "rules.md"), "审批前变更");
-        manager.resolveDecision(permissions.id, authorization.prompt.requestId, "allow-once");
-        const allowed = await authorization.resolve();
-        assert.equal(allowed.kind, "allowed");
-        if (timing === "after-approval") await writeFile(path.join(fixture.entry, "rules.md"), "审批后变更");
+        assert.equal(authorization.kind, "allowed");
+        if (authorization.kind !== "allowed") throw new Error("权限拒绝");
+        if (timing === "before-execution") await writeFile(path.join(fixture.entry, "rules.md"), "执行前变更");
+        if (timing === "after-permission") await writeFile(path.join(fixture.entry, "rules.md"), "检查后变更");
         const result = await policy.executePrepared(prepared.call, { workspace: fixture.workspace, signal: fixture.signal, deadlineMs: Date.now() + 1000 });
         assert.ok(!result.ok);
         assert.equal(result.error.kind, "conflict");
         await assert.rejects(readFile(path.join(fixture.workspace.root, "not-created.txt")));
-    } finally { manager.closeSession(permissions.id); await fixture.close(); }
+    } finally { await fixture.close(); }
 });

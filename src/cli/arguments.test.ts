@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+test("单次 CLI 显式选择父级分工，非法值不启动",()=>{const result=parseCliArguments(["run","--stdin","--delegation","delegate-only"]);assert.ok(result.type==="run-once"&&result.parentExecution?.mode==="delegate-only");assert.throws(()=>parseCliArguments(["run","--stdin","--delegation","auto"]));});
 
 import {
   ArgumentError,
@@ -80,4 +81,11 @@ test("单次执行接受显式轮数上限并拒绝越界或重复预算", () =>
   assert.equal(parsed.type === "run-once" && parsed.maxIterations, 3);
   for (const value of ["0", "33", "1.5", "-1"]) assert.throws(() => parseCliArguments(["run", "--stdin", "--max-iterations", value]));
   assert.throws(() => parseCliArguments(["run", "--stdin", "--max-iterations", "3", "--max-iterations", "4"]));
+});
+
+test("单次运行可独立限制子任务类型且拒绝重复或非法参数", () => {
+  const args = parseCliArguments(["run", "--stdin", "--delegation-kind", "fork"]);
+  assert.ok(args.type === "run-once");
+  assert.deepEqual(args.parentExecution, { version: 1, mode: "collaborate", delegationKind: "fork" });
+  for (const extra of [["--delegation-kind", "auto"], ["--delegation-kind", "fork", "--delegation-kind", "defined"]]) assert.throws(() => parseCliArguments(["run", "--stdin", ...extra]));
 });

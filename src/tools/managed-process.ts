@@ -75,6 +75,7 @@ export class ManagedProcessController {
   }
 
   async start(input: {
+    readonly takeWriteLease?: () => (() => void) | undefined;
     readonly command: string;
     readonly cwd?: string;
     readonly readyPort?: number;
@@ -125,6 +126,8 @@ export class ManagedProcessController {
       record.logs.push("stderr", chunk)
     );
     this.#records.set(record.id, record);
+    const releaseWrite = input.takeWriteLease?.();
+    void handle.completion.finally(() => releaseWrite?.()).catch(() => undefined);
     void handle.completion.then(
       (exit) => {
         record.exit = exit;
@@ -180,8 +183,8 @@ export class ManagedProcessController {
 
   async stop(processId: string): Promise<ManagedProcessSnapshot> {
     const record = this.#require(processId);
-    await record.handle.stop().catch(() => undefined);
-    await record.handle.completion.catch(() => undefined);
+    await record.handle.stop();
+    await record.handle.completion;
     return this.status(processId, 0);
   }
 
@@ -191,7 +194,7 @@ export class ManagedProcessController {
     await Promise.all(
       [...this.#records.values()]
         .filter((record) => record.status === "running")
-        .map((record) => record.handle.stop().catch(() => undefined)),
+        .map(async (record) => { await record.handle.stop(); await record.handle.completion; }),
     );
   }
 

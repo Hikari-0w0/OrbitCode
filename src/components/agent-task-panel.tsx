@@ -1,0 +1,29 @@
+"use client";
+import { useEffect, useRef, useState } from "react";
+import type { TaskView } from "@/core/sub-agents/types";
+type Entry=TaskView;
+export function AgentTaskPanel({conversationId}:{readonly conversationId:string}) {
+  const [reply,setReply]=useState<{taskId:string;content:string;nextOffset:number|null}>();
+  const [tasks,setTasks]=useState<readonly Entry[]>([]),[roles,setRoles]=useState<readonly {role:{name:string;description:string};source:string}[]>([]),[error,setError]=useState(''),[diagnostics,setDiagnostics]=useState<readonly string[]>([]),[usage,setUsage]=useState<unknown>();
+  const actions=useRef(new Set<AbortController>());
+  useEffect(()=>()=>{for(const controller of actions.current)controller.abort();actions.current.clear();},[]);
+  const base=`/api/conversations/${encodeURIComponent(conversationId)}`;
+  useEffect(()=>{
+    const controller=new AbortController();let stopped=false;
+    const load=async()=>{try{const responses=await Promise.all([fetch(`${base}/tasks`,{signal:controller.signal}),fetch(`${base}/agents`,{signal:controller.signal})]);if(responses.some(r=>!r.ok))throw new Error('任务列表读取失败。');const [t,a]=await Promise.all(responses.map(r=>r.json()));if(!stopped){setUsage(t.usage);setTasks(t.tasks);setRoles(a.entries);setDiagnostics(a.diagnostics);setError('');}}catch{if(!stopped)setError('任务列表读取失败。');}};
+    void load();const timer=setInterval(()=>void load(),1500);return()=>{stopped=true;controller.abort();clearInterval(timer);};
+  },[base]);
+  async function action(id:string,operation:string,body:object={}){const controller=new AbortController();actions.current.add(controller);try{const response=await fetch(`${base}/tasks/${encodeURIComponent(id)}/${operation}`,{method:'POST',signal:controller.signal,headers:{'content-type':'application/json'},body:JSON.stringify(body)});if(!response.ok)throw new Error();if(!controller.signal.aborted)setError('');}catch{if(!controller.signal.aborted)setError('任务操作失败或任务已失效。');}finally{actions.current.delete(controller);}}
+  async function readReply(taskId:string,offset=0){const controller=new AbortController();actions.current.add(controller);try{const response=await fetch(`${base}/tasks/${encodeURIComponent(taskId)}/result`,{method:'POST',signal:controller.signal,headers:{'content-type':'application/json'},body:JSON.stringify({offset,limit:4000})});if(!response.ok)throw new Error();const page:unknown=await response.json();if(typeof page!=='object'||page===null||!('content'in page)||typeof page.content!=='string'||!('nextOffset'in page)||(page.nextOffset!==null&&typeof page.nextOffset!=='number'))throw new Error();if(!controller.signal.aborted){setReply({taskId,content:page.content,nextOffset:page.nextOffset});setError('');}}catch{if(!controller.signal.aborted)setError('子回复正文不可用或已过期。');}finally{actions.current.delete(controller);}}
+  return <section aria-label="子 Agent 任务"><h2>子 Agent 与任务</h2><p>任务只在当前运行时存活。关闭运行时会取消未完成任务，未保存结果可能丢失。子任务共用工作区文件，最终回复不等于验收通过。主 Agent 与子任务均自主执行，无需人工审批；Plan、工作区边界和拒绝规则继续生效。</p>{error&&<p role="alert">{error}</p>}<h3>可用角色</h3>{roles.map(entry=><p key={entry.role.name}><strong>{entry.role.name}</strong> · {entry.source} · {entry.role.description}</p>)}{diagnostics.map((message,i)=><p role="alert" key={i}>{message}</p>)}<details><summary>当前运行时保留记录用量（父自身、子任务与总量）</summary><pre>{JSON.stringify(usage,null,2)}</pre></details><h3>当前会话任务</h3>{tasks.length===0&&<p>暂无子任务。可在对话中要求主 Agent 委派。</p>}{tasks.map(task=><article key={task.id}><h4>{task.role??'Fork'} · {task.kind}</h4><p>{task.id} · {task.state.status} · {task.background?'后台':'前台'} · 投递：{task.delivery.status}</p><TaskOutputAcceptance task={task}/><p>轮次上限 {task.maxIterations} · 截止 {new Date(task.deadlineAt).toLocaleTimeString()}</p>{task.state.status!=='terminal'&&<div><button onClick={()=>void action(task.id,'wait',{timeoutMs:30000})}>等待</button><button onClick={()=>void action(task.id,'detach')}>转后台</button><button onClick={()=>void action(task.id,'cancel')}>取消子任务</button></div>}{task.state.status==='terminal'&&<details><summary>结果：{task.state.result.stopReason} · 验证 {task.state.result.verification.status}</summary><pre>{JSON.stringify(task.state.result,null,2)}</pre>{task.state.result.replyStorage?.status==='saved'&&<button type="button" onClick={()=>void readReply(task.id)}>读取回复正文</button>}{reply?.taskId===task.id&&<div aria-label="子回复正文"><pre>{reply.content}</pre>{reply.nextOffset!==null&&<button type="button" onClick={()=>void readReply(task.id,reply.nextOffset??0)}>下一页</button>}</div>}</details>}</article>)}</section>;
+}
+export function AgentTaskIndicator({conversationId,onOpen}:{readonly conversationId:string;readonly onOpen:()=>void}) {
+ const [count,setCount]=useState(0);
+ useEffect(()=>{if(!conversationId)return;const controller=new AbortController();let timer:ReturnType<typeof setTimeout>;let stopped=false;const load=async()=>{try{const response=await fetch(`/api/conversations/${encodeURIComponent(conversationId)}/tasks`,{signal:controller.signal});if(response.ok){const data:{tasks:Entry[]}=await response.json();if(!stopped){setCount(data.tasks.filter(task=>task.state.status!=='terminal'||!['committed','invalidated'].includes(task.delivery.status)).length);}}}catch{}finally{if(!stopped)timer=setTimeout(()=>void load(),2000);}};void load();return()=>{stopped=true;controller.abort();clearTimeout(timer);};},[conversationId]);
+ return <button type="button" onClick={onOpen} aria-label={`子 Agent 任务，${count} 个运行中或待投递`}><span role="status">子任务 {count}</span></button>;
+}
+
+export function TaskOutputAcceptance({task}:{readonly task:Pick<TaskView,"admission"|"acceptance">}) {
+ if(!task.admission?.output)return null;
+ return <details><summary>文件契约验收：{task.acceptance?.status??"尚未执行"}</summary><p>仅检查声明文件的存在、字面量或哈希；不代表整个任务正确。记录只反映检查时的文件，后续修改需重新验收。可要求主 Agent 调用 agent verify。</p><pre>{JSON.stringify({contract:task.admission.output,assessment:task.acceptance},null,2)}</pre></details>;
+}

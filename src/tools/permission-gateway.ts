@@ -1,63 +1,27 @@
 import type { AgentMode } from "@/core/agent-events";
-import type {
-  PermissionApprovalBroker,
-  PermissionPrompt,
-} from "@/core/permissions/approval";
 import { evaluatePermission } from "@/core/permissions/evaluator";
-import { formatExactPermissionExpression } from "@/core/permissions/rules";
-import {
-  permissionTargetValue,
-  permissionRuleName,
-  type PermissionMode,
-  type PermissionRule,
-  type PermissionSubject,
-} from "@/core/permissions/types";
+import { permissionTargetValue, type PermissionMode, type PermissionRule, type PermissionSubject } from "@/core/permissions/types";
 import { analyzeDangerousCommand } from "@/tools/dangerous-command";
-import {
-  permissionTargetFailure,
-  resolvePermissionSubject,
-  summarizePermissionSubject,
-} from "@/tools/permission-target";
+import { permissionTargetFailure, resolvePermissionSubject } from "@/tools/permission-target";
 import type { PermissionOperation } from "@/tools/registry";
-import {
-  toolFailure,
-  type ToolExecutionResult,
-  type WorkspaceBoundary,
-} from "@/tools/types";
+import { toolFailure, type ToolExecutionResult, type WorkspaceBoundary } from "@/tools/types";
 
 export type PermissionGatewayOptions = {
   readonly agentMode: AgentMode;
-  readonly permissionMode: PermissionMode | (() => PermissionMode);
+  // 兼容既有会话模式；旧模式不再触发人工审批。
+  readonly permissionMode?: PermissionMode | (() => PermissionMode);
   readonly workspace: WorkspaceBoundary;
-  readonly broker: PermissionApprovalBroker;
   readonly loadRules: () => Promise<readonly PermissionRule[]>;
-  readonly persistAllow?: (expression: string) => Promise<void>;
+  readonly additionalEvaluations?: (subject: PermissionSubject) => Promise<readonly ReturnType<typeof evaluatePermission>[]>;
 };
 
 export type PermissionExecutable = {
   readonly kind: "allowed";
   readonly call: PermissionOperation;
   readonly subject: PermissionSubject;
-  readonly approvalScope?: "once" | "session" | "permanent";
   revalidate(signal: AbortSignal): Promise<ToolExecutionResult | undefined>;
 };
-
-export type PermissionAwaiting = {
-  readonly kind: "awaiting";
-  readonly prompt: PermissionPrompt;
-  resolve(): Promise<PermissionAuthorization>;
-};
-
-export type PermissionAuthorization =
-  | PermissionExecutable
-  | PermissionAwaiting
-  | {
-      readonly kind: "denied";
-      readonly result: ToolExecutionResult;
-      readonly approvalStatus?: "denied" | "expired" | "cancelled" | "invalid";
-    };
-
-type Confirmation = "policy" | "session" | "human";
+export type PermissionAuthorization = PermissionExecutable | { readonly kind: "denied"; readonly result: ToolExecutionResult };
 
 export class PermissionGateway {
   constructor(private readonly options: PermissionGatewayOptions) {}
@@ -67,225 +31,51 @@ export class PermissionGateway {
     return this.authorize(call, requestId, signal);
   }
 
-  async authorize(
-    call: PermissionOperation,
-    toolCallId: string,
-    signal: AbortSignal,
-    permissionTarget = call.permissionTarget,
-  ): Promise<PermissionAuthorization> {
-    const scopedCall = permissionTarget === call.permissionTarget
-      ? call
-      : { ...call, permissionTarget, permissionTargets: [permissionTarget] };
+  async authorize(call: PermissionOperation, _toolCallId: string, signal: AbortSignal, permissionTarget = call.permissionTarget): Promise<PermissionAuthorization> {
+    const scopedCall = permissionTarget === call.permissionTarget ? call : { ...call, permissionTarget, permissionTargets: [permissionTarget] };
     if (signal.aborted) return denied(cancelledFailure());
-    if (this.options.agentMode === "plan" && scopedCall.mutability !== "read-only") {
-      return denied(
-        toolFailure(
-          "permission-denied",
-          scopedCall.mutability === "external" ? "Plan 模式不允许连接或调用外部 MCP Server。" : "Plan 模式不允许写入 Workspace 或执行命令。",
-          { retryable: true },
-        ),
-      );
-    }
-    const preliminaryHardFailure = preliminaryDangerousFailure(scopedCall);
-    if (preliminaryHardFailure) return denied(preliminaryHardFailure);
-
+    if (this.options.agentMode === "plan" && scopedCall.mutability !== "read-only") return denied(toolFailure("permission-denied", "Plan 模式不允许写入 Workspace、执行命令或调用外部 MCP。", { retryable: true }));
+    const preliminary = preliminaryDangerousFailure(scopedCall);
+    if (preliminary) return denied(preliminary);
     const subject = await this.#resolveSubject(scopedCall);
     if (!subject.ok) return denied(subject.result);
     const hardFailure = dangerousFailure(subject.value);
     if (hardFailure) return denied(hardFailure);
-
     const evaluation = await this.#evaluate(subject.value);
     if (!evaluation.ok) return denied(evaluation.result);
-    if (evaluation.value.kind === "deny") {
-      return denied(permissionDenied(evaluation.value.reason.message));
-    }
-    if (evaluation.value.kind === "allow") {
-      return this.#allowed(scopedCall, subject.value, "policy");
-    }
-    if (this.options.broker.hasSessionGrant(subject.value)) {
-      return this.#allowed(scopedCall, subject.value, "session");
-    }
-
-    const handle = this.options.broker.request(
-      {
-        toolCallId,
-        subject: subject.value,
-        fingerprint: scopedCall.fingerprint,
-        reason: evaluation.value.reason,
-        summary: summarizePermissionSubject(subject.value, scopedCall.permissionTarget),
-      },
-      signal,
-    );
+    if (evaluation.value.kind === "deny") return denied(permissionDenied(evaluation.value.reason.message));
     const expectedFingerprint = scopedCall.fingerprint;
-    let resolution: Promise<PermissionAuthorization> | undefined;
-    return {
-      kind: "awaiting",
-      prompt: handle.prompt,
-      resolve: () => {
-        resolution ??= this.#resolveApproval(
-          scopedCall,
-          subject.value,
-          expectedFingerprint,
-          handle.outcome,
-          signal,
-        );
-        return resolution;
-      },
-    };
+    return { kind: "allowed", call: scopedCall, subject: subject.value, revalidate: signal => this.#revalidate(scopedCall, subject.value, expectedFingerprint, signal) };
   }
 
-  #allowed(
-    call: PermissionOperation,
-    subject: PermissionSubject,
-    confirmation: Confirmation,
-    approvalScope?: PermissionExecutable["approvalScope"],
-  ): PermissionExecutable {
-    const expectedFingerprint = call.fingerprint;
-    return {
-      kind: "allowed",
-      call,
-      subject,
-      approvalScope,
-      revalidate: (signal) =>
-        this.#revalidate(call, subject, expectedFingerprint, confirmation, signal),
-    };
-  }
-
-  async #resolveApproval(
-    call: PermissionOperation,
-    subject: PermissionSubject,
-    expectedFingerprint: string,
-    outcomePromise: ReturnType<PermissionApprovalBroker["request"]>["outcome"],
-    signal: AbortSignal,
-  ): Promise<PermissionAuthorization> {
-    const outcome = await outcomePromise;
-    if (outcome.kind === "cancelled" || signal.aborted) {
-      return denied(cancelledFailure(), "cancelled");
-    }
-    if (outcome.kind === "denied") {
-      return denied(
-        toolFailure("user-denied", "用户拒绝了这次工具调用。", {
-          retryable: true,
-        }),
-        "denied",
-      );
-    }
-    if (outcome.kind === "expired" || outcome.kind === "invalid") {
-      return denied(
-        toolFailure("approval-invalid", "授权请求已失效，请重新评估工具调用。", {
-          retryable: true,
-        }),
-        outcome.kind,
-      );
-    }
-    if (outcome.scope === "permanent") {
-      if (!this.options.persistAllow) {
-        return denied(permissionConfigFailure(), "invalid");
-      }
-      try {
-        await this.options.persistAllow(
-          formatExactPermissionExpression(
-            permissionRuleName(subject),
-            permissionTargetValue(subject),
-          ),
-        );
-      } catch {
-        return denied(permissionConfigFailure(), "invalid");
-      }
-    }
-
-    const failure = await this.#revalidate(
-      call,
-      subject,
-      expectedFingerprint,
-      "human",
-      signal,
-    );
-    return failure
-      ? denied(failure, failure.ok ? undefined : "invalid")
-      : this.#allowed(call, subject, "human", outcome.scope);
-  }
-
-  async #revalidate(
-    call: PermissionOperation,
-    expectedSubject: PermissionSubject,
-    expectedFingerprint: string,
-    confirmation: Confirmation,
-    signal: AbortSignal,
-  ): Promise<ToolExecutionResult | undefined> {
+  async #revalidate(call: PermissionOperation, expectedSubject: PermissionSubject, expectedFingerprint: string, signal: AbortSignal): Promise<ToolExecutionResult | undefined> {
     if (signal.aborted) return cancelledFailure();
     const externalFailure = await call.revalidate?.(signal);
     if (externalFailure) return externalFailure;
-    if (this.options.agentMode === "plan" && call.mutability !== "read-only") {
-      return approvalInvalid("Agent 模式已不再允许这次工具调用。");
-    }
+    if (this.options.agentMode === "plan" && call.mutability !== "read-only") return approvalInvalid("Agent 模式已不再允许这次工具调用。");
     const current = await this.#resolveSubject(call);
     if (!current.ok) return current.result;
-    if (
-      call.fingerprint.length === 0 ||
-      call.fingerprint !== expectedFingerprint ||
-      !sameSubject(expectedSubject, current.value)
-    ) {
-      return approvalInvalid("工具参数或规范目标在授权后发生变化。");
-    }
+    if (!call.fingerprint.length || call.fingerprint !== expectedFingerprint || !sameSubject(expectedSubject, current.value)) return approvalInvalid("工具参数或规范目标在权限检查后发生变化。");
     const hardFailure = dangerousFailure(current.value);
     if (hardFailure) return hardFailure;
     const evaluation = await this.#evaluate(current.value);
     if (!evaluation.ok) return evaluation.result;
-    if (evaluation.value.kind === "deny") {
-      return approvalInvalid("权限复检发现新的拒绝规则。");
-    }
-    if (
-      evaluation.value.kind === "ask" &&
-      confirmation === "policy" &&
-      !this.options.broker.hasSessionGrant(current.value)
-    ) {
-      return approvalInvalid("权限复检要求重新取得人工确认。");
-    }
+    if (evaluation.value.kind === "deny") return approvalInvalid("权限复检发现新的拒绝规则。");
     return undefined;
   }
 
-  async #resolveSubject(
-    call: PermissionOperation,
-  ): Promise<
-    | { readonly ok: true; readonly value: PermissionSubject }
-    | { readonly ok: false; readonly result: ToolExecutionResult }
-  > {
-    try {
-      return {
-        ok: true,
-        value: await resolvePermissionSubject(call, this.options.workspace),
-      };
-    } catch (error) {
-      return { ok: false, result: permissionTargetFailure(error) };
-    }
+  async #resolveSubject(call: PermissionOperation): Promise<{ readonly ok: true; readonly value: PermissionSubject } | { readonly ok: false; readonly result: ToolExecutionResult }> {
+    try { return { ok: true, value: await resolvePermissionSubject(call, this.options.workspace) }; }
+    catch (error) { return { ok: false, result: permissionTargetFailure(error) }; }
   }
 
-  async #evaluate(
-    subject: PermissionSubject,
-  ): Promise<
-    | { readonly ok: true; readonly value: ReturnType<typeof evaluatePermission> }
-    | { readonly ok: false; readonly result: ToolExecutionResult }
-  > {
+  async #evaluate(subject: PermissionSubject): Promise<{ readonly ok: true; readonly value: ReturnType<typeof evaluatePermission> } | { readonly ok: false; readonly result: ToolExecutionResult }> {
     try {
       const rules = await this.options.loadRules();
-      return {
-        ok: true,
-        value: evaluatePermission({
-          subject,
-          rules,
-          mode: this.#permissionMode(),
-        }),
-      };
-    } catch {
-      return { ok: false, result: permissionConfigFailure() };
-    }
-  }
-
-  #permissionMode(): PermissionMode {
-    return typeof this.options.permissionMode === "function"
-      ? this.options.permissionMode()
-      : this.options.permissionMode;
+      const mode = typeof this.options.permissionMode === "function" ? this.options.permissionMode() : this.options.permissionMode ?? "permissive";
+      const evaluations = [evaluatePermission({ subject, rules, mode }), ...(await this.options.additionalEvaluations?.(subject) ?? [])];
+      return { ok: true, value: evaluations.find(item => item.kind === "deny") ?? evaluations[0] };
+    } catch { return { ok: false, result: permissionConfigFailure() }; }
   }
 }
 
@@ -338,11 +128,8 @@ function sameSubject(
   );
 }
 
-function denied(
-  result: ToolExecutionResult,
-  approvalStatus?: Extract<PermissionAuthorization, { readonly kind: "denied" }>["approvalStatus"],
-): Extract<PermissionAuthorization, { readonly kind: "denied" }> {
-  return { kind: "denied", result, approvalStatus };
+function denied(result: ToolExecutionResult): Extract<PermissionAuthorization, { readonly kind: "denied" }> {
+  return { kind: "denied", result };
 }
 
 function permissionDenied(message: string): ToolExecutionResult {
@@ -354,13 +141,9 @@ function approvalInvalid(message: string): ToolExecutionResult {
 }
 
 function permissionConfigFailure(): ToolExecutionResult {
-  return toolFailure(
-    "permission-config",
-    "权限配置无法安全读取或更新，工具未执行。",
-    { retryable: true },
-  );
+  return toolFailure("permission-config", "权限配置无法安全读取，工具未执行。", { retryable: true });
 }
 
 function cancelledFailure(): ToolExecutionResult {
-  return toolFailure("cancelled", "工具授权等待已取消。");
+  return toolFailure("cancelled", "工具权限检查已取消。");
 }

@@ -48,6 +48,8 @@ test("本地运行日志以脱敏 JSONL 串行追加并收紧文件权限", asyn
     }],
     tools: [{
       name: "read_file",
+      iteration: 2,
+      targetFailureReason: "not-directory",
       status: "succeeded",
       durationMs: 8,
       authorization: { status: "allowed", waitMs: 420 },
@@ -80,6 +82,8 @@ test("本地运行日志以脱敏 JSONL 串行追加并收紧文件权限", asyn
       status: "allowed",
       waitMs: 420,
     });
+    assert.equal((await logger.find("run-1")).tools[0]?.targetFailureReason, "not-directory");
+    assert.equal((await logger.find("run-1")).tools[0]?.iteration, 2);
     const legacy: Record<string, unknown> = {
       ...entries[0],
       schemaVersion: 3,
@@ -104,7 +108,8 @@ test("新版运行记录保留用途统计和工具关联键，旧版仍可读�
   try {
     const log = new LocalAgentRunLog(directory);
     const modelUsage = { scope: "self", categories: [{ purpose: "summary", requests: 2, reportedRequests: 1, failedRequests: 1,
-      durationMs: 20, promptTokens: 100, completionTokens: 10, totalTokens: 110 }] } as const;
+      durationMs: 20, promptTokens: 100, completionTokens: 10, totalTokens: 110,
+      cache: { tokenRequests: 1, cachedTokens: 80, hitRequests: 0, missRequests: 0, unknownRequests: 1 } }] } as const;
     await log.append({ runId: "new-run", source: "cli", conversationId: "conversation", revisionBefore: 0, persistence: { status: "saved", revisionAfter: 1 },
       providerId: "provider", workspaceId: "workspace", mode: "do", modeTurn: 1, startedAt: new Date(0).toISOString(), finishedAt: new Date(20).toISOString(), durationMs: 20,
       stopReason: "final-response", iterations: 1, sideEffect: "none", inputChars: 0, outputChars: 0, usage: { availability: "unavailable" }, modelUsage,

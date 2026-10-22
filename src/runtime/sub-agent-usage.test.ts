@@ -1,0 +1,12 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {aggregateTaskUsage} from './sub-agent-usage';import {ModelUsageTracker} from '@/models/usage-tracker';import type {ChatProvider} from '@/models/provider';
+test('父子自身与总量分开，去重且缓存缺失可观察',async()=>{const provider:ChatProvider={async *stream(){yield{type:'usage',usage:{promptTokens:10,completionTokens:2,totalTokens:12,promptCache:{availability:'tokens',cachedTokens:5}}};yield{type:'done',finishReason:'stop'};}};const tracker=new ModelUsageTracker();for await(const item of tracker.wrap(provider,'agent').stream([],{signal:new AbortController().signal,toolChoice:'none'}))void item;const usage=tracker.snapshot();const total=aggregateTaskUsage(usage,[{id:'child',usage},{id:'child',usage}]);assert.equal(total.total.totalTokens,24);assert.equal(total.parent.categories[0].totalTokens,12);assert.equal(usage.categories[0].cache?.cachedTokens,5);});
+test('缓存四类观测与缺失 usage 分开计数，摘要失败和兄弟用量不污染父 self',async()=>{
+ const tracker=new ModelUsageTracker();
+ const samples=[{availability:'tokens' as const,cachedTokens:7},{availability:'status' as const,hit:true},{availability:'status' as const,hit:false},{availability:'unavailable' as const},undefined];
+ for(const promptCache of samples){const provider:ChatProvider={async *stream(){if(promptCache)yield{type:'usage',usage:{promptTokens:10,completionTokens:2,totalTokens:12,promptCache}};yield{type:'done',finishReason:'stop'};}};for await(const event of tracker.wrap(provider,'agent').stream([],{signal:new AbortController().signal,toolChoice:'none'}))void event;}
+ const failing:ChatProvider={async *stream(){throw new Error('摘要请求失败');}};
+ await assert.rejects(async()=>{for await(const event of tracker.wrap(failing,'summary').stream([],{signal:new AbortController().signal,toolChoice:'none'}))void event;});
+ const self=tracker.snapshot(),agent=self.categories.find(c=>c.purpose==='agent')!,summary=self.categories.find(c=>c.purpose==='summary')!;
+ assert.deepEqual(agent.cache,{tokenRequests:1,cachedTokens:7,hitRequests:1,missRequests:1,unknownRequests:2});assert.equal(agent.reportedRequests,4);assert.equal(summary.failedRequests,1);assert.equal(summary.cache?.unknownRequests,1);
+ const total=aggregateTaskUsage(self,[{id:'a',usage:self},{id:'b',usage:self},{id:'a',usage:self}]);assert.equal(total.total.requests,18);assert.equal(total.total.totalTokens,144);assert.equal(total.parent.categories.find(c=>c.purpose==='agent')?.requests,5);
+});

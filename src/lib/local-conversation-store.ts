@@ -1,4 +1,6 @@
+import { searchContextContent, type ContextSearchInput } from "@/core/context/context-search";
 import { recoverToolCalls } from "@/runtime/conversation-recovery";
+import { ChildResultStore } from "./child-result-store";
 import { randomUUID } from "node:crypto";
 import {
   chmod,
@@ -59,12 +61,13 @@ export type ConversationActivity =
   | { readonly status: "interrupted"; readonly expectedRevision: number };
 
 export class LocalConversationStore implements ConversationRepository, ContextStore {
+  readonly childResults: import("./child-result-store").ChildResultStore;
   readonly #queues = new Map<string, Promise<void>>();
 
   constructor(
     private readonly root = path.join(homedir(), ".orbitcode", "conversations-v1"),
     private readonly now: () => Date = () => new Date(),
-  ) {}
+  ) { this.childResults = new ChildResultStore(root, () => now().getTime()); }
 
   async list(): Promise<readonly ConversationSummary[]> {
     await this.ensureRoot();
@@ -278,6 +281,7 @@ export class LocalConversationStore implements ConversationRepository, ContextSt
         summary: summaryForSave(current.summary, undefined),
         lifecycleEpoch: randomUUID(),
         lastTurn: undefined,
+        childResultReceipts: undefined,
         skills: undefined,
         mode: "do",
         modeTurn: 0,
@@ -286,6 +290,7 @@ export class LocalConversationStore implements ConversationRepository, ContextSt
       },
     });
     if (result.status === "saved") {
+      await rm(path.join(this.directory(input.conversationId), "child-results"), { recursive: true, force: true });
       await rm(this.contextDirectory(input.conversationId), {
         recursive: true,
         force: true,
@@ -568,11 +573,21 @@ export class LocalConversationStore implements ConversationRepository, ContextSt
     readonly limit: number;
     readonly signal: AbortSignal;
   }): Promise<ContextChunk> {
+    if (!Number.isSafeInteger(input.offset) || input.offset < 0 || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > MAX_CONTEXT_READ_CHARACTERS) throw referenceError();
+    const characters = Array.from(await this.readContent(input));
+    if (input.offset > characters.length) throw referenceError();
+    const content = characters.slice(input.offset, input.offset + input.limit).join("");
+    const nextOffset = input.offset + Array.from(content).length;
+    return { content, offset: input.offset, nextOffset, totalCharacters: characters.length, hasMore: nextOffset < characters.length };
+  }
+
+  async search(input: ContextSearchInput & { readonly sessionId: string }) {
+    return searchContextContent(await this.readContent(input), input);
+  }
+
+  private async readContent(input: { readonly sessionId: string; readonly reference: string; readonly signal: AbortSignal }): Promise<string> {
     validateConversationId(input.sessionId);
     const objectId = parseReference(input.reference);
-    if (!Number.isSafeInteger(input.offset) || input.offset < 0 || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > MAX_CONTEXT_READ_CHARACTERS) {
-      throw referenceError();
-    }
     if (input.signal.aborted) throw cancelled();
     const directory = this.contextDirectory(input.sessionId);
     const target = path.join(directory, `${objectId}.txt`);
@@ -586,17 +601,9 @@ export class LocalConversationStore implements ConversationRepository, ContextSt
       if (stat.isSymbolicLink() || !stat.isFile() || !isWithin(directoryRealPath, targetRealPath) || stat.size > MAX_STORED_CONTEXT_BYTES) {
         throw referenceError();
       }
-      const characters = Array.from(await readFile(targetRealPath, "utf8"));
-      if (input.signal.aborted || input.offset > characters.length) throw referenceError();
-      const content = characters.slice(input.offset, input.offset + input.limit).join("");
-      const nextOffset = input.offset + Array.from(content).length;
-      return {
-        content,
-        offset: input.offset,
-        nextOffset,
-        totalCharacters: characters.length,
-        hasMore: nextOffset < characters.length,
-      };
+      const content = await readFile(targetRealPath, "utf8");
+      if (input.signal.aborted) throw cancelled();
+      return content;
     } catch (error) {
       if (error instanceof ContextManagementError) throw error;
       throw referenceError();

@@ -1,56 +1,24 @@
 import { randomUUID } from "node:crypto";
-
 import type { ModelToolCall } from "@/models/provider";
-import type {
-  SchemaIssue,
-  ToolExecutionResult,
-  ToolMutability,
-} from "@/tools/types";
+import type { ToolExecutionResult, ToolMutability } from "@/tools/types";
 
-export type VerificationStatus =
-  | "verified"
-  | "observed"
-  | "partial"
-  | "unverified"
-  | "blocked";
-
-export type CompletionCheck = {
-  readonly scope?: "external-call";
-  readonly criterion: string;
-  readonly status: "passed" | "failed" | "not-run";
-  readonly evidenceCallIds: readonly string[];
-};
-
-export type CompletionAssessment = {
-  readonly status: VerificationStatus;
-  readonly checks: readonly CompletionCheck[];
-  readonly blockers: readonly string[];
-};
-
-export type CompletionReportInput = {
-  // 兼容旧客户端；汇总状态始终由检查项和实际证据计算。
-  readonly status?: "complete" | "partial" | "blocked";
-  readonly checks: readonly CompletionCheck[];
-  readonly blockers: readonly string[];
-};
+import { unverifiedCompletionAssessment, type CompletionAssessment } from "./completion-assessment";
+export { unverifiedCompletionAssessment, isCompletionAssessment } from "./completion-assessment";
+export type { CompletionAssessment, CompletionCheck, VerificationStatus } from "./completion-assessment";
 
 type EvidenceRecord = {
   readonly ok: boolean;
-  readonly iteration: number;
-  readonly sequence: number;
   readonly mutability: ToolMutability;
-  readonly sideEffect: ToolExecutionResult["sideEffect"];
   readonly toolName: string;
-  readonly argumentsJson: string;
 };
 
+// 被动记录工具事实；不要求模型提交报告，不据调用成功推导任务验收通过。
 export class CompletionTracker {
   readonly #evidence = new Map<string, EvidenceRecord>();
   readonly #evidenceIdByCallId = new Map<string, string>();
   readonly #createRunId: () => string;
   #runId: string;
   #nextEvidenceId = 1;
-  #assessment?: CompletionAssessment;
 
   constructor(options: { readonly createRunId?: () => string } = {}) {
     this.#createRunId = options.createRunId ?? (() => randomUUID().replaceAll("-", ""));
@@ -62,381 +30,29 @@ export class CompletionTracker {
     this.#evidenceIdByCallId.clear();
     this.#runId = createEvidenceRunId(this.#createRunId);
     this.#nextEvidenceId = 1;
-    this.#assessment = undefined;
   }
 
-  record(input: {
-    readonly call: ModelToolCall;
-    readonly result: ToolExecutionResult;
-    readonly iteration: number;
-    readonly sequence: number;
-    readonly mutability: ToolMutability;
-  }): string | undefined {
-    if (input.call.name === "report_completion") return undefined;
-    if (input.result.sideEffect === "applied" && input.mutability !== "read-only") {
-      this.#assessment = undefined;
-    }
-    const evidenceId = this.#evidenceIdByCallId.get(input.call.id) ??
-      `e_${this.#runId}_${this.#nextEvidenceId++}`;
-    this.#evidenceIdByCallId.set(input.call.id, evidenceId);
-    this.#evidence.set(evidenceId, {
-      ok: input.result.ok,
-      iteration: input.iteration,
-      sequence: input.sequence,
-      mutability: input.mutability,
-      sideEffect: input.result.sideEffect,
-      toolName: input.call.name,
-      argumentsJson: input.call.argumentsJson,
-    });
-    return evidenceId;
+  record(input: { readonly call: ModelToolCall; readonly result: ToolExecutionResult; readonly iteration: number; readonly sequence: number; readonly mutability: ToolMutability }): string {
+    const id = this.#evidenceIdByCallId.get(input.call.id) ?? `e_${this.#runId}_${this.#nextEvidenceId++}`;
+    this.#evidenceIdByCallId.set(input.call.id, id);
+    this.#evidence.set(id, { ok: input.result.ok, mutability: input.mutability, toolName: input.call.name });
+    return id;
   }
 
-  evidenceId(callId: string): string | undefined {
-    return this.#evidenceIdByCallId.get(callId);
-  }
-
-  accept(report: CompletionReportInput):
-    | { readonly ok: true; readonly assessment: CompletionAssessment }
-    | { readonly ok: false; readonly message: string; readonly issues: readonly SchemaIssue[] } {
-    const issues: SchemaIssue[] = [];
-    const claimsComplete = report.blockers.length === 0 &&
-      report.checks.length > 0 && report.checks.every((check) => check.status === "passed");
-    const unresolvedQualityGate = latestFailedQualityGate(this.#evidence.values());
-    if (claimsComplete && unresolvedQualityGate !== undefined) {
-      issues.push({
-        path: "checks",
-        message: `${unresolvedQualityGate} 质量检查最后一次执行仍失败；请修复后重跑，或在 checks 中如实保留 failed/not-run。`,
-      });
-    }
-    for (const [index, check] of report.checks.entries()) {
-      const evidencePath = `checks[${index}].evidence_call_ids`;
-      const records = check.evidenceCallIds.map((id) => this.#resolveEvidence(id));
-      for (const [evidenceIndex, record] of records.entries()) {
-        const id = check.evidenceCallIds[evidenceIndex];
-        if (record === undefined) {
-          issues.push({ path: `${evidencePath}[${evidenceIndex}]`,
-            message: `证据 ${id} 不属于本轮；请逐字复制本轮工具结果中的 evidence_call_id。` });
-        } else if (check.status === "passed" && !record.ok) {
-          issues.push({ path: `${evidencePath}[${evidenceIndex}]`,
-            message: `证据 ${id} 来自失败工具结果；passed 项的所有引用都必须成功。已修复的历史失败可在最终回复中说明，最终验收引用修复后的验证；若复现失败本身是验收要求，请用断言预期错误的验证脚本产生成功证据。不得省略仍失败的需求。` });
-        }
-      }
-      if (check.status === "not-run" && records.length > 0) {
-        issues.push({ path: evidencePath, message: "未运行项不能携带工具证据；请根据实际执行情况修正状态或引用。" });
-      }
-      if (check.status !== "passed") continue;
-      if (records.length === 0) {
-        issues.push({ path: evidencePath, message: "通过项必须引用至少一个成功的只读或命令验证结果；请先执行匹配的验证。" });
-        continue;
-      }
-      // 引用本身无效时不推导语义错误，其他检查项仍独立校验。
-      if (records.some((record) => !record?.ok)) continue;
-      if (check.scope === "external-call") {
-        if (records.length !== 1 || records[0]?.mutability !== "external") {
-          issues.push({ path: evidencePath, message: "外部调用检查必须且只能引用一次成功的外部工具调用；不要重复调用，也不要补充打印固定文本的命令。" });
-        }
-        continue;
-      }
-      if (!records.some((record) => record !== undefined && isVerification(record))) {
-        issues.push({ path: evidencePath,
-          message: "通过项必须引用成功的只读或命令验证结果；写入成功不能替代验证。若目标仅是调用外部工具并查看返回，请使用 scope=external-call 且只引用该次调用；不要重复执行外部工具。其他目标需补充真正匹配的验证，不能打印固定文本充当验证。" });
-        continue;
-      }
-      if (requiresBuildEvidence(check.criterion) && !records.some(isBuildEvidence)) {
-        issues.push({ path: evidencePath, message: "构建证据必须来自成功的 build 命令。" });
-      }
-      if (requiresLintEvidence(check.criterion) && !records.some(isLintEvidence)) {
-        issues.push({ path: evidencePath, message: "Lint 证据必须来自成功的 lint 命令。" });
-      }
-      if (requiresHttpEvidence(check.criterion) && !records.some((record) => isHttpEvidence(record, check.criterion))) {
-        issues.push({ path: evidencePath, message: "HTTP 证据必须来自对声明目标的成功请求。" });
-      }
-    }
-
-    const lastWrite = latest(
-      [...this.#evidence.values()].filter((record) =>
-        record.mutability !== "read-only" && record.sideEffect === "applied"
-      ),
-    );
-    const passedEvidence = report.checks
-      .filter((check) => check.status === "passed")
-      .flatMap((check) => check.evidenceCallIds)
-      .map((id) => this.#resolveEvidence(id))
-      .filter((record): record is EvidenceRecord => record !== undefined);
-    const hasPostWriteVerification = lastWrite === undefined || passedEvidence.some(
-      (record) => record.ok && isAfter(record, lastWrite) && isVerification(record),
-    );
-    if (claimsComplete && !hasPostWriteVerification) {
-      issues.push({ path: "checks",
-        message: "完整验证必须引用最后写入之后的成功验证；请补充与目标匹配的验证，无法验证时在 checks 中保留 failed/not-run。" });
-    }
-    if (issues.length > 0) {
-      // 拒绝报告不抹去已知检查；无效项只保留需求，不能继续展示为已通过。
-      this.#assessment = {
-        status: "unverified",
-        checks: report.checks.map((check, index) => issues.some((issue) =>
-          issue.path.startsWith(`checks[${index}].`)
-        ) ? { ...check, status: "not-run", evidenceCallIds: [] }
-          : { ...check, evidenceCallIds: [...check.evidenceCallIds] }),
-        blockers: [...report.blockers],
-      };
-      return rejectedReport(issues);
-    }
-    const hasIncompleteChecks = report.checks.some(
-      (check) => check.status !== "passed",
-    );
-    const status: VerificationStatus = report.blockers.length > 0
-      ? "blocked"
-      : hasIncompleteChecks
-        ? "partial"
-        : report.checks.length > 0 && hasPostWriteVerification
-          ? report.checks.every((check) => check.scope === "external-call")
-            ? "observed"
-            : "verified"
-          : "unverified";
-    this.#assessment = {
-      status,
-      checks: report.checks.map((check) => ({
-        ...(check.scope === undefined ? {} : { scope: check.scope }),
-        criterion: check.scope === "external-call"
-          ? `外部工具调用结果：${check.evidenceCallIds.map((id) => this.#resolveEvidence(id)?.toolName ?? id).join("、")}（仅确认调用返回，不验证外部副作用）`
-          : check.criterion,
-        status: check.status,
-        evidenceCallIds: [...check.evidenceCallIds],
-      })),
-      blockers: [...report.blockers],
-    };
-    return { ok: true, assessment: this.#assessment };
-  }
-
-  markReportFailure(): void {
-    if (this.#assessment !== undefined) {
-      this.#assessment = { ...this.#assessment, status: "unverified" };
-    }
-  }
+  evidenceId(callId: string): string | undefined { return this.#evidenceIdByCallId.get(callId); }
 
   assessment(): CompletionAssessment {
-    if (this.#assessment !== undefined) return this.#assessment;
     const evidence = [...this.#evidence.entries()];
-    const externalEvidence = evidence.filter(([, record]) => record.mutability === "external");
-    if (
-      externalEvidence.length > 0 &&
-      // read_context 只取回已卸载的外部结果，不扩大外部调用的完成证据。
-      evidence.every(([, record]) => record.mutability === "external" || record.toolName === "read_context")
-    ) {
-      return {
-        status: "observed",
-        checks: externalEvidence.map(([evidenceCallId, record]) => ({
-          scope: "external-call",
-          criterion: `外部工具调用结果：${record.toolName}（仅记录调用返回，不验证答复内容）`,
-          status: record.ok ? "passed" : "failed",
-          evidenceCallIds: [evidenceCallId],
-        })),
-        blockers: [],
-      };
+    const external = evidence.filter(([, record]) => record.mutability === "external");
+    if (external.length > 0 && evidence.every(([, record]) => record.mutability === "external" || record.toolName === "read_context")) {
+      return { status: "observed", checks: external.slice(-20).map(([id, record]) => ({ scope: "external-call", criterion: `外部工具调用结果：${record.toolName.slice(0, 120)}（仅记录调用返回，不验证答复内容）`, status: record.ok ? "passed" : "failed", evidenceCallIds: [id] })), blockers: [] };
     }
     return unverifiedCompletionAssessment();
   }
-
-  #resolveEvidence(id: string): EvidenceRecord | undefined {
-    const direct = this.#evidence.get(id);
-    if (direct !== undefined) return direct;
-    const evidenceId = this.#evidenceIdByCallId.get(id);
-    return evidenceId === undefined ? undefined : this.#evidence.get(evidenceId);
-  }
-}
-
-function rejectedReport(issues: readonly SchemaIssue[]): {
-  readonly ok: false;
-  readonly message: string;
-  readonly issues: readonly SchemaIssue[];
-} {
-  return {
-    ok: false,
-    message: issues.map((issue) => `${issue.path}: ${issue.message}`).join("\n"),
-    issues,
-  };
 }
 
 function createEvidenceRunId(factory: () => string): string {
-  const runId = factory();
-  if (!/^[A-Za-z0-9_-]{1,64}$/u.test(runId)) {
-    throw new Error("完成证据运行 ID 必须由 1 到 64 个字母、数字、下划线或连字符组成。");
-  }
-  return runId;
-}
-
-export function unverifiedCompletionAssessment(): CompletionAssessment {
-  return { status: "unverified", checks: [], blockers: [] };
-}
-
-export function isCompletionAssessment(value: unknown): value is CompletionAssessment {
-  if (!isRecord(value) || !hasExactFields(value, ["status", "checks", "blockers"])) {
-    return false;
-  }
-  if (!["verified", "observed", "partial", "unverified", "blocked"].includes(String(value.status))) {
-    return false;
-  }
-  if (
-    !Array.isArray(value.checks) ||
-    value.checks.length > 20 ||
-    !value.checks.every((check) =>
-      isRecord(check) &&
-      hasExactFields(check, check.scope === undefined ? ["criterion", "status", "evidenceCallIds"] : ["criterion", "status", "evidenceCallIds", "scope"]) &&
-      (check.scope === undefined || check.scope === "external-call") &&
-      typeof check.criterion === "string" &&
-      check.criterion.length > 0 &&
-      check.criterion.length <= 200 &&
-      ["passed", "failed", "not-run"].includes(String(check.status)) &&
-      Array.isArray(check.evidenceCallIds) &&
-      check.evidenceCallIds.length <= 16 &&
-      check.evidenceCallIds.every((id) =>
-        typeof id === "string" && /^[A-Za-z0-9._:-]{1,128}$/u.test(id)
-      )
-    )
-  ) return false;
-  return Array.isArray(value.blockers) &&
-    value.blockers.length <= 10 &&
-    value.blockers.every((blocker) =>
-      typeof blocker === "string" && blocker.length > 0 && blocker.length <= 300
-    );
-}
-
-function latest(records: readonly EvidenceRecord[]): EvidenceRecord | undefined {
-  return records.reduce<EvidenceRecord | undefined>(
-    (current, record) => current === undefined || isAfter(record, current)
-      ? record
-      : current,
-    undefined,
-  );
-}
-
-function isAfter(left: EvidenceRecord, right: EvidenceRecord): boolean {
-  return left.iteration > right.iteration ||
-    (left.iteration === right.iteration && left.sequence > right.sequence);
-}
-
-function isVerification(record: EvidenceRecord): boolean {
-  if (record.mutability === "read-only") return true;
-  if (record.mutability !== "command") return false;
-  // 单纯回显预设文本没有验证目标，不能靠退出码替代证据。
-  try {
-    const args: unknown = JSON.parse(record.argumentsJson);
-    if (isRecord(args) && typeof args.command === "string" && /^\s*(?:echo|printf)\b/u.test(args.command)) return false;
-  } catch { return false; }
-  return true;
-}
-
-function latestFailedQualityGate(
-  records: Iterable<EvidenceRecord>,
-): string | undefined {
-  const latestByGate = new Map<
-    string,
-    { readonly gate: string; readonly record: EvidenceRecord }
-  >();
-  for (const record of records) {
-    for (const gate of qualityGates(record)) {
-      const current = latestByGate.get(gate);
-      if (current === undefined || isAfter(record, current.record)) {
-        latestByGate.set(gate, { gate, record });
-      }
-    }
-  }
-  return [...latestByGate.values()].find(({ record }) => !record.ok)?.gate;
-}
-
-function qualityGates(record: EvidenceRecord): readonly string[] {
-  if (record.toolName !== "run_command") return [];
-  const command = commandArgument(record.argumentsJson);
-  if (command === undefined) return [];
-
-  const gates: string[] = [];
-  if (/\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?check\b/iu.test(command)) {
-    gates.push("check");
-  }
-  if (isBuildCommand(command)) gates.push("build");
-  if (isLintCommand(command)) gates.push("lint");
-  if (
-    /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:typecheck|type-check)\b/iu.test(command) ||
-    /\btsc\b/iu.test(command)
-  ) gates.push("typecheck");
-  if (
-    /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b/iu.test(command) ||
-    /\b(?:vitest|jest|tsx\s+--test|node\s+--test)\b/iu.test(command)
-  ) gates.push("test");
-  return gates;
-}
-
-function requiresBuildEvidence(criterion: string): boolean {
-  return /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?build\b/iu.test(criterion) ||
-    /(?:构建|编译).*(?:通过|成功|无.*错误)/u.test(criterion);
-}
-
-function isBuildEvidence(record: EvidenceRecord | undefined): boolean {
-  if (!record?.ok || record.toolName !== "run_command") return false;
-  const command = commandArgument(record.argumentsJson);
-  return command !== undefined && isBuildCommand(command);
-}
-
-function isBuildCommand(command: string): boolean {
-  return /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?build\b/iu.test(command) ||
-    /\bnext\s+build\b/iu.test(command);
-}
-
-function requiresLintEvidence(criterion: string): boolean {
-  return /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?lint\b/iu.test(criterion) ||
-    /\b(?:eslint|lint)\b.*(?:通过|成功|无.*错误)/iu.test(criterion);
-}
-
-function isLintEvidence(record: EvidenceRecord | undefined): boolean {
-  if (!record?.ok || record.toolName !== "run_command") return false;
-  const command = commandArgument(record.argumentsJson);
-  return command !== undefined && isLintCommand(command);
-}
-
-function isLintCommand(command: string): boolean {
-  return /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?lint\b/iu.test(command) ||
-    /\beslint\b/iu.test(command);
-}
-
-function requiresHttpEvidence(criterion: string): boolean {
-  return /\b(?:curl|https?:\/\/|HTTP)\b/iu.test(criterion) ||
-    /(?:状态码|返回)\s*2\d\d/u.test(criterion);
-}
-
-function isHttpEvidence(
-  record: EvidenceRecord | undefined,
-  criterion: string,
-): boolean {
-  if (!record?.ok || record.toolName !== "run_command") return false;
-  const command = commandArgument(record.argumentsJson);
-  if (command === undefined) return false;
-  // 只能识别显式 curl 目标冲突。脚本和测试可以自行发起请求，不能因包装层未出现 curl 拒绝；
-  // 接受命令证据仅确认成功执行，不独立证明脚本断言和需求覆盖完整。
-  if (!/\bcurl\b/iu.test(command)) return true;
-  const targets = criterion.match(/\b(?:localhost|127\.0\.0\.1):\d+\b/giu) ?? [];
-  return targets.every((target) => command.includes(target));
-}
-
-function commandArgument(argumentsJson: string): string | undefined {
-  try {
-    const value: unknown = JSON.parse(argumentsJson);
-    return isRecord(value) && typeof value.command === "string"
-      ? value.command
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function hasExactFields(
-  value: Record<string, unknown>,
-  fields: readonly string[],
-): boolean {
-  return Object.keys(value).length === fields.length &&
-    fields.every((field) => field in value);
+  const id = factory();
+  if (!/^[A-Za-z0-9_-]{1,64}$/u.test(id)) throw new Error("完成证据运行 ID 必须由 1 到 64 个字母、数字、下划线或连字符组成。");
+  return id;
 }

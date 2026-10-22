@@ -11,6 +11,7 @@ import { ConversationRuntimeManager } from "@/runtime/conversation-runtime-manag
 import { ConversationOperationGuard } from "@/runtime/conversation-operation-guard";
 import { PermissionSessionManager } from "@/runtime/permission-session-manager";
 import { loadProviderContext } from "@/runtime/config";
+import { DEFAULT_SUB_AGENT_LIMITS, type SubAgentLimits } from "@/core/sub-agents/types";
 import { loadWorkspaceCatalog } from "@/runtime/workspace-config";
 import { MacOsSeatbeltCommandSandbox } from "@/tools/macos-seatbelt-sandbox";
 import { TerminalRenderer } from "@/cli/renderer";
@@ -22,11 +23,15 @@ export async function runtimeFixture(responder: (request: MockRequest) => MockRe
   readonly context?: string;
   readonly iterations?: string;
   readonly storeFactory?: (root: string) => LocalConversationStore;
+  readonly subAgentLimits?: Partial<SubAgentLimits>;
 } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "orbit-parity-"));
   const server = await startOpenAIMockServer(responder);
   await writeFile(path.join(root, "orbitcode.yaml"), `providers:\n  - name: primary\n    protocol: openai\n    model: test-model\n    base_url: ${server.baseUrl}\n    api_key: FIXTURE_KEY\n    context:\n      window_tokens: 128000\n${options.context ?? ""}`);
-  const loadConfig = () => loadProviderContext(root, { FIXTURE_KEY: "synthetic-fixture-secret", ...(options.iterations ? { ORBITCODE_MAX_AGENT_ITERATIONS: options.iterations } : {}) });
+  const loadConfig = async () => {
+    const context = await loadProviderContext(root, { FIXTURE_KEY: "synthetic-fixture-secret", ...(options.iterations ? { ORBITCODE_MAX_AGENT_ITERATIONS: options.iterations } : {}) });
+    return options.subAgentLimits ? { ...context, managedSettings: { schemaVersion: 1 as const, revision: 0, providers: [], workspaces: [], mcpServers: [], subAgents: { ...DEFAULT_SUB_AGENT_LIMITS, ...options.subAgentLimits } } } : context;
+  };
   const loadWorkspaces = () => loadWorkspaceCatalog({ cwd: root });
   const store = options.storeFactory?.(path.join(root, ".conversations")) ?? new LocalConversationStore(path.join(root, ".conversations"));
   const log = new LocalAgentRunLog(path.join(root, ".logs"));

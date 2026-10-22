@@ -20,12 +20,10 @@ import {
 import { createModeToolPolicy } from "@/tools/mode-policy";
 import { PermissionGateway } from "@/tools/permission-gateway";
 import { defineTool, successfulToolResult, ToolRegistry } from "@/tools/registry";
-import { createReportCompletionTool } from "@/tools/report-completion";
 import { writeFilesTool } from "@/tools/write-files";
 import { objectSchema, stringSchema } from "@/tools/schema";
 import type { WorkspaceBoundary } from "@/tools/types";
 import { createWorkspaceBoundary } from "@/tools/workspace";
-import { PermissionSessionManager } from "@/web/permission-session-manager";
 
 class ScriptedProvider implements ChatProvider {
   readonly requests: Array<{
@@ -361,7 +359,7 @@ test("Context Manager 在成功轮次间保留完整工具 transcript", async ()
   ]);
 });
 
-test("用户拒绝权限后 Agent Loop 收到结构化工具结果并继续模型迭代", async () => {
+test("规则拒绝权限后 Agent Loop 收到结构化工具结果并继续模型迭代", async () => {
   const provider = new ScriptedProvider([
     [
       { type: "tool-call", call: call("write-denied", "write_file", "package.json") },
@@ -374,18 +372,11 @@ test("用户拒绝权限后 Agent Loop 收到结构化工具结果并继续模�
   ]);
   let executions = 0;
   const toolRegistry = registry(() => executions++);
-  const manager = new PermissionSessionManager();
-  const session = manager.createSession();
-  const turn = manager.beginTurn(session.id, {
-    workspace: { id: "test", name: "Test Workspace" },
-    providerId: "test-provider",
-  });
   const permissionGateway = new PermissionGateway({
     agentMode: "do",
     permissionMode: "default",
     workspace: requireWorkspace(),
-    broker: turn.broker,
-    loadRules: async () => [],
+    loadRules: async () => [{source:"local",expression:"write_file(*)",toolName:"write_file",targetKind:"path",pattern:"*",matchKind:"glob",decision:"deny"}],
   });
   const agent = new AgentLoop(
     provider,
@@ -412,16 +403,6 @@ test("用户拒绝权限后 Agent Loop 收到结构化工具结果并继续模�
   const observed: AgentEvent[] = [];
   for (;;) {
     const next = await iterator.next();
-    assert.equal(next.done, false);
-    if (!next.value) continue;
-    observed.push(next.value);
-    if (next.value.type === "permission-requested") {
-      manager.resolveDecision(session.id, next.value.prompt.requestId, "deny");
-      break;
-    }
-  }
-  for (;;) {
-    const next = await iterator.next();
     if (next.done) break;
     observed.push(next.value);
   }
@@ -433,7 +414,7 @@ test("用户拒绝权限后 Agent Loop 收到结构化工具结果并继续模�
       (event) =>
         event.type === "tool-result" &&
         !event.result.ok &&
-        event.result.error.kind === "user-denied",
+        event.result.error.kind === "permission-denied",
     ),
     true,
   );
@@ -441,9 +422,8 @@ test("用户拒绝权限后 Agent Loop 收到结构化工具结果并继续模�
   assert.equal(provider.requests.length, 2);
   assert.match(
     provider.requests[1].messages.at(-1)?.content ?? "",
-    /user-denied/u,
+    /permission-denied/u,
   );
-  manager.closeSession(session.id);
 });
 
 test("最后允许迭代仍请求工具时不执行并停止", async () => {
@@ -717,114 +697,6 @@ test("连续同类工具失败会要求切换策略并在预算耗尽时唯一�
   ));
 });
 
-test("结构化完成报告引用真实写入后证据时标记为已验证", async () => {
-  const tracker = new CompletionTracker({ createRunId: () => "verified_run" });
-  const provider = new ScriptedProvider([
-    [
-      { type: "tool-call", call: call("write-verified", "write_file", "target") },
-      { type: "done", finishReason: "tool-call" },
-    ],
-    [
-      { type: "tool-call", call: call("read-verified", "read_file", "target") },
-      { type: "done", finishReason: "tool-call" },
-    ],
-    [
-      {
-        type: "tool-call",
-        call: {
-          id: "report-verified",
-          name: "report_completion",
-          argumentsJson: JSON.stringify({
-            status: "complete",
-            checks: [{
-              criterion: "写入后读取验证",
-              status: "passed",
-              evidence_call_ids: ["e_verified_run_2"],
-            }],
-            blockers: [],
-          }),
-        },
-      },
-      { type: "done", finishReason: "tool-call" },
-    ],
-    [
-      { type: "text-delta", text: "任务完成" },
-      { type: "done", finishReason: "stop" },
-    ],
-  ]);
-  const agent = createAgent(provider, registry(undefined, tracker), 6, tracker);
-
-  const result = await collect(agent.streamTurn({
-    input: "写入并验证",
-    mode: "do",
-    modeTurn: 1,
-    signal: new AbortController().signal,
-  }));
-  assert.ok(!provider.requests[0]?.toolNames.includes("report_completion"));
-  assert.ok(provider.requests[1]?.toolNames.includes("report_completion"));
-  const terminal = result.at(-1);
-  assert.equal(terminal?.type, "stopped");
-  if (terminal?.type === "stopped") {
-    assert.equal(terminal.verification?.status, "verified");
-  }
-});
-
-test("完成报告修正失败后仅生成最终答复，保留检查且不再执行工具", async () => {
-  for (const [withContext, ignoresFinalOnly] of [[false, false], [false, true], [true, false], [true, true]]) {
-    const tracker = new CompletionTracker();
-    let writes = 0;
-    const badReport = (id: string) => ({
-      id, name: "report_completion", argumentsJson: JSON.stringify({
-        checks: [
-          { criterion: "读取文件", status: "passed", evidence_call_ids: ["read"] },
-          { criterion: "浏览器交互", status: "passed", evidence_call_ids: ["invented"] },
-        ], blockers: [],
-      }),
-    });
-    const provider = new ScriptedProvider([
-      [{ type: "tool-call", call: call("read", "read_file", "target") }, { type: "done", finishReason: "tool-call" }],
-      [{ type: "tool-call", call: badReport("report-1") }, { type: "done", finishReason: "tool-call" }],
-      [{ type: "tool-call", call: badReport("report-2") }, { type: "done", finishReason: "tool-call" }],
-      ignoresFinalOnly
-        ? [{ type: "tool-call", call: call("unexpected-write", "write_file", "target") }, { type: "done", finishReason: "tool-call" }]
-        : [{ type: "text-delta", text: "文件已读取；浏览器交互尚未验证。" }, { type: "done", finishReason: "stop" }],
-      [{ type: "tool-call", call: call("next-read", "read_file", "target") }, { type: "done", finishReason: "tool-call" }],
-      [{ type: "text-delta", text: "已继续检查。" }, { type: "done", finishReason: "stop" }],
-    ]);
-    const tools = registry(() => writes++, tracker);
-    const agent = withContext
-      ? createContextAgent(provider, "completion-fallback", 6, tools, tracker)
-      : createAgent(provider, tools, 6, tracker);
-    const result = await collect(agent.streamTurn({
-      input: "检查项目", mode: "do", modeTurn: 1, signal: new AbortController().signal,
-    }));
-    assert.equal(stopReason(result), "final-response");
-    assert.equal(result.filter((event) => event.type === "stopped").length, 1);
-    assert.equal(writes, 0);
-    assert.deepEqual(provider.requests[3]?.toolNames, []);
-    assert.match(JSON.stringify(provider.requests[3]?.messages), /仅生成最终答复/u);
-    const terminal = result.at(-1);
-    if (terminal?.type !== "stopped") assert.fail("缺少最终事件");
-    assert.equal(terminal.verification?.status, "unverified");
-    assert.deepEqual(terminal.verification?.checks.map((check) => check.status), ["passed", "not-run"]);
-    assert.match(agent.getHistory().at(-1)?.content ?? "", /尚未验证|未通过校验/u);
-    assert.equal(result.filter((event) => event.type === "tool-result").length, 3);
-    const resumed = await collect(agent.streamTurn({
-      input: "继续检查", mode: "do", modeTurn: 2, signal: new AbortController().signal,
-    }));
-    assert.equal(stopReason(resumed), "final-response");
-    assert.ok(provider.requests[4]?.toolNames.includes("read_file"));
-    assert.doesNotMatch(JSON.stringify(provider.requests[4]?.messages.filter((message) => message.role === "system")), /仅生成最终答复/u);
-    if (withContext) {
-      const previousMessages = JSON.stringify(provider.requests[4]?.messages);
-      assert.match(previousMessages, /report-1/u);
-      assert.match(previousMessages, /report-2/u);
-      assert.match(previousMessages, /尚未验证|未通过校验/u);
-      assert.doesNotMatch(previousMessages, /unexpected-write/u);
-    }
-  }
-});
-
 test("工具结果向后续模型请求公开可复制的完成证据 ID", async () => {
   const tracker = new CompletionTracker({ createRunId: () => "test_run" });
   const provider = new ScriptedProvider([
@@ -837,7 +709,7 @@ test("工具结果向后续模型请求公开可复制的完成证据 ID", async
       { type: "done", finishReason: "stop" },
     ],
   ]);
-  const agent = createAgent(provider, registry(undefined, tracker), 4, tracker);
+  const agent = createAgent(provider, registry(), 4, tracker);
 
   await collect(agent.streamTurn({
     input: "写入目标",
@@ -868,7 +740,6 @@ test("仅外部工具返回时记录调用证据，不补报或重复调用", as
       permission: { targetKind: "context", resolve: () => ({ kind: "context", reference: "test-mcp" }) },
       async execute() { externalCalls += 1; return successfulToolResult({ items: ["一", "二"] }, "possible"); },
     }),
-    createReportCompletionTool(tracker),
   ]);
   const provider = new ScriptedProvider([
     [{ type: "tool-call", call: call("mcp-read", mcpName, "查询") }, { type: "done", finishReason: "tool-call" }],
@@ -915,25 +786,6 @@ test("约三十个文件的批量变更在三十次迭代内完成并验证", as
       { type: "done", finishReason: "tool-call" },
     ],
     [
-      {
-        type: "tool-call",
-        call: {
-          id: "report-batch",
-          name: "report_completion",
-          argumentsJson: JSON.stringify({
-            status: "complete",
-            checks: [{
-              criterion: "批量文件写入后验证",
-              status: "passed",
-              evidence_call_ids: ["verify-batch"],
-            }],
-            blockers: [],
-          }),
-        },
-      },
-      { type: "done", finishReason: "tool-call" },
-    ],
-    [
       { type: "text-delta", text: "三十个文件已完成" },
       { type: "done", finishReason: "stop" },
     ],
@@ -952,7 +804,6 @@ test("约三十个文件的批量变更在三十次迭代内完成并验证", as
         return successfulToolResult({ label: input.label, files: writes.length });
       },
     }),
-    createReportCompletionTool(tracker),
   ]);
   const agent = createAgent(
     provider,
@@ -970,13 +821,13 @@ test("约三十个文件的批量变更在三十次迭代内完成并验证", as
   }));
 
   assert.equal(writes.length, 30);
-  assert.equal(provider.requests.length, 4);
+  assert.equal(provider.requests.length, 3);
   const terminal = result.at(-1);
   assert.equal(terminal?.type, "stopped");
   if (terminal?.type === "stopped") {
     assert.equal(terminal.reason, "final-response");
     assert.ok(terminal.iterations <= 30);
-    assert.equal(terminal.verification?.status, "verified");
+    assert.equal(terminal.verification?.status, "unverified");
   }
 });
 
@@ -1334,8 +1185,7 @@ function createContextAgent(
 
 function registry(
   onWrite: (() => void) | undefined = () => undefined,
-  completionTracker?: CompletionTracker,
-): ToolRegistry {
+ ): ToolRegistry {
   const read = (name: "read_file" | "find_files" | "search_code") =>
     defineTool({
       name,
@@ -1362,7 +1212,6 @@ function registry(
         return successfulToolResult({ label: input.label }, "applied");
       },
     }),
-    ...(completionTracker ? [createReportCompletionTool(completionTracker)] : []),
   ]);
 }
 

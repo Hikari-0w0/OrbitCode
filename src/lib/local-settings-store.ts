@@ -1,3 +1,4 @@
+import { parseSubAgentLimits } from "@/core/sub-agents/types";
 import { randomUUID } from "node:crypto";
 import { open, mkdir, rename, rm, lstat, chmod, link } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -116,7 +117,7 @@ export class LocalSettingsStore {
 
 function validateSettings(value: unknown): ManagedSettings {
   if (!record(value) || value.schemaVersion !== 1 || !Number.isSafeInteger(value.revision) || Number(value.revision) < 0) throw invalid();
-  if (Object.keys(value).some((key) => !["schemaVersion", "revision", "providers", "workspaces", "mcpServers", "defaultProviderId", "defaultWorkspaceId", "maxIterations", "maxRuntimeMinutes", "defaultPermissionMode"].includes(key))) throw invalid();
+  if (Object.keys(value).some((key) => !["schemaVersion", "revision", "providers", "workspaces", "mcpServers", "defaultProviderId", "defaultWorkspaceId", "maxIterations", "maxRuntimeMinutes", "defaultPermissionMode", "subAgents"].includes(key))) throw invalid();
   if (!Array.isArray(value.providers) || !Array.isArray(value.workspaces) || !Array.isArray(value.mcpServers)) throw invalid();
   if (value.providers.length > 32 || value.workspaces.length > 32 || value.mcpServers.length > 32) throw invalid();
   const providerIds = new Set<string>();
@@ -185,6 +186,7 @@ function validateSettings(value: unknown): ManagedSettings {
   if (value.maxIterations !== undefined && (!Number.isSafeInteger(value.maxIterations) || Number(value.maxIterations) < 1 || Number(value.maxIterations) > 32)) throw invalid();
   if (value.maxRuntimeMinutes !== undefined && (!Number.isSafeInteger(value.maxRuntimeMinutes) || Number(value.maxRuntimeMinutes) < 1 || Number(value.maxRuntimeMinutes) > 1440)) throw invalid();
   if (value.defaultPermissionMode !== undefined && !["strict", "default", "permissive"].includes(String(value.defaultPermissionMode))) throw invalid();
+  try { parseSubAgentLimits(value.subAgents); } catch { throw invalid(); }
   return value as ManagedSettings;
 }
 function invalid(): SettingsError { return new SettingsError("invalid", "本地设置字段无效。"); }

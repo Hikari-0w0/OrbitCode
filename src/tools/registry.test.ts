@@ -122,6 +122,14 @@ test("默认工具定义明确要求 Workspace 相对路径", () => {
   const registry = createDefaultToolRegistry(sandbox);
 
   for (const definition of registry.definitions()) {
+    if (definition.function.name === "search_code") {
+      const schema = JSON.stringify(definition.function.parameters);
+      assert.match(schema, /相对 Workspace 根目录/);
+      assert.match(schema, /只能传目录/);
+      assert.match(schema, /file_pattern/);
+      assert.match(schema, /绝对路径/);
+      continue;
+    }
     assert.match(
       JSON.stringify(definition.function.parameters),
       /相对当前 Workspace 根目录的 POSIX 路径/u,
@@ -198,3 +206,31 @@ function fakeTool(onExecute: () => unknown = () => undefined) {
     },
   });
 }
+
+test('取消规范化保留执行器已经返回的命令输出、截断与副作用',async()=>{
+ const {toolFailure}=await import('./types');
+ const {SkillCommandCalls}=await import('@/runtime/child-execution/result');
+ for(const succeeded of [false,true]){
+  const parent=new AbortController();
+  const output={stdout:'BEFORE_CANCEL_STDOUT',stderr:'BEFORE_CANCEL_STDERR',exitCode:succeeded?0:null,terminationSignal:succeeded?null:'SIGTERM',timedOut:false,cancelled:!succeeded,stdoutTruncated:true,stderrTruncated:false};
+  const registry=new ToolRegistry([defineTool({
+   ...fakeTool(),mutability:'command',
+   async execute(){
+    parent.abort();
+    const observed=succeeded?successfulToolResult(output,'applied'):{...toolFailure('cancelled','执行器已停止。',{sideEffect:'possible'}),output};
+    return {...observed,meta:{durationMs:0,truncated:true,truncatedFields:['stdout']}};
+   },
+  })]);
+  const observed=await registry.execute('read_file',{path:'ok'},context(parent.signal));
+  assert.ok(!observed.ok&&observed.error.kind==='cancelled');assert.deepEqual(observed.output,output);
+  assert.equal(observed.sideEffect,succeeded?'applied':'possible');assert.equal(observed.meta.truncated,true);assert.deepEqual(observed.meta.truncatedFields,['stdout']);
+  const handoff=new SkillCommandCalls();handoff.record(observed,'command');assert.equal(handoff.snapshot().results[0].cancelled,!succeeded);assert.equal(handoff.snapshot().results[0].exitCode,output.exitCode);
+ }
+});
+
+test('先取消后到 deadline 时，未返回的执行字段保持未知且不改判为超时',async()=>{
+ const parent=new AbortController();
+ const registry=new ToolRegistry([fakeTool(()=>{parent.abort();return new Promise<void>(()=>{});})]);
+ const result=await registry.execute('read_file',{path:'ok'},context(parent.signal,5));
+ assert.ok(!result.ok&&result.error.kind==='cancelled');assert.equal(result.output,undefined);assert.equal(result.sideEffect,'none');
+});

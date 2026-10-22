@@ -5,7 +5,6 @@ import { ProviderSelector } from "@/components/provider-selector";
 import { ChatComposer } from "@/components/chat-composer";
 import { ChatWorkspace } from "@/components/chat-workspace";
 import { MessageList } from "@/components/message-list";
-import { PermissionModeControl } from "@/components/permission-mode-control";
 import { WorkspaceSelector } from "@/components/workspace-selector";
 test("Provider 选择器在标签被响应式样式隐藏后仍有可访问名称", () => {
     const markup = renderToStaticMarkup(<ProviderSelector providers={[]} selected="" disabled={false} onChange={() => undefined}/>);
@@ -74,13 +73,11 @@ test("失败工具卡展示安全错误但不回显原始调用参数", () => {
     assert.match(markup, /路径必须是有效的相对路径/);
     assert.equal(markup.includes("/absolute/main.cpp"), false);
 });
-test("权限模式控件明确三档默认行为且使用单选语义", () => {
-    const markup = renderToStaticMarkup(<PermissionModeControl mode="default" disabled={false} updating={false} onChange={() => undefined}/>);
-    assert.match(markup, /role="radiogroup" aria-label="权限模式"/);
-    assert.match(markup, /读取直行，写入与命令询问/);
-    assert.match(markup, /硬边界仍生效/);
+test("对话页显示自主执行且不暴露审批模式选择", () => {
+ const markup=renderToStaticMarkup(<ChatWorkspace/>);assert.match(markup,/自主执行/);assert.equal(markup.includes('aria-label="权限模式"'),false);assert.equal(markup.includes('严格审批'),false);
 });
-test("授权卡只展示服务端安全摘要和四种决定", () => {
+
+test("历史授权卡保留安全摘要但不再提供决定按钮", () => {
     const sentinel = "must-not-render-secret";
     const markup = renderToStaticMarkup(<MessageList messages={[{
                 id: "approval",
@@ -109,10 +106,10 @@ test("授权卡只展示服务端安全摘要和四种决定", () => {
                             },
                         },
                     }],
-            }]} onSuggestion={() => undefined} planActionDisabled={false} onExecutePlan={() => undefined} onPermissionDecision={() => undefined}/>);
-    for (const label of ["本次允许", "本会话允许", "永久允许（本机）", "拒绝"]) {
-        assert.match(markup, new RegExp(label.replace(/[（）]/g, ".")));
-    }
+            }]} onSuggestion={() => undefined} planActionDisabled={false} onExecutePlan={() => undefined}/>);
+    assert.match(markup,/历史授权记录/);
+    assert.equal(markup.includes("授权决定"),false);
+    assert.equal(markup.includes("本次允许"),false);
     assert.match(markup, /git status/);
     assert.equal(markup.includes(sentinel), false);
 });

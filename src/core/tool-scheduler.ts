@@ -14,6 +14,7 @@ import type {
 } from "@/tools/registry";
 import {
   toolFailure,
+  WorkspaceAccessError,
   type ToolExecutionResult,
   type ToolMutability,
   type WorkspaceBoundary,
@@ -77,6 +78,7 @@ type AuthorizedCall = {
 };
 
 type SchedulerOptions = {
+  readonly writes?: import("@/tools/types").WorkspaceWriteCoordinator;
   readonly deadlineMs?: number;
   readonly calls: readonly ModelToolCall[];
   readonly access: ToolAccess;
@@ -130,38 +132,13 @@ export async function* scheduleToolCalls(
         current.preparation.call.permissionTarget,
       ];
       for (const target of targets) {
-        let authorization: PermissionAuthorization =
+        const authorization: PermissionAuthorization =
           await options.permissionGateway.authorize(
             current.preparation.call,
             current.call.id,
             options.signal,
             target,
           );
-        if (authorization.kind === "awaiting") {
-          yield* flushReadBatch(readBatch, completed, options, concurrency);
-          yield {
-            type: "permission-requested",
-            call: current.call,
-            sequence: current.sequence,
-            prompt: authorization.prompt,
-          };
-          const requestId = authorization.prompt.requestId;
-          const resolvedAuthorization = await authorization.resolve();
-          if (resolvedAuthorization.kind === "awaiting") {
-            throw new Error("授权代理返回了嵌套等待项。");
-          }
-          authorization = resolvedAuthorization;
-          yield {
-            type: "permission-resolved",
-            call: current.call,
-            sequence: current.sequence,
-            requestId,
-            status: resolutionStatus(authorization),
-            scope: authorization.kind === "allowed"
-              ? authorization.approvalScope
-              : undefined,
-          };
-        }
         if (authorization.kind === "denied") {
           yield* flushReadBatch(readBatch, completed, options, concurrency);
           const result = toCallResult(current, authorization.result);
@@ -293,16 +270,29 @@ async function safeExecute(
   options: SchedulerOptions,
   emitSkillEvent: (event: SkillRunEvent) => Promise<void>,
 ): Promise<ToolExecutionResult> {
+  let release: (() => void) | undefined;
+  let transferred = false;
+  const deadlineMs = call.prepared.budget === "parent-run" ? (options.deadlineMs ?? Date.now() + 300_000) : Math.min(options.deadlineMs ?? Infinity, executionContext(options, call.prepared.mutability).deadlineMs);
+  const signal = AbortSignal.any([options.signal, AbortSignal.timeout(Math.max(1, deadlineMs - Date.now()))]);
   try {
+    // 编排工具在各自执行边界取得许可，不能持有父级读锁等待子任务。
+    if (options.writes && !["agent", "load_skill", "process_status", "stop_process"].includes(call.prepared.name)) {
+      release = call.prepared.mutability === "read-only"
+        ? await options.writes.acquireRead?.(options.workspace.root, signal)
+        : await options.writes.acquire(options.workspace.root, signal);
+    }
+    signal.throwIfAborted();
+    for (const permission of call.permissions) { const failure = await permission.revalidate(signal); if (failure) return failure; }
     return await options.access.executePrepared(
       call.prepared,
-      { ...executionContext(options, call.prepared.mutability), callId: call.call.id, deadlineMs: call.prepared.budget === "parent-run" ? (options.deadlineMs ?? Date.now() + 300_000) : Math.min(options.deadlineMs ?? Infinity, executionContext(options, call.prepared.mutability).deadlineMs), emitSkillEvent },
+      { ...executionContext(options, call.prepared.mutability), signal, takeWriteLease: () => { transferred = true; return release; }, callId: call.call.id, deadlineMs: call.prepared.budget === "parent-run" ? (options.deadlineMs ?? Date.now() + 300_000) : Math.min(options.deadlineMs ?? Infinity, executionContext(options, call.prepared.mutability).deadlineMs), emitSkillEvent },
     );
-  } catch {
-    return toolFailure("execution-failed", "工具执行发生未知错误。", {
+  } catch (error) {
+    if (error instanceof WorkspaceAccessError) return toolFailure(error.kind, error.message);
+    return toolFailure(options.signal.aborted ? "cancelled" : signal.aborted ? "timeout" : "execution-failed", "工具执行失败或等待写入许可已结束。", {
       sideEffect: call.prepared.mutability === "read-only" ? "none" : "possible",
     });
-  }
+  } finally { if (!transferred) release?.(); }
 }
 
 function executionContext(
@@ -327,11 +317,4 @@ function toCallResult(
     sequence: call.sequence,
     result,
   };
-}
-
-function resolutionStatus(
-  authorization: Exclude<PermissionAuthorization, { readonly kind: "awaiting" }>,
-): PermissionResolutionStatus {
-  if (authorization.kind === "allowed") return "allowed";
-  return authorization.approvalStatus ?? "invalid";
 }

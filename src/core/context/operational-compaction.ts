@@ -45,6 +45,7 @@ export async function compactOperationalHistory(input: {
   const latestFailureStarts = latestRepeatedFailureStarts(exchanges);
   const selected = exchanges.filter((exchange) => {
     if (protectedStarts.has(exchange.start)) return false;
+    // 兼容旧会话中已保存的报告交换；新运行没有该工具。
     if (exchange.toolNames.includes("report_completion")) return false;
     if (exchange.successful) return true;
     return exchange.failureSignature !== undefined &&

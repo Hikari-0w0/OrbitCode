@@ -1,36 +1,9 @@
-import { parsePermissionDecisionRequest } from "@/web/chat-contract";
-import {
-  permissionApiErrorResponse,
-  requirePermissionSessionId,
-} from "@/web/permission-http";
-import { permissionSessionManager } from "@/web/permission-session-store";
-import {
-  assertSameOrigin,
-  readPermissionJsonBody,
-} from "@/web/request-security";
-
-type RouteContext = {
-  readonly params: Promise<{ readonly sessionId: string }>;
-};
-
-export async function POST(
-  request: Request,
-  context: RouteContext,
-): Promise<Response> {
+import { permissionApiErrorResponse, requirePermissionSessionId } from "@/web/permission-http";
+import { assertSameOrigin } from "@/web/request-security";
+export async function POST(request: Request, context: { readonly params: Promise<{ readonly sessionId: string }> }): Promise<Response> {
   try {
     assertSameOrigin(request);
-    const { sessionId: rawSessionId } = await context.params;
-    const sessionId = requirePermissionSessionId(rawSessionId);
-    const body = parsePermissionDecisionRequest(
-      await readPermissionJsonBody(request),
-    );
-    permissionSessionManager.resolveDecision(
-      sessionId,
-      body.requestId,
-      body.decision,
-    );
-    return Response.json({ accepted: true } as const);
-  } catch (error) {
-    return permissionApiErrorResponse(error);
-  }
+    requirePermissionSessionId((await context.params).sessionId);
+    return Response.json({ error: "人工审批已移除，工具按权限规则直接执行或拒绝。" }, { status: 410 });
+  } catch (error) { return permissionApiErrorResponse(error); }
 }

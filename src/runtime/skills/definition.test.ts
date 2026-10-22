@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { parseSkill, substituteSkill, argumentWords } from "./definition";
 const skill = (front = "name: sample\ndescription: 简介\nallowed-tools: []\nmode: shared", body = "执行 {{arguments}}") => `---\n${front}\n---\n${body}`;
+test("旧Skill元数据中的已下线工具只被移除，不扩大白名单", () => {
+    const front = "name: sample\ndescription: 简介\nallowed-tools: [read_file, report_completion]\nmode: shared";
+    assert.deepEqual(parseSkill(skill(front)).definition.allowedTools, ["read_file"]);
+    assert.deepEqual(parseSkill(skill(front.replace("read_file, ", ""))).definition.allowedTools, []);
+    assert.throws(() => parseSkill(skill(front.replace("read_file", "unknown_tool"))));
+});
 test("严格解析元信息并保留空白名单", () => {
     assert.deepEqual(parseSkill(skill()).definition, { name: "sample", description: "简介", allowedTools: [], mode: "shared" });
     assert.equal(parseSkill('\uFEFF' + skill().replaceAll('\n', '\r\n')).definition.name, "sample");

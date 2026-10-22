@@ -260,3 +260,17 @@ test("新增背景计入预算，背景本身超出窗口时拒绝请求",async(
  manager.beginTurn("接续任务");
  await assert.rejects(manager.prepareForModel({systemMessages:[{role:"system",content:"记忆背景".repeat(4000)}],tools:[]},new AbortController().signal));
 });
+
+test("运行时预算提示位于请求末尾、参与预算、不写入历史且保留既有前缀", async () => {
+  const manager = new ContextManager({ sessionId: "suffix", config: policy(), store: new MemoryStore(), provider: new ScriptedSummaryProvider([]), initialHistory: [{ role: "user", content: "父背景" }, { role: "assistant", content: "已确认" }] });
+  manager.beginTurn("当前子任务");
+  const envelope = { systemMessages: [{ role: "system", content: "固定角色" }], tools: [] } as const;
+  const first = await manager.prepareForModel(envelope, new AbortController().signal);
+  const second = await manager.prepareForModel({ ...envelope, suffixMessages: [{ role: "user", content: "运行时预算提示" }] }, new AbortController().signal);
+  assert.deepEqual(second.messages.slice(0, -1), first.messages);
+  assert.equal(second.messages.at(-1)?.content, "运行时预算提示");
+  assert.ok(second.estimate.tokens > first.estimate.tokens);
+  manager.appendFinal("未完成部分如实说明");
+  manager.commitTurn();
+  assert.doesNotMatch(JSON.stringify(manager.snapshot()), /运行时预算提示/);
+});

@@ -1,0 +1,3 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {parseAgentCommand} from './agent-commands';
+test('任务命令与正文隔离，子审批只支持单次',()=>{assert.deepEqual(parseAgentCommand('/task wait id'),{kind:'task',action:'wait',id:'id'});assert.equal(parseAgentCommand('任务正文'),undefined);assert.throws(()=>parseAgentCommand('/task approve id request permanent'));assert.throws(()=>parseAgentCommand('/tasks extra'));});
+test('正文命令只接受非负字符偏移',()=>{assert.deepEqual(parseAgentCommand('/task result id 42'),{kind:'task',action:'result',id:'id',offset:42});assert.throws(()=>parseAgentCommand('/task result id -1'));assert.throws(()=>parseAgentCommand('/task result id Infinity'));assert.throws(()=>parseAgentCommand('/task result id 0 extra'));});

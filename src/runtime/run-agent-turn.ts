@@ -76,6 +76,8 @@ export async function* runAgentTurn(
       // 未知异常不暴露底层错误，已观察到的副作用仍必须保留。
     }
   } finally {
+    // 事件循环可能先处理完成微任务，再调度到期定时器；终结必须核对绝对时限。
+    timedOut ||= Date.now() >= deadlineMs;
     const cancelled = signal.aborted;
     clearTimeout(timer);
     controller.abort();

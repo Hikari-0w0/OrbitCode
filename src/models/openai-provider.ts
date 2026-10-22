@@ -63,6 +63,7 @@ type ParsedEvent = {
 };
 
 export class OpenAICompatibleProvider implements ChatProvider {
+  readonly supportsRequestTokenLimit = true;
   private readonly model: string;
   private readonly endpoint: URL;
   private readonly apiKey: string;
@@ -98,6 +99,8 @@ export class OpenAICompatibleProvider implements ChatProvider {
       readonly signal: AbortSignal;
       readonly tools?: readonly ModelToolDefinition[];
       readonly toolChoice: "auto" | "none";
+      readonly beforeRequest?: (attempt: number) => void;
+      readonly maxOutputTokens?: number;
     },
   ): AsyncIterable<ModelStreamEvent> {
     for (let attempt = 1; ; attempt += 1) {
@@ -135,14 +138,20 @@ export class OpenAICompatibleProvider implements ChatProvider {
       readonly signal: AbortSignal;
       readonly tools?: readonly ModelToolDefinition[];
       readonly toolChoice: "auto" | "none";
+      readonly beforeRequest?: (attempt: number) => void;
+      readonly maxOutputTokens?: number;
     },
     attempt: number,
   ): AsyncIterable<ModelStreamEvent> {
     const startedAt = Date.now();
+    if (options.maxOutputTokens !== undefined && (!Number.isSafeInteger(options.maxOutputTokens) || options.maxOutputTokens < 1 || options.maxOutputTokens > MAX_MODEL_OUTPUT_TOKENS)) throw new ProviderError("protocol", "单次请求输出限制无效。");
+    const maxOutputTokens = options.maxOutputTokens === undefined ? this.maxOutputTokens : Math.min(options.maxOutputTokens, this.maxOutputTokens ?? MAX_MODEL_OUTPUT_TOKENS);
     const tools = options.tools ?? [];
     if (options.toolChoice === "auto" && tools.length === 0) {
       throw new ProviderError("protocol", "启用工具选择时必须提供工具定义。");
     }
+    options.signal.throwIfAborted();
+    options.beforeRequest?.(attempt);
 
     yield {
       type: "request-progress",
@@ -166,7 +175,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
           model: this.model,
           messages: messages.map(toOpenAIMessage),
           stream: true,
-          ...(this.maxOutputTokens === undefined ? {} : { max_tokens: this.maxOutputTokens }),
+          ...(maxOutputTokens === undefined ? {} : { max_tokens: maxOutputTokens }),
           stream_options: { include_usage: true },
           tool_choice: options.toolChoice,
           ...thinkingRequestFields(this.thinking),
@@ -310,7 +319,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
         if (event.finishReason !== "tool_calls") {
           const finishReason = safeFinishReason(event.finishReason);
           const detail = finishReason === "length"
-            ? `模型输出达到长度限制（finish_reason=length；max_tokens=${this.maxOutputTokens ?? "未设置，使用服务商默认值"}）。请提高该模型的输出预算或分批生成；本次不完整响应不会作为工具调用执行。`
+            ? `模型输出达到长度限制（finish_reason=length；max_tokens=${maxOutputTokens ?? "未设置，使用服务商默认值"}）。请提高该模型的输出预算或分批生成；本次不完整响应不会作为工具调用执行。`
             : `模型响应以非成功原因结束（finish_reason=${finishReason}）。`;
           throw new ProviderError("protocol", detail, { finishReason });
         }

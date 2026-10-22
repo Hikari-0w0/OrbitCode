@@ -14,7 +14,6 @@ import { integerSchema, objectSchema, stringSchema } from "@/tools/schema";
 import type { ToolMutability, ToolName, WorkspaceBoundary } from "@/tools/types";
 import { createWorkspaceBoundary } from "@/tools/workspace";
 import { writeFilesTool } from "@/tools/write-files";
-import { PermissionSessionManager } from "@/web/permission-session-manager";
 
 type Interval = {
   readonly label: string;
@@ -176,199 +175,14 @@ test("只读并发不超过八个且单个失败不影响同批收敛", async ()
   }
 });
 
-test("多个 ask 按 sequence 逐项等待，只有获准调用在 started 后执行", async () => {
-  const root = await import("node:fs/promises").then(({ mkdtemp }) =>
-    mkdtemp(path.join(tmpdir(), "orbitcode-scheduler-permission-")),
-  );
-  const manager = new PermissionSessionManager();
-  let executions = 0;
-  try {
-    const permissionWorkspace = await createWorkspaceBoundary(root);
-    const registry = permissionWriteRegistry(() => executions++);
-    const session = manager.createSession();
-    const turn = manager.beginTurn(session.id, {
-      workspace: { id: "test", name: "Test" },
-      providerId: "test-provider",
-    });
-    const iterator = scheduleToolCalls({
-      calls: [permissionCall("first", "first.txt"), permissionCall("second", "second.txt")],
-      access: createModeToolPolicy(registry, "do"),
-      workspace: permissionWorkspace,
-      signal: new AbortController().signal,
-      permissionGateway: new PermissionGateway({
-        agentMode: "do",
-        permissionMode: "default",
-        workspace: permissionWorkspace,
-        broker: turn.broker,
-        loadRules: async () => [],
-      }),
-    })[Symbol.asyncIterator]();
-
-    const firstRequest = await iterator.next();
-    assert.equal(firstRequest.value?.type, "permission-requested");
-    assert.equal(executions, 0);
-    if (firstRequest.value?.type !== "permission-requested") return;
-    manager.resolveDecision(
-      session.id,
-      firstRequest.value.prompt.requestId,
-      "allow-once",
-    );
-
-    const middle: ToolScheduleEvent[] = [];
-    let secondRequest: Extract<ToolScheduleEvent, { type: "permission-requested" }> | undefined;
-    while (!secondRequest) {
-      const next = await iterator.next();
-      assert.equal(next.done, false);
-      if (next.value?.type === "permission-requested") secondRequest = next.value;
-      else if (next.value) middle.push(next.value);
-    }
-    assert.equal(executions, 1);
-    assert.deepEqual(middle.map((event) => event.type), [
-      "permission-resolved",
-      "started",
-      "result",
-    ]);
-    manager.resolveDecision(session.id, secondRequest.prompt.requestId, "deny");
-
-    const remaining: ToolScheduleEvent[] = [];
-    for (;;) {
-      const next = await iterator.next();
-      if (next.done) break;
-      remaining.push(next.value);
-    }
-    assert.equal(executions, 1);
-    assert.deepEqual(remaining.map((event) => event.type), [
-      "permission-resolved",
-      "result",
-      "batch-completed",
-    ]);
-    const denied = remaining.find((event) => event.type === "result");
-    assert.equal(
-      denied?.type === "result" && !denied.result.ok
-        ? denied.result.error.kind
-        : undefined,
-      "user-denied",
-    );
-  } finally {
-    await import("node:fs/promises").then(({ rm }) =>
-      rm(root, { recursive: true, force: true }),
-    );
-  }
+test("多个文件操作无需审批仍按序执行",async()=>{
+ const {mkdtemp,rm}=await import('node:fs/promises');const root=await mkdtemp(path.join(tmpdir(),'direct-scheduler-'));
+ let executions=0;try{const workspace=await createWorkspaceBoundary(root);const events=await collect(scheduleToolCalls({calls:[permissionCall('first','first.txt'),permissionCall('second','second.txt')],access:createModeToolPolicy(permissionWriteRegistry(()=>executions++),'do'),workspace,signal:new AbortController().signal,permissionGateway:new PermissionGateway({agentMode:'do',workspace,loadRules:async()=>[]})}));assert.equal(executions,2);assert.equal(events.some(e=>e.type==='permission-requested'||e.type==='permission-resolved'),false);assert.deepEqual(events.filter(e=>e.type==='started').map(e=>e.call.id),['first','second']);}finally{await rm(root,{recursive:true,force:true});}
 });
 
-test("等待授权时取消不会发出 started 或执行工具", async () => {
-  const root = await import("node:fs/promises").then(({ mkdtemp }) =>
-    mkdtemp(path.join(tmpdir(), "orbitcode-scheduler-cancel-")),
-  );
-  const manager = new PermissionSessionManager();
-  let executions = 0;
-  try {
-    const permissionWorkspace = await createWorkspaceBoundary(root);
-    const registry = permissionWriteRegistry(() => executions++);
-    const session = manager.createSession();
-    const turn = manager.beginTurn(session.id, {
-      workspace: { id: "test", name: "Test" },
-      providerId: "test-provider",
-    });
-    const controller = new AbortController();
-    const iterator = scheduleToolCalls({
-      calls: [permissionCall("cancel", "cancel.txt")],
-      access: createModeToolPolicy(registry, "do"),
-      workspace: permissionWorkspace,
-      signal: controller.signal,
-      permissionGateway: new PermissionGateway({
-        agentMode: "do",
-        permissionMode: "default",
-        workspace: permissionWorkspace,
-        broker: turn.broker,
-        loadRules: async () => [],
-      }),
-    })[Symbol.asyncIterator]();
-    assert.equal((await iterator.next()).value?.type, "permission-requested");
-    controller.abort();
-    const remaining: ToolScheduleEvent[] = [];
-    for (;;) {
-      const next = await iterator.next();
-      if (next.done) break;
-      remaining.push(next.value);
-    }
-    assert.equal(remaining.some((event) => event.type === "started"), false);
-    assert.equal(executions, 0);
-    assert.equal(
-      remaining.some(
-        (event) => event.type === "permission-resolved" && event.status === "cancelled",
-      ),
-      true,
-    );
-  } finally {
-    await import("node:fs/promises").then(({ rm }) =>
-      rm(root, { recursive: true, force: true }),
-    );
-  }
-});
-
-test("批量写入逐路径授权，任一目标拒绝时整批不执行", async () => {
-  const { mkdtemp, rm, stat } = await import("node:fs/promises");
-  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-scheduler-multi-target-"));
-  const manager = new PermissionSessionManager();
-  try {
-    const permissionWorkspace = await createWorkspaceBoundary(root);
-    const session = manager.createSession();
-    const turn = manager.beginTurn(session.id, {
-      workspace: { id: "test", name: "Test" },
-      providerId: "test-provider",
-    });
-    const iterator = scheduleToolCalls({
-      calls: [{
-        id: "batch",
-        name: "write_files",
-        argumentsJson: JSON.stringify({
-          files: [
-            { path: "first.txt", content: "first" },
-            { path: "second.txt", content: "second" },
-          ],
-        }),
-      }],
-      access: createModeToolPolicy(new ToolRegistry([writeFilesTool]), "do"),
-      workspace: permissionWorkspace,
-      signal: new AbortController().signal,
-      permissionGateway: new PermissionGateway({
-        agentMode: "do",
-        permissionMode: "default",
-        workspace: permissionWorkspace,
-        broker: turn.broker,
-        loadRules: async () => [],
-      }),
-    })[Symbol.asyncIterator]();
-
-    const firstRequest = await iterator.next();
-    assert.equal(firstRequest.value?.type, "permission-requested");
-    if (firstRequest.value?.type !== "permission-requested") return;
-    manager.resolveDecision(session.id, firstRequest.value.prompt.requestId, "allow-once");
-
-    assert.equal((await iterator.next()).value?.type, "permission-resolved");
-    const secondRequest = await iterator.next();
-    assert.equal(secondRequest.value?.type, "permission-requested");
-    if (secondRequest.value?.type !== "permission-requested") return;
-    manager.resolveDecision(session.id, secondRequest.value.prompt.requestId, "deny");
-
-    const remaining = await collect({
-      [Symbol.asyncIterator]: () => iterator,
-    });
-    assert.equal(remaining.some((event) => event.type === "started"), false);
-    assert.equal(
-      remaining.some((event) =>
-        event.type === "result" &&
-        !event.result.ok &&
-        event.result.error.kind === "user-denied"
-      ),
-      true,
-    );
-    await assert.rejects(stat(path.join(root, "first.txt")), /ENOENT/);
-    await assert.rejects(stat(path.join(root, "second.txt")), /ENOENT/);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+test("批量写入逐路径检查deny，任一目标拒绝时整批不执行",async()=>{
+ const {mkdtemp,rm,stat}=await import('node:fs/promises');const {parsePermissionRule}=await import('@/core/permissions/rules');const root=await mkdtemp(path.join(tmpdir(),'batch-deny-'));
+ try{const workspace=await createWorkspaceBoundary(root);const events=await collect(scheduleToolCalls({calls:[{id:'batch',name:'write_files',argumentsJson:JSON.stringify({files:[{path:'first.txt',content:'first'},{path:'second.txt',content:'second'}]})}],access:createModeToolPolicy(new ToolRegistry([writeFilesTool]),'do'),workspace,signal:new AbortController().signal,permissionGateway:new PermissionGateway({agentMode:'do',workspace,loadRules:async()=>[parsePermissionRule({expression:'write_files(second.txt)',decision:'deny',source:'local',toolTargets:new Map([['write_files','path']])})]})}));assert.equal(events.some(e=>e.type==='started'),false);assert.ok(events.some(e=>e.type==='result'&&!e.result.ok&&e.result.error.kind==='permission-denied'));await assert.rejects(stat(path.join(root,'first.txt')));await assert.rejects(stat(path.join(root,'second.txt')));}finally{await rm(root,{recursive:true,force:true});}
 });
 
 function registryWithIntervals(intervals: Interval[]): ToolRegistry {
@@ -497,3 +311,28 @@ async function collect<T>(source: AsyncIterable<T>): Promise<readonly T[]> {
   for await (const item of source) result.push(item);
   return result;
 }
+
+test('独立调度器共享读写许可，同根读写隔离，排队取消不执行',async()=>{
+ const {WorkspaceExecutionCoordinator}=await import('@/runtime/workspace-execution-coordinator');
+ const writes=new WorkspaceExecutionCoordinator(),intervals:Interval[]=[];
+ const access=createModeToolPolicy(registryWithIntervals(intervals),'do');
+ const run=(id:string,signal=new AbortController().signal)=>collect(scheduleToolCalls({calls:[call(id,'write_file',30)],access,workspace:requireWorkspace(),writes,signal}));
+ const tasks=[run('parent'),run('child-a'),run('child-b'),run('skill')];
+ const abort=new AbortController();const cancelled=run('cancelled',abort.signal);abort.abort();
+ await collect(scheduleToolCalls({calls:[call('reader','read_file',5)],access,workspace:requireWorkspace(),writes,signal:new AbortController().signal}));
+ await Promise.all(tasks);await cancelled;
+ assert.equal(intervals.some(item=>item.label==='cancelled'),false);
+ const written=intervals.filter(item=>item.mutability==='workspace-write');assert.equal(written.length,4);
+ for(let i=0;i<written.length;i++)for(let j=i+1;j<written.length;j++)assert.equal(overlaps(written[i],written[j]),false);
+ assert.ok(written.every(item=>!overlaps(item,requireInterval(intervals,'reader'))));
+});
+
+test('任务清理失败后调度器返回明确工作区冲突，不执行底层读写',async()=>{
+ const {WorkspaceExecutionCoordinator}=await import('@/runtime/workspace-execution-coordinator');
+ const writes=new WorkspaceExecutionCoordinator(),intervals:Interval[]=[],workspace=requireWorkspace(),signal=new AbortController().signal;
+ await writes.runTask(workspace.root,'exclusive',signal,async()=>{},async()=>{throw new Error('停止失败');});
+ const events=await collect(scheduleToolCalls({calls:[call('blocked-read','read_file',1)],access:createModeToolPolicy(registryWithIntervals(intervals),'do'),workspace,writes,signal}));
+ const result=events.find(event=>event.type==='result');assert.ok(result&&result.type==='result'&&!result.result.ok);
+ if(result?.type==='result'&&!result.result.ok){assert.equal(result.result.error.kind,'conflict');assert.match(result.result.error.message,/资源清理失败/);assert.equal(result.result.sideEffect,'none');}
+ assert.equal(intervals.length,0);
+});

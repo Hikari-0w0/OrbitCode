@@ -45,3 +45,19 @@ test("reader 拒绝引用时返回统一结构化错误", async () => {
     assert.equal(result.error.message.includes("private path"), false);
   }
 });
+
+test("query 经同一作用域搜索，非法偏移与未支持适配器不能静默退化为读取", async () => {
+  const { searchContextContent } = await import("@/core/context/context-search");
+  let reads = 0, searches = 0;
+  const read = async () => { reads++; throw new Error("不应读取"); };
+  const tool = createReadContextTool({ read, search: async request => { searches++; return searchContextContent("before😀needle after", request); } });
+  const context = { workspace: await createWorkspaceBoundary(process.cwd()), signal: new AbortController().signal, deadlineMs: Date.now() + 1000 };
+  const args = { reference: "context://fixture", offset: 0, limit: 100, query: "needle" };
+  const result = await tool.execute(args, context);
+  assert.equal(result.ok, true);
+  if (result.ok) { const output = result.output; assert.ok(output && typeof output === "object" && !Array.isArray(output) && "mode" in output); assert.equal(output.mode, "search"); assert.ok("complete" in output && output.complete === true); }
+  assert.equal((await tool.execute({ ...args, offset: 10 }, context)).ok, false);
+  assert.equal((await createReadContextTool(read).execute(args, context)).ok, false);
+  assert.equal(searches, 1); assert.equal(reads, 0);
+  assert.equal(tool.inputSchema.parse({ ...args, query: "" }).ok, false);
+});

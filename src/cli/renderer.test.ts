@@ -2,6 +2,16 @@ import assert from "node:assert/strict";
 import { Writable } from "node:stream";
 import test from "node:test";
 import { TerminalRenderer } from "@/cli/renderer";
+test("历史审批事件只读展示，不再指导用户发送批准命令", () => {
+  let text = "";
+  const output = new Writable({ write(chunk, _encoding, done) { text += chunk.toString(); done(); } });
+  const renderer = new TerminalRenderer(output, output);
+  renderer.event({ type: "agent", event: { type: "permission-requested", iteration: 1, sequence: 0, callId: "old-call", name: "write_file", prompt: {
+    requestId: "old-request", toolCallId: "old-call", toolName: "write_file", workspace: { id: "w", name: "w" }, summary: { path: "old.txt" }, risk: { level: "medium", message: "旧审批" }, source: "mode", persistentLayer: "local", expiresAt: "2026-10-22T00:00:00Z",
+  } } });
+  assert.match(text, /历史工具授权记录/);
+  assert.doesNotMatch(text, /\/approve|需要授权/);
+});
 test("结果展示区分 Usage 缺失，过滤控制符且不扩大验证范围", () => {
   let text = "";
   const output = new Writable({ write(chunk, _encoding, done) { text += chunk.toString(); done(); } });

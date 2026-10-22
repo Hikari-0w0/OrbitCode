@@ -9,6 +9,7 @@ export type CliArguments =
     }
   | {
       readonly type: "run-once";
+      readonly parentExecution?: import("@/core/sub-agents/parent-execution").ParentExecutionContract;
       readonly promptFile?: string;
       readonly stdin: boolean;
       readonly outputFormat: "json" | "jsonl";
@@ -57,6 +58,8 @@ export const HELP_TEXT = `OrbitCode CLI
   --execution-id <id>  单次运行可传入 UUID，供父执行器关联崩溃证据
   --timeout-ms <ms>    单次运行总时限，默认 180000 毫秒
   --max-iterations <n> 单次运行模型轮数上限（1–32），省略时使用配置
+  --delegation-kind <kind> 单次运行新子任务类型：defined 或 fork；省略时由模型选择
+  --delegation <mode> 单次运行父级分工：collaborate 或 delegate-only
   --help              显示帮助
 `;
 
@@ -129,7 +132,7 @@ export function parseCliArguments(argv: readonly string[]): CliArguments {
 function parseRunOnceArguments(argv: readonly string[]): Extract<CliArguments, { type: "run-once" }> {
   const values = new Map<string, string>();
   let stdin = false;
-  const known = new Set(["--prompt-file", "--output-format", "--provider", "--workspace", "--resume", "--data-dir", "--policy-file", "--timeout-ms", "--execution-id", "--max-iterations"]);
+  const known = new Set(["--prompt-file", "--output-format", "--provider", "--workspace", "--resume", "--data-dir", "--policy-file", "--timeout-ms", "--execution-id", "--max-iterations", "--delegation", "--delegation-kind"]);
   for (let index = 0; index < argv.length; index++) {
     const item = argv[index];
     if (item === "--stdin") { if (stdin) throw new ArgumentError("--stdin 不能重复。"); stdin = true; continue; }
@@ -138,6 +141,10 @@ function parseRunOnceArguments(argv: readonly string[]): Extract<CliArguments, {
     values.set(item, requireValue(argv, ++index, item));
   }
   const promptFile = values.get("--prompt-file");
+  const delegation=values.get("--delegation");
+  const delegationKind=values.get("--delegation-kind");
+  if(delegationKind!==undefined&&delegationKind!=="defined"&&delegationKind!=="fork")throw new ArgumentError("--delegation-kind 只支持 defined 或 fork。");
+  if(delegation!==undefined&&delegation!=="collaborate"&&delegation!=="delegate-only")throw new ArgumentError("--delegation 只支持 collaborate 或 delegate-only。");
   if (Boolean(promptFile) === stdin) throw new ArgumentError("必须且只能选择 --prompt-file 或 --stdin。");
   const outputFormat = values.get("--output-format") ?? "json";
   if (outputFormat !== "json" && outputFormat !== "jsonl") throw new ArgumentError("--output-format 只支持 json 或 jsonl。");
@@ -150,6 +157,7 @@ function parseRunOnceArguments(argv: readonly string[]): Extract<CliArguments, {
   if (values.has("--execution-id") && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(values.get("--execution-id") ?? ""))
     throw new ArgumentError("--execution-id 必须是 UUID。");
   return { type: "run-once", stdin, outputFormat,
+    ...(delegation||delegationKind?{parentExecution:{version:1,mode:delegation??"collaborate",...(delegationKind?{delegationKind}:{})}}:{}),
     ...(promptFile ? { promptFile } : {}),
     ...(values.get("--provider") ? { providerName: values.get("--provider") } : {}),
     ...(values.get("--workspace") ? { workspaceId: values.get("--workspace") } : {}),

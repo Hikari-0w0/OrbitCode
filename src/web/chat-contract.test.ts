@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+test("父级契约只接受明确版本和分工，不接受模型自定义范围",()=>{const base={conversationId:"conversation",revision:0,permissionSessionId:"permission",mode:"do",modeTurn:1,input:"委派"};assert.deepEqual(parseWebChatRequest({...base,parentExecution:{version:1,mode:"delegate-only"}}).parentExecution,{version:1,mode:"delegate-only"});for(const parentExecution of [{version:2,mode:"delegate-only"},{version:1,mode:"auto"},{version:1,mode:"delegate-only",allow:["write_file"]}])assert.throws(()=>parseWebChatRequest({...base,parentExecution}));});
 
 import {
   encodeWebChatEvent,
@@ -496,3 +497,9 @@ async function collect<T>(iterable: AsyncIterable<T>): Promise<readonly T[]> {
   for await (const value of iterable) values.push(value);
   return values;
 }
+
+test("Web父级契约支持限定新任务类型，并拒绝非法类型和未知字段", () => {
+  const base = { conversationId: "conversation", revision: 0, permissionSessionId: "permission", mode: "do", modeTurn: 1, input: "委派" };
+  for (const delegationKind of ["defined", "fork"]) assert.equal(parseWebChatRequest({ ...base, parentExecution: { version: 1, mode: "delegate-only", delegationKind } }).parentExecution?.delegationKind, delegationKind);
+  for (const contract of [{ version: 1, mode: "collaborate", delegationKind: "auto" }, { version: 1, mode: "collaborate", delegationKind: "fork", allowedPaths: ["/"] }]) assert.throws(() => parseWebChatRequest({ ...base, parentExecution: contract }));
+});

@@ -26,6 +26,7 @@ function boundedSummaryLabel(value: string): string {
 }
 export async function runIsolatedSkill(input: {
     activation: ActivatedSkill;
+    onCleanupFailure?: () => void;
     parentId: string;
     parentHistory: readonly ManagedContextMessage[];
     parentStore: ContextStore;
@@ -112,6 +113,7 @@ export async function runIsolatedSkill(input: {
             cleanupFailed = true;
         }
     }
+    if (cleanupFailed) input.onCleanupFailure?.();
     if (cleanupFailed)
         return { ...toolFailure("execution-failed", "子执行已结束，但部分资源清理失败。", { sideEffect }), output: { runId, summary: `子执行资源清理失败，请检查运行记录。副作用：${sideEffect}` } };
     return result;

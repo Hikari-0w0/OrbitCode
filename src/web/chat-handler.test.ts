@@ -354,7 +354,7 @@ test("Web Agent 运行聚合为不含正文和工具载荷的本地日志摘要"
       completionTokens: 20,
       totalTokens: 100,
     },
-    tools: [{ name: "read_file", callId: "call-secret", status: "succeeded", durationMs: 25 }],
+    tools: [{ name: "read_file", callId: "call-secret", status: "succeeded", durationMs: 25, iteration: 1 }],
   });
   assert.equal(JSON.stringify(entries).includes("不得写入日志"), false);
   assert.equal(JSON.stringify(entries).includes("secret.ts"), false);
@@ -449,6 +449,7 @@ test("本地运行日志记录授权等待时长和终态", async () => {
     status: "cancelled",
     durationMs: 0,
     errorKind: "cancelled",
+    iteration: 1,
     authorization: { status: "cancelled", waitMs: 2_500 },
   }]);
   assert.equal(JSON.stringify(entries).includes("<redacted>"), false);

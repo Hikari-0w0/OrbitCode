@@ -15,7 +15,7 @@ for (const explicit of [true, false]) test(`独立命令事实经${explicit ? "�
     });
     try {
         await writeSkill(fixture, "worker", { mode: "isolated", tools: ["run_command"] });
-        await fixture.controller.handleLine("/permissions permissive");
+
         await fixture.controller.handleLine(explicit ? "/skill run worker" : "执行 worker 对应流程");
         const child = fixture.server.requests[explicit ? 0 : 1].body;
         assert.match(JSON.stringify(child), /已经加载并激活/);

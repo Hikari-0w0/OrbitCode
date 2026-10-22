@@ -1,6 +1,7 @@
 import { ContextManagementError } from "@/core/context/context-errors";
 import { groupContextMessages } from "@/core/context/message-groups";
 import { approximateTextTokens } from "@/core/context/token-estimator";
+import { fitContextReadPayload, isPaginatedReadPayload } from "./context-read-payload";
 import {
   cloneManagedMessages,
   renderContextPayload,
@@ -30,6 +31,9 @@ export async function compactToolResults(
   try {
     for (const group of groups) {
       if (group.messages[0]?.kind !== "assistant-tool-call") continue;
+      const contextReads = new Set(group.messages[0].toolCalls.filter(call => call.name === "read_context").map(call => call.id));
+      const agentCalls = new Set(group.messages[0].toolCalls.filter(call=>call.name==="agent").map(call=>call.id));
+      for(const message of group.messages)if(message.kind==="tool-result"&&agentCalls.has(message.toolCallId)&&message.payload.storage==="inline"&&isPaginatedReadPayload(message.payload.content))contextReads.add(message.toolCallId);
       const resultIndexes: number[] = [];
       for (let index = group.start + 1; index < group.end; index += 1) {
         const message = messages[index];
@@ -37,7 +41,11 @@ export async function compactToolResults(
       }
 
       for (const index of resultIndexes) {
-        const result = messages[index];
+        let result = messages[index];
+        if (result?.kind === "tool-result" && result.payload.storage === "inline" && contextReads.has(result.toolCallId)) {
+          result = { ...result, payload: { storage: "inline", content: fitContextReadPayload(result.payload.content, Math.min(input.config.singleToolResultTokens, Math.floor(input.config.toolResultGroupTokens / resultIndexes.length))) } };
+          messages[index] = result;
+        }
         if (
           result?.kind === "tool-result" &&
           result.payload.storage === "inline" &&
@@ -64,7 +72,8 @@ export async function compactToolResults(
               >;
             } =>
               item.message?.kind === "tool-result" &&
-              item.message.payload.storage === "inline",
+              item.message.payload.storage === "inline" &&
+              !contextReads.has(item.message.toolCallId),
           )
           .map((item) => ({
             ...item,

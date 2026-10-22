@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, writeFile } from "node:fs/promises";
 import test from "node:test";
 import { runtimeFixture } from "./helpers/runtime-fixture";
 import { configureMcpFixture } from "./helpers/mcp-fixture";
@@ -9,7 +9,7 @@ import { streamAgentResponse } from "@/web/chat-handler";
 import { parseWebChatEvents, readWebStream, type WebChatEvent } from "@/web/chat-contract";
 
 for (const transport of ["stdio", "http"] as const) {
-  test(`Web 完整 MCP ${transport} 审批、执行、持久化与副作用闭环`, async () => {
+  test(`Web 完整 MCP ${transport} 直接执行、持久化与副作用闭环`, async () => {
     let requests = 0;
     const fixture = await runtimeFixture(() => ({ chunks: [{ data: ++requests === 1
       ? toolCallDelta({ id: "mcp_call_1", name: mcpToolName("demo", "echo"), argumentsJson: '{"text":"mcp-ok"}' }) + TOOL_FINISH_EVENT + TRANSPORT_DONE_EVENT
@@ -31,8 +31,8 @@ for (const transport of ["stdio", "http"] as const) {
           fixture.permissions.resolveDecision(session.id, event.prompt.requestId, "allow-once");
         }
       }
-      assert.ok(events.some((e) => e.type === "runtime-permission-requested"));
-      assert.ok(events.some((e) => e.type === "permission-requested"));
+      assert.equal(events.some((e) => e.type === "runtime-permission-requested"),false);
+      assert.equal(events.some((e) => e.type === "permission-requested"),false);
       assert.ok(events.some((e) => e.type === "tool-result" && e.result.ok));
       const stopped = events.find((e) => e.type === "stopped");
       assert.equal(stopped?.reason, "final-response");
@@ -88,6 +88,7 @@ test("拒绝启动和 Plan 都不启动 MCP，仍完成本地对话", async () =
   const mcp = await configureMcpFixture(fixture.root, "stdio");
   const session = fixture.permissions.createSession();
   try {
+    await writeFile(`${fixture.root}/.orbitcode/permissions.yaml`,'rules:\n  "mcp_connect(*)": deny\n');
     for (const mode of ["do", "plan"] as const) {
       const c = await fixture.checkpoint();
       for await (const event of fixture.runtime.streamTurn({ conversationId: c.summary.id, expectedRevision: c.summary.revision, permissionSessionId: session.id, input: "本地对话", mode, modeTurn: c.modeTurn + 1, source: "cli", signal: new AbortController().signal })) {
@@ -109,13 +110,14 @@ for (const transport of ["stdio", "http"] as const) {
       const mcp = await configureMcpFixture(fixture.root, transport);
       const session = fixture.permissions.createSession(); const controller = new AbortController();
       try {
+        if(scenario==="deny")await writeFile(`${fixture.root}/.orbitcode/permissions.yaml`,'rules:\n  "mcp_call(*)": deny\n');
         const c = await fixture.checkpoint();
         const prepared = await fixture.runtime.prepare({ conversationId: c.summary.id, expectedRevision: c.summary.revision, permissionSessionId: session.id, input: "error test", mode: "do", modeTurn: 1, source: "web", signal: controller.signal });
         const { runAgentTurn } = await import("@/runtime/run-agent-turn");
         const results = []; let reason: string | undefined;
         for await (const e of runAgentTurn({ ...prepared, signal: controller.signal, ...(scenario === "deadline" ? { maxRuntimeMs: 250 } : {}) })) {
-          if (e.type === "initialization" && e.event.type === "runtime-permission-requested") fixture.permissions.resolveDecision(session.id, e.event.prompt.requestId, "allow-once");
-          if (e.type === "agent" && e.event.type === "permission-requested") fixture.permissions.resolveDecision(session.id, e.event.prompt.requestId, scenario === "deny" ? "deny" : "allow-once");
+          assert.ok(!(e.type === "initialization" && e.event.type === "runtime-permission-requested"));
+          assert.ok(!(e.type === "agent" && e.event.type === "permission-requested"));
           if (e.type === "agent" && e.event.type === "tool-started" && scenario === "cancel") setTimeout(() => controller.abort(), 30);
           if (e.type === "agent" && e.event.type === "tool-result") results.push(e.event.result);
           if (e.type === "finished") { reason = e.stopped.reason; assert.equal(e.persistence.status, "saved"); }
@@ -151,8 +153,8 @@ test("MCP 秘密在卸载前脱敏，完整上下文与导出保留安全结果�
     let verificationStatus: string | undefined;
     for await (const e of fixture.runtime.streamTurn({ conversationId: c.summary.id, expectedRevision: c.summary.revision, permissionSessionId: session.id, input: "large result", mode: "do", modeTurn: 1, source: "web", signal: new AbortController().signal })) {
       visible.push(e);
-      if (e.type === "initialization" && e.event.type === "runtime-permission-requested") fixture.permissions.resolveDecision(session.id, e.event.prompt.requestId, "allow-once");
-      if (e.type === "agent" && e.event.type === "permission-requested") fixture.permissions.resolveDecision(session.id, e.event.prompt.requestId, "allow-once");
+      assert.ok(!(e.type === "initialization" && e.event.type === "runtime-permission-requested"));
+      assert.ok(!(e.type === "agent" && e.event.type === "permission-requested"));
       if (e.type === "finished") verificationStatus = e.stopped.verification?.status;
     }
     assert.equal(verificationStatus, "observed");
@@ -180,6 +182,7 @@ test("故障、拒绝和正常 Server 共存，本地与外部工具都可完成
     config.mcpServers.bad={type:'stdio',command:'/missing/mcp-command'};
     config.mcpServers.denied={type:'stdio',command:'/must-not-start'};
     await writeFile(`${fixture.root}/.orbitcode/mcp.yaml`,stringify(config));
+    await writeFile(`${fixture.root}/.orbitcode/permissions.yaml`,'rules:\n  "mcp_connect(server/denied/config/*)": deny\n');
     const c=await fixture.checkpoint();const results=[];const statuses=[];
     for await(const e of fixture.runtime.streamTurn({conversationId:c.summary.id,expectedRevision:c.summary.revision,permissionSessionId:session.id,input:'local and external',mode:'do',modeTurn:1,source:'web',signal:new AbortController().signal})){
       if(e.type==='initialization'&&e.event.type==='runtime-permission-requested')fixture.permissions.resolveDecision(session.id,e.event.prompt.requestId,e.event.serverName==='denied'?'deny':'allow-once');

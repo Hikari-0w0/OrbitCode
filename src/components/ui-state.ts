@@ -1,4 +1,4 @@
-export type ManagementView = "skills" | "background" | "cleanup" | "environment";
+export type ManagementView = "agents" | "skills" | "background" | "cleanup" | "environment";
 export type SettingsSection = "models" | "workspaces" | "mcp" | "runtime" | "recovery" | "appearance";
 export type OperationState<T> = {
     kind: "idle";

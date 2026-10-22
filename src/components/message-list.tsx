@@ -4,7 +4,6 @@ import { MessageContent, CopyButton } from "./message-content";
 import { ToolExecutionCard } from "./tool-execution-card";
 import type { McpInitializationRecord } from "@/core/mcp-events";
 import { PermissionRequestCard } from "@/components/permission-request-card";
-import type { PermissionUserDecision } from "@/core/permissions/approval";
 import type { CompletionAssessment } from "@/core/completion-tracker";
 import type { WebChatEvent } from "@/web/chat-contract";
 type ProgressEvent = Extract<WebChatEvent, {
@@ -72,18 +71,16 @@ type MessageListProps = {
     readonly executablePlanMessageId?: string;
     readonly planActionDisabled: boolean;
     readonly onExecutePlan: (messageId: string) => void;
-    readonly onPermissionDecision?: (requestId: string, decision: PermissionUserDecision) => void;
 };
 const suggestions = [
     "读取 README.md 并总结当前能力",
     "查找 src 目录下的 TypeScript 文件",
     "搜索代码中所有 ProviderError 的位置",
 ];
-export function MessageList({ messages, currentRunStartedAtMs, onSuggestion, executablePlanMessageId, planActionDisabled, onExecutePlan, onPermissionDecision = () => undefined, }: MessageListProps) {
-    const actions = useRef({ onExecutePlan, onPermissionDecision });
-    useEffect(() => { actions.current = { onExecutePlan, onPermissionDecision }; }, [onExecutePlan, onPermissionDecision]);
+export function MessageList({ messages, currentRunStartedAtMs, onSuggestion, executablePlanMessageId, planActionDisabled, onExecutePlan, }: MessageListProps) {
+    const actions = useRef({ onExecutePlan });
+    useEffect(() => { actions.current = { onExecutePlan }; }, [onExecutePlan]);
     const executePlan = useCallback((id: string) => actions.current.onExecutePlan(id), []);
-    const decidePermission = useCallback((id: string, decision: PermissionUserDecision) => actions.current.onPermissionDecision(id, decision), []);
     const viewportRef = useRef<HTMLDivElement>(null);
     const followsLatestRef = useRef(true);
     const [followsLatest, setFollowsLatest] = useState(true);
@@ -113,7 +110,7 @@ export function MessageList({ messages, currentRunStartedAtMs, onSuggestion, exe
     return (<div className="messageRegion">
       <div ref={viewportRef} className="messageViewport" onScroll={handleScroll} role="log" aria-live="polite" aria-label="对话消息">
         {messages.length === 0 ? (<EmptyConversation onSuggestion={onSuggestion}/>) : (<div className="messageStack">
-            {messages.map((message) => (<MessageItem key={message.id} message={message} currentRunStartedAtMs={message.state === "streaming" ? currentRunStartedAtMs : undefined} executablePlan={message.id === executablePlanMessageId} planActionDisabled={message.id === executablePlanMessageId && planActionDisabled} onExecutePlan={executePlan} onPermissionDecision={decidePermission}/>))}
+            {messages.map((message) => (<MessageItem key={message.id} message={message} currentRunStartedAtMs={message.state === "streaming" ? currentRunStartedAtMs : undefined} executablePlan={message.id === executablePlanMessageId} planActionDisabled={message.id === executablePlanMessageId && planActionDisabled} onExecutePlan={executePlan}/>))}
           </div>)}
       </div>
 
@@ -123,13 +120,12 @@ export function MessageList({ messages, currentRunStartedAtMs, onSuggestion, exe
         </button>)}
     </div>);
 }
-const MessageItem = memo(function MessageItem({ message, currentRunStartedAtMs, executablePlan, planActionDisabled, onExecutePlan, onPermissionDecision }: {
+const MessageItem = memo(function MessageItem({ message, currentRunStartedAtMs, executablePlan, planActionDisabled, onExecutePlan }: {
     readonly message: VisibleMessage;
     readonly currentRunStartedAtMs?: number;
     readonly executablePlan: boolean;
     readonly planActionDisabled: boolean;
     readonly onExecutePlan: (id: string) => void;
-    readonly onPermissionDecision: (id: string, decision: PermissionUserDecision) => void;
 }) {
     return (<article className={`message message--${message.role}`}>
                 <div className="messageIdentity" aria-hidden="true">
@@ -140,11 +136,11 @@ const MessageItem = memo(function MessageItem({ message, currentRunStartedAtMs, 
                     <span>{message.role === "assistant" ? "OrbitCode" : "你"}</span>
                     <MessageState state={message.state}/>
                   </div>
-                  {message.runtimePermissions?.map((request) => (<PermissionRequestCard key={request.prompt.requestId} request={request} onDecision={onPermissionDecision}/>))}
+                  {message.runtimePermissions?.map((request) => (<PermissionRequestCard key={request.prompt.requestId} request={request}/>))}
                   {message.initialization?.map((record) => (<p className="usageLine" key={record.serverName}>MCP {record.serverName}：{record.detail}</p>))}
-                  {message.parts && message.parts.length > 0 ? (<MessageTimeline message={message} onPermissionDecision={onPermissionDecision}/>) : (<>
+                  {message.parts && message.parts.length > 0 ? (<MessageTimeline message={message}/>) : (<>
                       {message.toolExecutions && message.toolExecutions.length > 0 && (<div className="toolExecutionList" aria-label="工具执行记录">
-                          {message.toolExecutions.map((execution) => (<ToolExecutionCard key={`${execution.iteration}:${execution.callId}`} execution={execution} onPermissionDecision={onPermissionDecision}/>))}
+                          {message.toolExecutions.map((execution) => (<ToolExecutionCard key={`${execution.iteration}:${execution.callId}`} execution={execution}/>))}
                         </div>)}
                       {message.content.length > 0 && <MessageContent text={message.content}/>}
                     </>)}
@@ -186,9 +182,8 @@ const MessageItem = memo(function MessageItem({ message, currentRunStartedAtMs, 
                 </div>
               </article>);
 });
-function MessageTimeline({ message, onPermissionDecision, }: {
+function MessageTimeline({ message, }: {
     readonly message: VisibleMessage;
-    readonly onPermissionDecision: (requestId: string, decision: PermissionUserDecision) => void;
 }) {
     return (<div className="messageTimeline">
       {message.parts?.map((part, index) => {
@@ -201,7 +196,7 @@ function MessageTimeline({ message, onPermissionDecision, }: {
             if (!execution)
                 return null;
             return (<div key={`tool:${part.iteration}:${part.callId}`} className="toolExecutionList" aria-label="工具执行记录">
-            <ToolExecutionCard execution={execution} onPermissionDecision={onPermissionDecision}/>
+            <ToolExecutionCard execution={execution}/>
           </div>);
         })}
     </div>);

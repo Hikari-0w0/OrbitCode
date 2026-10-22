@@ -13,6 +13,8 @@ import { LocalConversationStore } from "@/lib/local-conversation-store";
 const CONTEXT_CHUNK_CHARACTERS = 64 * 1024;
 
 export type AgentRunExport = {
+  readonly childReply?: { readonly status: "included"; readonly content: string } | { readonly status: "unavailable" | "omitted" };
+  readonly childToolFacts?: string;
   readonly format: "orbitcode-agent-run";
   readonly schemaVersion: 1;
   readonly exportedAt: string;
@@ -98,6 +100,18 @@ export class LocalAgentRunExporter {
       ? await this.loadContextObjects(run.conversationId, checkpoints, warnings)
       : [];
     if (!includeContext) warnings.push("已按参数省略卸载的工具上下文对象。");
+    let childReply: AgentRunExport["childReply"];
+    let childToolFacts:string|undefined;
+    if (run.parentRunId) {
+      if (!includeContext) childReply = { status: "omitted" };
+      else {
+        try {
+          const parent = await this.runLog.find(run.parentRunId);
+          childReply = { status: "included", content: await this.conversations.childResults.exportReply(parent.conversationId, run.conversationId) };
+          childToolFacts=await this.conversations.childResults.exportFacts(parent.conversationId,run.conversationId);
+        } catch { childReply = { status: "unavailable" }; warnings.push("子回复正文不可用、已过期或父会话已清理。"); }
+      }
+    }
     return {
       format: "orbitcode-agent-run",
       schemaVersion: 1,
@@ -106,6 +120,8 @@ export class LocalAgentRunExporter {
       run,
       checkpoints,
       context: { included: includeContext, objects: contextObjects },
+      ...(childReply ? { childReply } : {}),
+      ...(childToolFacts?{childToolFacts}:{}),
       warnings,
     };
   }

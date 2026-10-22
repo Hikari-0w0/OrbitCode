@@ -16,12 +16,12 @@ test("CLI 共用完整工具集合，读取编辑验证并持久化 CLI 来源",
   });
   try {
     await writeFile(path.join(fixture.root, "a.txt"), "before");
-    await fixture.controller.handleLine("/permissions permissive");
+
     await fixture.controller.handleLine("修改并读取验证");
     assert.equal(await readFile(path.join(fixture.root, "a.txt"), "utf8"), "after");
     assert.equal(calls, 4);
     assert.match(JSON.stringify(fixture.server.requests[3].body), /after/);
-    for (const name of ["read_file", "write_file", "write_files", "edit_file", "find_files", "search_code", "run_command", "read_context", "start_process", "process_status", "stop_process", "report_completion"])
+    for (const name of ["read_file", "write_file", "write_files", "edit_file", "find_files", "search_code", "run_command", "read_context", "start_process", "process_status", "stop_process"])
       assert.match(JSON.stringify(fixture.server.requests[0].body), new RegExp(name));
     const saved = await fixture.checkpoint();
     assert.equal(saved.summary.revision, 1);
@@ -33,76 +33,6 @@ test("CLI 共用完整工具集合，读取编辑验证并持久化 CLI 来源",
     assert.match(fixture.output(), /after/);
     assert.equal(fixture.errors(), "");
     assert.doesNotMatch(fixture.output(), /synthetic-fixture-secret/);
-  } finally { await fixture.close(); }
-});
-
-test("CLI 完成报告两次无效后收尾并持久化已有检查", async () => {
-  let requests = 0;
-  const report = {
-    checks: [
-      { criterion: "文件已写入并回读", status: "passed", evidence_call_ids: ["completion-read"] },
-      { criterion: "浏览器交互", status: "passed", evidence_call_ids: ["invented"] },
-    ], blockers: [],
-  };
-  const steps = [
-    { id: "completion-write", name: "write_file", argumentsJson: JSON.stringify({ path: "completion.txt", content: "saved" }) },
-    { id: "completion-read", name: "read_file", argumentsJson: JSON.stringify({ path: "completion.txt" }) },
-    { id: "completion-report-1", name: "report_completion", argumentsJson: JSON.stringify(report) },
-    { id: "completion-report-2", name: "report_completion", argumentsJson: JSON.stringify(report) },
-  ];
-  const fixture = await runtimeFixture((request) => {
-    const step = steps[requests++];
-    if (!step) {
-      assert.match(JSON.stringify(request.body), /仅生成最终答复/u);
-      assert.doesNotMatch(JSON.stringify(request.body), /"tools":\[\{/u);
-    }
-    return { chunks: [{ data: step
-      ? toolCallDelta(step) + TOOL_FINISH_EVENT + TRANSPORT_DONE_EVENT
-      : textDelta("文件已保存并回读，浏览器交互尚未验证。") + DONE_EVENT }] };
-  }, { iterations: "8" });
-  try {
-    await fixture.controller.handleLine("/permissions permissive");
-    await fixture.controller.handleLine("保存文件并报告检查结果");
-    const checkpoint = await fixture.checkpoint();
-    const assistant = checkpoint.displayMessages[1];
-    assert.equal(await readFile(path.join(fixture.root, "completion.txt"), "utf8"), "saved");
-    assert.equal(requests, 5, fixture.errors() + fixture.output());
-    assert.equal(assistant.stopReason, "final-response");
-    assert.equal(assistant.verification?.status, "unverified");
-    assert.deepEqual(assistant.verification?.checks.map((check) => check.status), ["passed", "not-run"]);
-    assert.equal(assistant.toolExecutions?.filter((tool) => tool.name === "report_completion").length, 2);
-    assert.match(fixture.output(), /浏览器交互尚未验证/u);
-    assert.equal(fixture.errors(), "");
-    const runs = await fixture.log.findAllForConversation(checkpoint.summary.id);
-    assert.equal(runs[0]?.stopReason, "final-response");
-    assert.equal(runs[0]?.persistence.status, "saved");
-  } finally { await fixture.close(); }
-});
-
-test("CLI 收尾时 Provider 拒绝违规工具调用，运行时仍给出保守总结", async () => {
-  let requests = 0;
-  const steps = [
-    { id: "read", name: "read_file", argumentsJson: '{"path":"existing.txt"}' },
-    { id: "invalid-1", name: "report_completion", argumentsJson: "{}" },
-    { id: "invalid-2", name: "report_completion", argumentsJson: "{}" },
-    { id: "forged-write", name: "write_file", argumentsJson: '{"path":"forged.txt","content":"no"}' },
-  ];
-  const fixture = await runtimeFixture((request) => {
-    const step = steps[requests++];
-    assert.ok(step, "不应在收尾阶段继续请求模型");
-    if (requests === 4) assert.match(JSON.stringify(request.body), /"tool_choice":"none"/u);
-    return { chunks: [{ data: toolCallDelta(step) + TOOL_FINISH_EVENT + TRANSPORT_DONE_EVENT }] };
-  }, { iterations: "8" });
-  try {
-    await writeFile(path.join(fixture.root, "existing.txt"), "existing");
-    await fixture.controller.handleLine("检查文件并报告");
-    const checkpoint = await fixture.checkpoint();
-    assert.equal(requests, 4);
-    assert.equal(checkpoint.displayMessages[1].stopReason, "final-response");
-    assert.equal(checkpoint.displayMessages[1].verification?.status, "unverified");
-    assert.match(fixture.output(), /完成报告未通过校验/u);
-    await assert.rejects(readFile(path.join(fixture.root, "forged.txt")), { code: "ENOENT" });
-    assert.equal(fixture.errors(), "");
   } finally { await fixture.close(); }
 });
 
@@ -175,7 +105,7 @@ test("CLI 在真实命令失败后编辑修复，再执行验证成功", { skip:
     return { chunks: [{ data: step ? toolCallDelta({ id: `repair_${index}`, ...step }) + TOOL_FINISH_EVENT + TRANSPORT_DONE_EVENT : textDelta("修复并验证完成") + DONE_EVENT }] };
   });
   try {
-    await fixture.controller.handleLine("/permissions permissive");
+
     await fixture.controller.handleLine("创建脚本，失败后修复并验证");
     const c = await fixture.checkpoint();
     const results = c.displayMessages[1].toolExecutions ?? [];
@@ -189,10 +119,10 @@ test("CLI 在真实命令失败后编辑修复，再执行验证成功", { skip:
   } finally { await fixture.close(); }
 });
 
-test("CLI 批量写入、搜索、受管进程和完成报告均经过共享工具执行", { skip: process.platform !== "darwin" }, async () => {
+test("CLI 批量写入、搜索、受管进程均经过共享工具执行", { skip: process.platform !== "darwin" }, async () => {
   let step = 0;
   const fixture = await runtimeFixture((request) => {
-    const names = ["write_files", "find_files", "search_code", "start_process", "process_status", "stop_process", "report_completion"];
+    const names = ["write_files", "find_files", "search_code", "start_process", "process_status", "stop_process"];
     const name = names[step++];
     if (!name) return { chunks: [{ data: textDelta("按实际检查范围报告") + DONE_EVENT }] };
     const body = request.body;
@@ -209,59 +139,17 @@ test("CLI 批量写入、搜索、受管进程和完成报告均经过共享工�
       : name === "find_files" ? { pattern: "batch-*.txt" }
       : name === "search_code" ? { query: "find-marker", file_pattern: "batch-*.txt" }
       : name === "start_process" ? { command: "sleep 20" }
-      : name === "report_completion" ? { status: "blocked", checks: [{ criterion: "未验证业务交互", status: "not-run", evidence_call_ids: [] }], blockers: ["仅执行工具接入验证"] }
       : { process_id: processId };
     return { chunks: [{ data: toolCallDelta({ id: `extra_${step}`, name, argumentsJson: JSON.stringify(args) }) + TOOL_FINISH_EVENT + TRANSPORT_DONE_EVENT }] };
   }, { iterations: "12" });
   try {
-    await fixture.controller.handleLine("/permissions permissive");
+
     await fixture.controller.handleLine("测试其余工具接入");
     const c = await fixture.checkpoint();
     const results = c.displayMessages[1].toolExecutions ?? [];
-    assert.equal(results.length, 7);
+    assert.equal(results.length, 6);
     for (const result of results) assert.equal(result.result.ok, true, JSON.stringify(result));
-    assert.equal(c.displayMessages[1].verification?.status, "blocked");
+    assert.equal(c.displayMessages[1].verification?.status, "unverified");
     assert.match(fixture.output(), /仅覆盖所列检查/);
-  } finally { await fixture.close(); }
-});
-
-test("完成报告的全部错误回传模型，修正后正常结束且保留失败历史", async () => {
-  let requests = 0;
-  let feedback = "";
-  const fixture = await runtimeFixture((request) => {
-    requests++;
-    if (requests === 5) feedback = JSON.stringify(request.body);
-    const steps = [
-      { name: "read_file", argumentsJson: '{"path":"missing.txt"}' },
-      { name: "edit_file", argumentsJson: '{"path":"a.txt","old_text":"before","new_text":"after"}' },
-      { name: "read_file", argumentsJson: '{"path":"a.txt"}' },
-      { name: "report_completion", argumentsJson: JSON.stringify({ status: "complete", blockers: [], checks: [
-        { criterion: "复现读取失败", status: "passed", evidence_call_ids: ["recovery_1"] },
-        { criterion: "文件内容正确", status: "passed", evidence_call_ids: ["recovery_2"] },
-        { criterion: "读取最终文件验证", status: "passed", evidence_call_ids: ["recovery_3"] },
-      ] }) },
-      { name: "report_completion", argumentsJson: JSON.stringify({ status: "complete", blockers: [], checks: [
-        { criterion: "修改后的文件内容为 after", status: "passed", evidence_call_ids: ["recovery_3"] },
-      ] }) },
-    ];
-    const step = steps[requests - 1];
-    return { chunks: [{ data: step ? toolCallDelta({ id: `recovery_${requests}`, ...step }) + TOOL_FINISH_EVENT + TRANSPORT_DONE_EVENT
-      : textDelta("已修改并读取验证；此前读取不存在文件失败。") + DONE_EVENT }] };
-  });
-  try {
-    await writeFile(path.join(fixture.root, "a.txt"), "before");
-    await fixture.controller.handleLine("/permissions permissive");
-    await fixture.controller.handleLine("修改并验证文件");
-    assert.match(feedback, /checks\[0\]\.evidence_call_ids\[0\]/);
-    assert.match(feedback, /checks\[1\]\.evidence_call_ids/);
-    assert.ok(feedback.includes(String.raw`\"issues\":[`));
-    assert.equal(requests, 6);
-    const checkpoint = await fixture.checkpoint();
-    const executions = checkpoint.displayMessages[1].toolExecutions;
-    assert.equal(executions?.find((entry) => entry.callId === "recovery_4")?.result?.ok, false);
-    assert.equal(executions?.find((entry) => entry.callId === "recovery_5")?.result?.ok, true);
-    assert.match(fixture.output(), /停止：final-response/);
-    assert.match(fixture.output(), /"status": "verified"/);
-    assert.equal(await readFile(path.join(fixture.root, "a.txt"), "utf8"), "after");
   } finally { await fixture.close(); }
 });

@@ -27,6 +27,10 @@ export type PromptEnvironment = {
 };
 
 export type OptionalPromptContext = {
+  readonly childRole?: string;
+  readonly availableAgents?: string;
+  readonly delegationKind?: import("@/core/sub-agents/parent-execution").DelegationKind;
+  readonly parentExecution?: import("@/core/sub-agents/parent-execution").ParentExecutionMode;
   readonly availableSkills?: string;
   readonly customInstructions?: string;
   readonly projectInstructions?: string;

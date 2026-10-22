@@ -110,6 +110,7 @@ export function providerMessages(
   return [
     ...envelope.systemMessages,
     ...messages.map(toConversationMessage),
+    ...(envelope.suffixMessages ?? []),
   ];
 }
 

@@ -4,6 +4,7 @@ export type ModelUsagePurpose = "agent" | "summary" | "memory";
 export type ModelUsageSummary = {
   readonly scope: "self";
   readonly categories: readonly {
+    readonly cache?: { readonly tokenRequests:number; readonly cachedTokens:number; readonly hitRequests:number; readonly missRequests:number; readonly unknownRequests:number };
     readonly purpose: ModelUsagePurpose;
     readonly requests: number;
     readonly reportedRequests: number;
@@ -22,6 +23,7 @@ export class ModelUsageTracker {
   wrap(provider: ChatProvider, purpose: ModelUsagePurpose): ChatProvider {
     const categories = this.categories;
     return {
+      supportsRequestTokenLimit: provider.supportsRequestTokenLimit,
       async *stream(messages, options) {
         let category = categories.get(purpose);
         if (!category) {
@@ -45,6 +47,9 @@ export class ModelUsageTracker {
         } finally {
           category.durationMs += Math.max(0, Date.now() - started);
           if (failed || !completed) category.failedRequests++;
+          const cache=category.cache??{tokenRequests:0,cachedTokens:0,hitRequests:0,missRequests:0,unknownRequests:0};
+          const observation=usage?.promptCache;
+          category.cache={tokenRequests:cache.tokenRequests+(observation?.availability==="tokens"?1:0),cachedTokens:cache.cachedTokens+(observation?.availability==="tokens"?observation.cachedTokens:0),hitRequests:cache.hitRequests+(observation?.availability==="status"&&observation.hit?1:0),missRequests:cache.missRequests+(observation?.availability==="status"&&!observation.hit?1:0),unknownRequests:cache.unknownRequests+(!observation||observation.availability==="unavailable"?1:0)};
           if (usage) {
             category.reportedRequests++;
             category.promptTokens += usage.promptTokens;
@@ -70,7 +75,8 @@ export function isModelUsageSummary(value: unknown): value is ModelUsageSummary 
       !["agent", "summary", "memory"].includes(String(category.purpose)) || purposes.has(category.purpose)) return false;
     purposes.add(category.purpose);
     const numbers = ["requests", "reportedRequests", "failedRequests", "durationMs", "promptTokens", "completionTokens", "totalTokens"];
-    if (Object.keys(category).length !== 8 || !numbers.every(key => isCount(category[key]))) return false;
+    const cache = category.cache;
+    if (Object.keys(category).some(key => ![...numbers, "purpose", "cache"].includes(key)) || (cache !== undefined && (!isRecord(cache) || Object.keys(cache).length !== 5 || !["tokenRequests","cachedTokens","hitRequests","missRequests","unknownRequests"].every(key=>isCount(cache[key])))) || !numbers.every(key => isCount(category[key]))) return false;
     return isCount(category.requests) && isCount(category.reportedRequests) && isCount(category.failedRequests) &&
       category.reportedRequests <= category.requests && category.failedRequests <= category.requests;
   });

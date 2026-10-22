@@ -39,9 +39,8 @@ export class TerminalRenderer {
       const event = item.event;
       if (event.type === "mcp-status") this.notice(`MCP ${event.serverName}：${event.detail}`);
       else if (event.type === "runtime-permission-requested") {
-        this.notice(`需要授权连接 MCP ${event.serverName}`);
+        this.notice(`历史 MCP 授权记录 ${event.serverName}（人工审批已移除）`);
         this.content(JSON.stringify(event.prompt.summary, null, 2));
-        this.notice(`/approve ${event.prompt.requestId} <once|session|permanent|deny>（${event.prompt.expiresAt} 到期）`);
       } else this.notice(`MCP 授权 ${event.requestId}：${event.status}`);
       return;
     }
@@ -74,9 +73,8 @@ export class TerminalRenderer {
         return;
       }
       case "permission-requested":
-        this.notice(`需要授权 ${event.prompt.toolName}；风险 ${event.prompt.risk.level}；Workspace ${event.prompt.workspace.name}`);
+        this.notice(`历史工具授权记录 ${event.prompt.toolName}（人工审批已移除）`);
         this.content(JSON.stringify(event.prompt.summary, null, 2));
-        this.notice(`/approve ${event.prompt.requestId} <once|session|permanent|deny>（${event.prompt.expiresAt} 到期）`);
         return;
       case "permission-resolved": this.notice(`授权 ${event.requestId}：${event.status} ${event.scope ?? ""}`); return;
       case "token-usage": {

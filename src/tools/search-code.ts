@@ -8,7 +8,7 @@ import {
   stringSchema,
 } from "@/tools/schema";
 import { emptyResultMeta, toolFailure } from "@/tools/types";
-import { WORKSPACE_RELATIVE_PATH_DESCRIPTION } from "@/tools/workspace-path";
+
 
 const MAX_SCAN_BYTES = 1024 * 1024;
 const MAX_MATCHES = 500;
@@ -23,9 +23,9 @@ export const searchCodeTool = defineTool({
     path: optionalSchema(stringSchema({
       minLength: 1,
       maxLength: 1_024,
-      description: WORKSPACE_RELATIVE_PATH_DESCRIPTION,
+      description: "搜索起始目录，相对 Workspace 根目录，例如 src 或 src/core；省略则搜索根目录。只能传目录，不能传文件、glob、绝对路径、./ 或 ../。单文件搜索用 path 指定父目录、file_pattern 指定文件模式。",
     })),
-    file_pattern: optionalSchema(stringSchema({ minLength: 1, maxLength: 512 })),
+    file_pattern: optionalSchema(stringSchema({ minLength: 1, maxLength: 512, description: "相对 Workspace 根目录的文件 glob，例如 src/core/agent-loop.ts 或 **/*.ts；不是相对 path 目录。" })),
     case_sensitive: optionalSchema(booleanSchema()),
   }),
   mutability: "read-only",

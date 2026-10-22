@@ -1,3 +1,4 @@
+import { parseSubAgentLimits } from "@/core/sub-agents/types";
 import path from "node:path";
 import { LocalSettingsStore } from "@/lib/local-settings-store";
 
@@ -167,3 +168,5 @@ export function resolveRuntimeProvider(
     environment: context.environment,
   });
 }
+
+export function resolveSubAgentLimits(context: ProviderContext) { return parseSubAgentLimits(context.managedSettings?.subAgents); }
