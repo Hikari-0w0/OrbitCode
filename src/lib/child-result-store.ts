@@ -37,7 +37,7 @@ export class ChildResultStore {
         if(facts && Buffer.byteLength(facts)>64*1024)return {status:"unavailable",reason:"capacity"} as const;
         const content = JSON.stringify({ schemaVersion: 1, ...scope, taskId, expiresAt, sha256, reply, ...(facts ? { facts, factsSha256:createHash("sha256").update(facts).digest("hex") } : {}) });
         if (count >= MAX_REPLIES || bytes + Buffer.byteLength(content) > MAX_TOTAL_BYTES) return { status: "unavailable", reason: "capacity" } as const;
-        const target = path.join(directory, `${taskId}.json`);
+        const target = path.join(/* turbopackIgnore: true */ directory, `${taskId}.json`);
         // 同一任务的正文不可覆盖；禁止重跑或后续模型回复改写历史交付。
         try { await lstat(target); return { status: "unavailable", reason: "storage" } as const; } catch (error) { if (!isMissing(error)) throw error; }
         const temporary = path.join(directory, `.${randomUUID()}.tmp`);
@@ -69,7 +69,7 @@ export class ChildResultStore {
   private async load(conversationId: string, taskId: string, signal: AbortSignal) {
     this.validateId(taskId);
     const directory = await this.directory(conversationId, false);
-    const { content } = await readBounded(directory, path.join(directory, `${taskId}.json`), (CHILD_REPLY_MAX_BYTES+64*1024) * 6 + 4096, signal);
+    const { content } = await readBounded(directory, path.join(/* turbopackIgnore: true */ directory, `${taskId}.json`), (CHILD_REPLY_MAX_BYTES+64*1024) * 6 + 4096, signal);
     const document: unknown = JSON.parse(content);
     if (!isDocument(document) || document.conversationId !== conversationId || document.taskId !== taskId || document.expiresAt <= this.now() || Buffer.byteLength(document.reply) > CHILD_REPLY_MAX_BYTES || createHash("sha256").update(document.reply).digest("hex") !== document.sha256) throw new Error("子回复已过期、损坏或不可用。");
     return document;
@@ -77,7 +77,7 @@ export class ChildResultStore {
 
   private async directory(conversationId: string, create = true) {
     this.validateId(conversationId);
-    const parent = path.join(this.conversationsRoot, conversationId);
+    const parent = path.join(/* turbopackIgnore: true */ this.conversationsRoot, conversationId);
     const [root, actual, stat, rootStat] = await Promise.all([realpath(this.conversationsRoot), realpath(parent), lstat(parent), lstat(this.conversationsRoot)]);
     if (rootStat.isSymbolicLink() || !rootStat.isDirectory() || stat.isSymbolicLink() || !stat.isDirectory() || !within(root, actual)) throw new Error("父会话存储边界无效。");
     const directory = path.join(actual, "child-results");

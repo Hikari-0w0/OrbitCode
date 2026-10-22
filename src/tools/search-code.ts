@@ -17,7 +17,7 @@ const MAX_LINE_PREVIEW = 500;
 export const searchCodeTool = defineTool({
   name: "search_code",
   description:
-    "在授权 Workspace 内按字面量搜索 UTF-8 代码内容，优先于 shell 的 grep/rg。用于定位定义、引用和文本出现位置；需要完整文件内容时再用 read_file。",
+    "在授权 Workspace 内按字面量搜索 UTF-8 代码内容，优先于 shell 的 grep/rg。返回命中行列与周围原文，textStartColumn省略时为1；核实实现可用read_file按命中行分段读取。",
   inputSchema: objectSchema({
     query: stringSchema({ minLength: 1, maxLength: 1_024 }),
     path: optionalSchema(stringSchema({
@@ -55,12 +55,14 @@ export const searchCodeTool = defineTool({
       readonly column: number;
       readonly text: string;
       readonly textTruncated: boolean;
+      readonly textStartColumn?: number;
     }> = [];
     let skippedFiles = 0;
     let truncated = false;
     try {
       outer: for await (const entry of context.workspace.walk({
         path: input.path,
+        pattern: input.file_pattern,
         signal: context.signal,
       })) {
         if (!matcher.matches(entry.relativePath)) continue;
@@ -89,12 +91,18 @@ export const searchCodeTool = defineTool({
               break outer;
             }
             const original = lines[lineIndex];
+            const previewLength = Math.max(MAX_LINE_PREVIEW, query.length + 200);
+            let previewStart = Math.max(0, Math.min(found - 100, original.length - previewLength));
+            if (previewStart > 0 && /[\uDC00-\uDFFF]/u.test(original[previewStart])) previewStart--;
+            let previewEnd = Math.min(original.length, previewStart + previewLength);
+            if (previewEnd < original.length && /[\uDC00-\uDFFF]/u.test(original[previewEnd])) previewEnd++;
             matches.push({
               path: entry.relativePath,
               line: lineIndex + 1,
               column: found + 1,
-              text: original.slice(0, MAX_LINE_PREVIEW),
-              textTruncated: original.length > MAX_LINE_PREVIEW,
+              text: original.slice(previewStart, previewEnd),
+              textTruncated: previewStart > 0 || previewEnd < original.length,
+              ...(previewStart > 0 ? { textStartColumn: previewStart + 1 } : {}),
             });
             offset = found + Math.max(1, query.length);
           }

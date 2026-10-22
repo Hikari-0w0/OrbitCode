@@ -2,9 +2,10 @@ import type { AgentEvent } from "@/core/agent-events";
 import { createHash } from "node:crypto";
 import type { ChildExecutionHandoff } from "@/core/sub-agents/types";
 import { SkillCommandCalls } from "./result";
+import type { FileLineRange } from "@/tools/types";
 
 export class ChildHandoff {
-  private readonly readFiles = new Map<string, { path: string; callId: string; sha256?: string; byteLength?: number }>();
+  private readonly readFiles = new Map<string, NonNullable<ChildExecutionHandoff["reads"]>["files"][number]>();
   private readonly matches = new Map<string, { path: string; line: number; callId: string }>();
   private readonly contextSearches: NonNullable<NonNullable<ChildExecutionHandoff["reads"]>["contextSearches"]>[number][] = [];
   private omittedReads = 0;
@@ -57,9 +58,16 @@ export class ChildHandoff {
       else this.omittedReads++;
     }
     if (name === "read_file" && "path" in output && validPath(output.path)) {
-      if (this.readFiles.has(output.path)) return;
-      if (Buffer.byteLength(output.path) > 512 || this.readFiles.size >= 16) { this.omittedReads++; return; }
-      this.readFiles.set(output.path, { path: output.path, callId, ...("content" in output && typeof output.content === "string" ? { sha256: createHash("sha256").update(output.content).digest("hex"), byteLength: Buffer.byteLength(output.content) } : {}) });
+      if (Buffer.byteLength(output.path) > 512 || !this.readFiles.has(output.path) && this.readFiles.size >= 16) { this.omittedReads++; return; }
+      const range = "range" in output ? readLineRange(output.range) : undefined;
+      if ("range" in output && !range) return;
+      this.readFiles.set(output.path, { path: output.path, callId,
+        ...("content" in output && typeof output.content === "string" ? {
+          sha256: range && "sha256" in output && typeof output.sha256 === "string" && /^[a-f0-9]{64}$/.test(output.sha256) ? output.sha256 : createHash("sha256").update(output.content).digest("hex"),
+          byteLength: range && "byteLength" in output && typeof output.byteLength === "number" && Number.isSafeInteger(output.byteLength) && output.byteLength >= 0 ? output.byteLength : Buffer.byteLength(output.content),
+        } : {}),
+        ...(range ? { range } : {}),
+      });
     }
     if (name !== "search_code" || !("matches" in output) || !Array.isArray(output.matches)) return;
     for (const match of output.matches) {
@@ -76,6 +84,14 @@ export class ChildHandoff {
     if (Buffer.byteLength(value) > 1024 || this.paths.size >= 8) { this.omitted++; return; }
     this.paths.add(value);
   }
+}
+
+function readLineRange(value: unknown): FileLineRange | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+    !("startLine" in value) || typeof value.startLine !== "number" || !Number.isSafeInteger(value.startLine) || value.startLine < 1 ||
+    !("endLine" in value) || typeof value.endLine !== "number" || !Number.isSafeInteger(value.endLine) || value.endLine < value.startLine ||
+    !("totalLines" in value) || typeof value.totalLines !== "number" || !Number.isSafeInteger(value.totalLines) || value.totalLines < value.endLine) return undefined;
+  return { startLine: value.startLine, endLine: value.endLine, totalLines: value.totalLines, complete: value.startLine === 1 && value.endLine === value.totalLines };
 }
 
 function validPath(value: unknown): value is string {

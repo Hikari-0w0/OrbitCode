@@ -67,6 +67,7 @@ export const findFilesTool = defineTool({
       let truncated = false;
       for await (const entry of context.workspace.walk({
         path: input.path,
+        pattern: input.pattern,
         signal: context.signal,
       })) {
         if (!matcher.matches(entry.relativePath)) continue;

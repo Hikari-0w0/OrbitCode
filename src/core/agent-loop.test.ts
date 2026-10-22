@@ -470,6 +470,10 @@ test("unlimited 模式可继续超过原硬上限并最终完成", async () => {
   }));
 
   assert.equal(provider.requests.length, 34);
+  for (const [index, request] of provider.requests.entries()) {
+    assert.equal(request.messages.filter(message => message.role === "system" && message.content.includes("请复核仍未解决的具体事项")).length,
+      (index + 1) % 16 === 0 ? 1 : 0);
+  }
   assert.equal(stopReason(result), "final-response");
   const progress = result.findLast((event) => event.type === "progress");
   assert.equal(progress?.type, "progress");

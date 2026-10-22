@@ -85,6 +85,21 @@ test("设置 API 整链路覆盖私密投影、冲突、模型探测与两种 MC
       assert.match(warningBody.warning, /设置已保存.*清理未完成/);
       assert.doesNotMatch(JSON.stringify(warningBody), /synthetic-cleanup-error|synthetic-invalid-key/);
       context.mock.restoreAll();
+      const beforePreferences = (await service.load())!.revision;
+      const unlimited = await routes.PATCH(request({ expectedRevision: beforePreferences, action: {
+        type: "preferences-set", maxIterations: "unlimited", maxRuntimeMinutes: 180, defaultPermissionMode: "default",
+        subAgents: { groupRequests: 1024, perTurn: 12, capacity: 64, concurrency: 4, maxIterations: 32, maxRuntimeMinutes: 30, waitSeconds: 60 },
+      } }));
+      assert.equal(unlimited.status, 200, await unlimited.clone().text());
+      assert.equal((await unlimited.json()).maxIterations, "unlimited");
+      assert.equal((await service.load())?.maxIterations, "unlimited");
+      for (const maxIterations of ["infinite", "32", 0, 33, null]) {
+        const invalidPreferences = await routes.PATCH(request({ expectedRevision: beforePreferences + 1, action: {
+          type: "preferences-set", maxIterations, maxRuntimeMinutes: 180, defaultPermissionMode: "default",
+        } }));
+        assert.equal(invalidPreferences.status, 400);
+      }
+      assert.equal((await service.load())?.revision, beforePreferences + 1);
       const publicResponse = await routes.GET(new Request("http://localhost:3000/api/settings", { headers: { host: "localhost:3000" } }));
       assert.doesNotMatch(await publicResponse.text(), /synthetic-valid-key|synthetic-invalid-key/);
   } finally {

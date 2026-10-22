@@ -755,7 +755,7 @@ export class LocalConversationStore implements ConversationRepository, ContextSt
   }
 
   private revisionPath(id: string, revision: number): string {
-    return path.join(this.revisionsDirectory(id), `${String(revision).padStart(12, "0")}.json`);
+    return path.join(/* turbopackIgnore: true */ this.revisionsDirectory(id), `${String(revision).padStart(12, "0")}.json`);
   }
 
   private async serialize<T>(id: string, operation: () => Promise<T>): Promise<T> {

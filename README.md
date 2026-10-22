@@ -145,6 +145,8 @@ Web 会话保存在当前用户目录的 `~/.orbitcode/conversations-v1`，页�
 
 Agent Loop 默认最多执行 8 次模型迭代；可配置为 1–32，或使用 `unlimited` 取消迭代轮数上限。无限迭代仍受单轮运行时长保护，默认 60 分钟，可配置为 1–1440 分钟：
 
+设置页“运行偏好”可勾选“不限制主 Agent 模型轮数”，保存到用户级设置后从下一轮生效；也可取消勾选恢复有限轮数。已保存的运行偏好优先于下面的环境变量。不限迭代仍受任务组请求预算、总运行时限、取消及错误终止条件约束；子任务仍受自身预算和角色上限约束。
+
 ```dotenv
 ORBITCODE_MAX_AGENT_ITERATIONS=unlimited
 ORBITCODE_MAX_AGENT_RUNTIME_MINUTES=60

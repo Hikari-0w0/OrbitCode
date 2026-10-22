@@ -71,3 +71,11 @@ test("全文搜索交接保存工具确认范围与精确计数，分页或伪�
   assert.equal(facts.snapshot().reads?.contextSearches?.length, 4);
   assert.equal(facts.snapshot().reads?.omitted, 2);
 });
+
+test("分段读取交接保留实际范围，重复路径使用最新文件指纹且不泄露原文", () => {
+  const facts = new ChildHandoff();
+  facts.record(event("read_file", successfulToolResult({ path: "src/main.ts", content: "old full" }), "old"));
+  facts.record(event("read_file", successfulToolResult({ path: "src/main.ts", content: "private fragment", sha256: "a".repeat(64), byteLength: 1000, range: { startLine: 10, endLine: 12, totalLines: 100, complete: false } }), "latest"));
+  assert.deepEqual(facts.snapshot().reads?.files, [{ path: "src/main.ts", callId: "latest", sha256: "a".repeat(64), byteLength: 1000, range: { startLine: 10, endLine: 12, totalLines: 100, complete: false } }]);
+  assert.doesNotMatch(JSON.stringify(facts.snapshot()), /private fragment|old full/);
+});

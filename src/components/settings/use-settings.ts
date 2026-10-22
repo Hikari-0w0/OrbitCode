@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { runSettingsOperation } from "@/components/settings/settings-operation";
 import type { PublicSettings } from "@/runtime/settings-types";
+import type { AgentIterationLimit } from "@/core/agent-events";
 import type { SettingsAction } from "@/runtime/settings-service";
 import { useDialogRequest } from "../ui/use-dialog-request";
 import { useBeforeUnload } from "../navigation-guard";
@@ -56,7 +57,7 @@ export function useSettings() {
     const [mcpArgs, setMcpArgs] = useState("[]");
     const [mcpVariables, setMcpVariables] = useState("{}");
     const [mcpWorkspace, setMcpWorkspace] = useState("");
-    const [maxIterations, setMaxIterations] = useState(8);
+    const [maxIterations, setMaxIterations] = useState<AgentIterationLimit>(8);
     const [maxRuntimeMinutes, setMaxRuntimeMinutes] = useState(60);
     const [defaultPermissionMode, setDefaultPermissionMode] = useState<"strict" | "default" | "permissive">("default");
     const refresh = useCallback(async () => {

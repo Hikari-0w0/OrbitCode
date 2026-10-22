@@ -6,11 +6,13 @@ export async function agentTaskHttp(request:Request,conversationId:string,runtim
   try {
     assertLocalRequest(request);
     const scope=await runtime.taskScope(conversationId);
+    const summary = new URL(request.url).searchParams.get("view") === "summary";
+    if (summary && (request.method !== "GET" || taskId || action)) throw new Error("摘要只支持会话任务列表。");
     let output:unknown;
     if(action==="agents") { if(request.method!=="GET")throw new Error("仅允许 GET。"); output=await runtime.inspectAgents(conversationId); }
     else if(request.method==="GET") {
       if(action)throw new Error("控制操作需要 POST。");
-      output=taskId?{task:runtime.tasks.get(scope,taskId)}:{usage:runtime.usageFor(scope),tasks:runtime.tasks.list(scope),notice:"任务只在当前运行时存活；关闭运行时会取消未完成任务，未保存结果可能丢失。"};
+      output=summary?runtime.tasks.summary(scope):taskId?{task:runtime.tasks.get(scope,taskId)}:{usage:runtime.usageFor(scope),tasks:runtime.tasks.list(scope),notice:"任务只在当前运行时存活；关闭运行时会取消未完成任务，未保存结果可能丢失。"};
     } else if(request.method==="POST"&&taskId) {
       if(action==="decide")return Response.json({error:"人工审批已移除，工具按权限规则直接执行或拒绝。"},{status:410});
       const body:unknown=await readPermissionJsonBody(request);

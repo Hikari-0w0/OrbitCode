@@ -68,7 +68,7 @@ export async function loadSkillCatalog(input: {
                 throw new Error("项目 Skill 目录链接越界。");
             if (items.length > 1024)
                 throw new Error("Skill 来源目录项超过 1024。");
-            const files = items.filter(item => item.isDirectory() || item.isSymbolicLink() || item.name.endsWith(".md")).map(item => path.join(root, item.isDirectory() ? path.join(item.name, "SKILL.md") : item.name)).sort();
+            const files = items.filter(item => item.isDirectory() || item.isSymbolicLink() || item.name.endsWith(".md")).map(item => path.join(/* turbopackIgnore: true */ root, item.isDirectory() ? path.join(item.name, "SKILL.md") : item.name)).sort();
             if (files.length > 256)
                 throw new Error("Skill 来源入口超过 256。");
             for (const file of files) {

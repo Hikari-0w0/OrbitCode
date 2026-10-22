@@ -62,6 +62,15 @@ export class BackgroundTaskManager {
     constructor(private limits: SubAgentLimits = DEFAULT_SUB_AGENT_LIMITS, private readonly now = Date.now, private readonly monotonicNow = () => performance.now()) { this.scheduler = new ChildExecutionScheduler(limits.concurrency); }
     configure(limits: SubAgentLimits) { this.limits = limits; this.scheduler.configure(limits.concurrency); this.pumpPreparation(); }
     list(scope: TaskScope): readonly TaskView[] { return [...this.tasks.values()].filter(r => same(scope, r.view)).map(r => this.snapshot(r)); }
+    summary(scope: TaskScope): { readonly count: number; readonly running: number } {
+      let count = 0, running = 0;
+      for (const { view } of this.tasks.values()) {
+        if (!same(scope, view)) continue;
+        if (view.state.status !== "terminal") { count++; running++; }
+        else if (view.delivery.status !== "committed" && view.delivery.status !== "invalidated") count++;
+      }
+      return { count, running };
+    }
     get(scope: TaskScope, id: string): TaskView { return this.snapshot(this.require(scope, id)); }
     recordAcceptance(scope: TaskScope, id: string, acceptance: import("@/core/sub-agents/output-contract").ChildOutputAssessment): void {
         const record = this.require(scope, id);

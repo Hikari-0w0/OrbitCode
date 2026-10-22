@@ -142,5 +142,10 @@ for (const [reason, kind] of [["not-directory", "invalid-arguments"], ["not-file
   assert.equal(result.ok, false);
   assert.equal(result.ok ? undefined : result.error.kind, kind);
   assert.deepEqual(result.output, { targetFailureReason: reason });
+  if (reason === "not-found" && !result.ok) {
+    assert.match(result.error.message, /当前 Workspace 根目录下不可见/u);
+    assert.match(result.error.message, /不能证明工作区外/u);
+    assert.match(result.error.message, /import.*原始断言/u);
+  }
   assert.doesNotMatch(JSON.stringify(result), /secret|outside/);
 });

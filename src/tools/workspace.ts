@@ -14,6 +14,7 @@ import {
   stat,
 } from "node:fs/promises";
 import path from "node:path";
+import { compileGlob } from "@/tools/glob";
 
 import { isProtectedPath } from "@/tools/protected-paths";
 import type {
@@ -145,8 +146,12 @@ class LocalWorkspaceBoundary implements WorkspaceBoundary {
 
   async *walk(options: WalkOptions): AsyncIterable<WorkspaceEntry> {
     const start = await this.resolveExistingDirectory(options.path);
-    const entries: WorkspaceEntry[] = [];
-    const visit = async (directory: string, relativeBase: string): Promise<void> => {
+    const matcher = compileGlob(options.pattern ?? "**");
+    if (options.maxEntries !== undefined && (!Number.isSafeInteger(options.maxEntries) || options.maxEntries < 1)) {
+      throw new WorkspaceError("invalid-path", "遍历上限必须是正整数。");
+    }
+    let count = 0;
+    const visit = async function* (directory: string, relativeBase: string): AsyncIterable<WorkspaceEntry> {
       assertNotAborted(options.signal);
       let children;
       try {
@@ -154,36 +159,34 @@ class LocalWorkspaceBoundary implements WorkspaceBoundary {
       } catch (error) {
         throw mapFileError(error, "无法遍历工作目录。");
       }
-      children.sort((left, right) => left.name.localeCompare(right.name, "en"));
+      // 目录按带斜杠的路径排序，使深度优先流式输出与完整路径排序一致。
+      children.sort((left, right) => comparePaths(left.name + (left.isDirectory() ? "/" : ""), right.name + (right.isDirectory() ? "/" : "")));
       for (const child of children) {
         assertNotAborted(options.signal);
+        if (options.maxEntries !== undefined && count >= options.maxEntries) return;
         const relativePath = relativeBase
           ? `${relativeBase}/${child.name}`
           : child.name;
         if (isProtectedPath(relativePath)) continue;
         if (child.isSymbolicLink()) continue;
         if (child.isDirectory()) {
-          if (!DEFAULT_IGNORED_DIRECTORIES.has(child.name)) {
-            await visit(path.join(directory, child.name), relativePath);
+          if (!DEFAULT_IGNORED_DIRECTORIES.has(child.name) && matcher.canDescend(relativePath)) {
+            yield* visit(path.join(directory, child.name), relativePath);
           }
           continue;
         }
-        if (!child.isFile()) continue;
+        if (!child.isFile() || !matcher.matches(relativePath)) continue;
         const childStat = await stat(path.join(directory, child.name));
-        entries.push({
+        count++;
+        yield {
           relativePath,
           absolutePath: path.join(directory, child.name),
           byteLength: childStat.size,
-        });
-        if (options.maxEntries !== undefined && entries.length >= options.maxEntries) {
-          return;
-        }
+        };
       }
     };
     const base = start.relativePath === "." ? "" : start.relativePath;
-    await visit(start.absolutePath, base);
-    entries.sort((left, right) => comparePaths(left.relativePath, right.relativePath));
-    yield* entries;
+    if (matcher.canDescend(base)) yield* visit(start.absolutePath, base);
   }
 
   async readTextFile(input: string, limits: ReadLimits): Promise<TextFileSnapshot> {

@@ -188,3 +188,39 @@ test("工作区遍历排序稳定并跳过忽略、敏感和符号链接", async
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("遍历上限在兄弟目录间全局生效，流式次序保持完整路径排序", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-walk-limit-"));
+  try {
+    for (const dir of ["a", "b", "z"]) {
+      await mkdir(path.join(root, dir));
+      await writeFile(path.join(root, dir, "main.ts"), dir);
+    }
+    await writeFile(path.join(root, "a.ts"), "before a/");
+    const workspace = await createWorkspaceBoundary(root);
+    const all = [];
+    for await (const entry of workspace.walk({ signal: new AbortController().signal })) all.push(entry.relativePath);
+    assert.deepEqual(all, ["a.ts", "a/main.ts", "b/main.ts", "z/main.ts"]);
+    const limited = [];
+    for await (const entry of workspace.walk({ maxEntries: 1, signal: new AbortController().signal })) limited.push(entry.relativePath);
+    assert.deepEqual(limited, ["a.ts"]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("精确模式不进入无关目录，首个结果不等待后续不可读目录", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-walk-prune-"));
+  const blocked = path.join(root, "z-blocked");
+  try {
+    await mkdir(path.join(root, "src"));
+    await writeFile(path.join(root, "src/main.ts"), "export {};");
+    await mkdir(blocked);
+    await chmod(blocked, 0o000);
+    const workspace = await createWorkspaceBoundary(root);
+    const matched = [];
+    for await (const entry of workspace.walk({ pattern: "src/main.ts", signal: new AbortController().signal })) matched.push(entry.relativePath);
+    assert.deepEqual(matched, ["src/main.ts"]);
+    const iterator = workspace.walk({ signal: new AbortController().signal })[Symbol.asyncIterator]();
+    assert.equal((await iterator.next()).value?.relativePath, "src/main.ts");
+    await iterator.return?.();
+  } finally { await chmod(blocked, 0o700); await rm(root, { recursive: true, force: true }); }
+});

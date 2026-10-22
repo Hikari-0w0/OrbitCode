@@ -123,8 +123,16 @@ export type WorkspaceEntry = {
 
 export type WalkOptions = {
   readonly path?: string;
+  readonly pattern?: string;
   readonly signal: AbortSignal;
   readonly maxEntries?: number;
+};
+
+export type FileLineRange = {
+  readonly startLine: number;
+  readonly endLine: number;
+  readonly totalLines: number;
+  readonly complete: boolean;
 };
 
 export type ReadLimits = {

@@ -2,7 +2,7 @@ import type { AgentStopReason } from "@/core/agent-events";
 import type { CompletionAssessment } from "@/core/completion-tracker";
 import type { ModelUsageSummary } from "@/models/usage-tracker";
 import type { PermissionMode } from "@/core/permissions/types";
-import type { SideEffectState } from "@/tools/types";
+import type { FileLineRange, SideEffectState } from "@/tools/types";
 
 export type SubAgentLimits = {
   readonly groupRequests: number;
@@ -59,7 +59,7 @@ export type TaskScope = { readonly conversationId: string; readonly lifecycleEpo
 export type ChildToolFailure = { readonly tool: string; readonly kind: string; readonly exitCode?: number | null; readonly timedOut?: boolean; readonly callId?: string; readonly iteration?: number; readonly targetFailureReason?: import("@/tools/target-failure-reason").TargetFailureReason };
 export type ChildExecutionHandoff = {
   readonly reads?: {
-    readonly files: readonly { readonly path: string; readonly callId: string; readonly sha256?: string; readonly byteLength?: number }[];
+    readonly files: readonly { readonly path: string; readonly callId: string; readonly sha256?: string; readonly byteLength?: number; readonly range?: FileLineRange }[];
     readonly matches: readonly { readonly path: string; readonly line: number; readonly callId: string }[];
     readonly contextSearches?: readonly {
       readonly reference: string;
