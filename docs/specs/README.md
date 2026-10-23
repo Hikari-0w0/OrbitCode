@@ -29,13 +29,13 @@ $orbitcode-spec 使用 docs/specs/<feature-slug>/ 中已有的四份文档继续
 
 ## 维护规则
 
-现有 Specs 保存各阶段的设计和验收历史，不是统一的当前能力清单。当前实现入口见 [项目基线](../project-baseline-2026-09-16.md)，运行诊断见 [评估工作流](../evals/README.md)。旧复选框保留原有证据状态，不因后来存在实现就自动勾选。
+现有 Specs 保存各阶段的设计和验收历史，不是统一的当前能力清单。当前实现入口见 [项目 README](../../README.md)，历史起点见 [项目基线](../project-baseline-2026-09-16.md)，运行诊断见 [评估工作流](../evals/README.md)。旧复选框保留原有证据状态，不因后来存在实现就自动勾选。
 
 已知规则演进：
 
 | 早期描述 | 当前行为与后续规格 |
 | --- | --- |
-| Agent Loop 只公开六个工具，Plan 三个工具 | 当前 Do 注册 12 个工具，Plan 四个；`read_context` 见 [上下文管理](context-management/spec.md)，进程与完成报告见 [运行可靠性](agent-runtime-reliability/spec.md) |
+| Agent Loop 只公开六个工具，Plan 三个工具 | 工具按当前能力动态注册；Plan 仅允许读取、Skill 加载和受限任务控制；完成报告工具已撤下，见 [移除记录](../evals/report-completion-removal-2026-10-20.md) |
 | 刷新恢复 Do | 恢复已保存的对话模式，见 [会话历史](conversation-history/spec.md) |
 | 失败轮不进入后续上下文 | Web 接入 ContextManager 后保留已完成交换、部分文本及结构化中断信息，见 [会话历史](conversation-history/spec.md) 与 [运行可靠性](agent-runtime-reliability/spec.md) |
 | 迭代数硬上限 32 | 有限模式接受 1–32，也支持 unlimited，仍受总运行时间限制，见 [运行可靠性](agent-runtime-reliability/spec.md) |

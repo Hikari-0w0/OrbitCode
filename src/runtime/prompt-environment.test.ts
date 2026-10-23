@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { AgentConfigurationError } from "@/core/errors";
-import { createPromptEnvironment } from "@/web/prompt-environment";
+import { createPromptEnvironment } from "@/runtime/prompt-environment";
 
 test("从受信任字段构造不含绝对路径的提示环境", () => {
   const environment = createPromptEnvironment({
