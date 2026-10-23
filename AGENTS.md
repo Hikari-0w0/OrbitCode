@@ -1,6 +1,6 @@
 # OrbitCode
 
-OrbitCode 是一个使用 TypeScript 自主实现的本地编程智能体。Web 与 CLI 共用 Agent Loop、本地工具、权限、上下文管理与会话持久化；CLI 独立运行并提供终端审批、会话管理和记录导出。Agent 核心保持为与页面组件解耦的 TypeScript 模块，Next.js App Router 负责 Web 入口。
+OrbitCode 是一个使用 TypeScript 自主实现的本地编程智能体。Web 与 CLI 共用 Agent Loop、本地工具、权限、上下文管理与会话持久化；CLI 独立运行并提供终端交互、会话管理和记录导出。Agent 核心保持为与页面组件解耦的 TypeScript 模块，Next.js App Router 负责 Web 入口。
 
 ## 沟通与代码风格
 
