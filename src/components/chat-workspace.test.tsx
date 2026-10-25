@@ -69,7 +69,8 @@ test("失败工具卡展示安全错误但不回显原始调用参数", () => {
                         },
                     }],
             }]} onSuggestion={() => undefined} planActionDisabled={false} onExecutePlan={() => undefined}/>);
-    assert.match(markup, /查看安全错误详情/);
+    assert.match(markup, /访问受到限制/);
+    assert.match(markup, /原始结果/);
     assert.match(markup, /路径必须是有效的相对路径/);
     assert.equal(markup.includes("/absolute/main.cpp"), false);
 });

@@ -9,6 +9,7 @@ const PROTECTED_NAMES = new Set([
   "auth.json",
   "settings-v1.json",
   "memory-v1",
+  "knowledge-v1",
   "memory-state-v1",
 ]);
 const PROTECTED_EXTENSIONS = new Set([".pem", ".key", ".p12", ".pfx"]);

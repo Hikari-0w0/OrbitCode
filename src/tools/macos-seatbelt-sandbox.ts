@@ -285,7 +285,7 @@ async function createProfile(
     ...readBoundaryRules,
     ...protectedRules,
     // 记忆目录可能在命令启动后创建，按目录段保护其整个子树。
-    '(deny file-read* file-write* (regex #"(^|/)(memory-v1|memory-state-v1)(/|$)"))',
+    '(deny file-read* file-write* (regex #"(^|/)(memory-v1|memory-state-v1|knowledge-v1)(/|$)"))',
   ].join("\n");
 }
 

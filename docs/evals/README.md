@@ -179,3 +179,9 @@ npm run cli -- export-run <run-id> --output tmp/agent-evals/<run-id>.full.json
 - [子 Agent 检索与委派契约可靠性收敛（2026-10-20）](sub-agents-reliability-2026-10-20.md)：全文字面量搜索及覆盖事实、显式类型契约和 Fork 引用别名；712项自动回归通过，24个固定真实模型样本22通过/2失败，保留已修复引用问题及未解决的语义引用失败。
 
 - [子 Agent 全面测试与架构评估（2026-10-20）](sub-agents-comprehensive-2026-10-20.md)：不修改运行行为；712项回归通过，36个真实模型样本31通过/5未通过，另完成800任务调度及280次并发存储检查。确认准备阶段取消/幂等不一致、取消结果覆盖命令事实，以及模型历史召回限制。
+
+仓库知识检索功能及本地替身验证见 [RAG 开发与验证记录](repository-rag.md)，真实模型语义质量另见以下报告，仍有未通过项。
+
+2026-10-25 使用 SiliconFlow 对话模型与已配置 Qwen3 Embedding 的检索、Agent 修复、资料冲突、注入及 Web/CLI 验证见 [RAG 真实模型记录](repository-rag-real-model-2026-10-25.md)，包含未通过项。
+
+2026-10-25 的 Plan 接入、扫描计数、引用展示和预算提示修正见 [RAG 改善复测](repository-rag-improvements-2026-10-25.md)：819 项回归通过，复杂任务内容质量仍未完成验收。

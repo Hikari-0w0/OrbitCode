@@ -1,3 +1,4 @@
+import { parseKnowledgeConfig } from "@/runtime/knowledge/config";
 import { parseSubAgentLimits } from "@/core/sub-agents/types";
 import { randomUUID } from "node:crypto";
 import { open, mkdir, rename, rm, lstat, chmod, link } from "node:fs/promises";
@@ -156,7 +157,8 @@ function validateSettings(value: unknown): ManagedSettings {
   const workspaceIds = new Set<string>();
   for (const workspace of value.workspaces) {
     if (!record(workspace) || !identifier(workspace.id) || !shortText(workspace.name, 80) || !shortText(workspace.rootPath, 4096) || !path.isAbsolute(workspace.rootPath) || typeof workspace.enabled !== "boolean") throw invalid();
-    if (Object.keys(workspace).some((key) => !["id", "name", "rootPath", "enabled"].includes(key))) throw invalid();
+    if (Object.keys(workspace).some((key) => !["id", "name", "rootPath", "enabled", "knowledge"].includes(key))) throw invalid();
+    if (workspace.knowledge !== undefined) { try { workspace.knowledge = parseKnowledgeConfig(workspace.knowledge); } catch { throw invalid(); } }
     if (workspaceIds.has(workspace.id)) throw invalid();
     workspaceIds.add(workspace.id);
   }

@@ -20,6 +20,7 @@ const PLAN_TOOL_NAMES: ReadonlySet<ToolName> = new Set([
   "read_file",
   "find_files",
   "search_code",
+  "search_knowledge",
   "read_context",
   "read_memory",
 ]);

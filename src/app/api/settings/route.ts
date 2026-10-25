@@ -49,6 +49,7 @@ function parsePayload(value: unknown): { expectedRevision: number; action: Setti
   if (Object.keys(value).some((key) => !["expectedRevision", "action"].includes(key))) throw new SettingsError("invalid", "设置请求含未知字段。");
   const action = value.action;
   const fields: Readonly<Record<string, readonly string[]>> = {
+    "knowledge-set": ["id", "config"],
     "provider-add": ["displayName", "model", "baseUrl", "windowTokens", "credential", "maxOutputTokens", "thinking"],
     "provider-edit": ["id", "displayName", "model", "baseUrl", "windowTokens", "credential", "maxOutputTokens", "thinking"],
     "provider-enable": ["id", "enabled"], "provider-default": ["id"],
@@ -60,6 +61,9 @@ function parsePayload(value: unknown): { expectedRevision: number; action: Setti
   if (typeof action.type !== "string" || !Object.hasOwn(fields, action.type) || Object.keys(action).some((key) => key !== "type" && !fields[String(action.type)].includes(key)))
     throw new SettingsError("invalid", "设置操作含未知字段。");
   switch (action.type) {
+    case "knowledge-set":
+      if(typeof action.id === "string") return {expectedRevision:Number(value.expectedRevision),action:{type:"knowledge-set",id:action.id,config:action.config}};
+      break;
     case "provider-add":
       if (typeof action.displayName === "string" && typeof action.model === "string" && typeof action.baseUrl === "string" && typeof action.windowTokens === "number")
         return { expectedRevision: Number(value.expectedRevision), action: { type: "provider-add", displayName: action.displayName, model: action.model, baseUrl: action.baseUrl, windowTokens: action.windowTokens, credential: credential(action.credential), ...advanced(action) } };

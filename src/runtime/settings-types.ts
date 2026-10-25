@@ -1,3 +1,4 @@
+import type { KnowledgeConfig } from "@/runtime/knowledge/config";
 import type { SubAgentLimits } from "@/core/sub-agents/types";
 import type { AgentIterationLimit } from "@/core/agent-events";
 import type { ContextPolicyConfig } from "@/core/context/types";
@@ -24,6 +25,7 @@ export type ManagedProvider = {
 };
 
 export type ManagedWorkspace = {
+  readonly knowledge?: KnowledgeConfig;
   readonly id: string;
   readonly name: string;
   readonly rootPath: string;
@@ -52,7 +54,8 @@ export type ManagedSettings = {
   readonly defaultPermissionMode?: PermissionMode;
 };
 
-export type PublicSettings = Omit<ManagedSettings, "providers" | "mcpServers"> & {
+export type PublicSettings = Omit<ManagedSettings, "providers" | "mcpServers" | "workspaces"> & {
+  readonly workspaces: readonly (Omit<ManagedWorkspace, "knowledge"> & { readonly knowledge?: ReturnType<typeof import("@/runtime/knowledge/config").publicKnowledgeConfig> })[];
   readonly source: "managed" | "legacy" | "empty" | "invalid";
   readonly providers: readonly (Omit<ManagedProvider, "credential"> & {
     readonly credential: { readonly kind: StoredCredential["kind"]; readonly configured: boolean; readonly variable?: string };

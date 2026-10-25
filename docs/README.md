@@ -5,6 +5,7 @@
 | 目的 | 入口 |
 | --- | --- |
 | 安装、Web/CLI、模型、Workspace、MCP、Skills、记忆 | [项目 README](../README.md) |
+| 仓库文档与源码检索 | [RAG 使用与配置](specs/repository-rag/README.md)、[实际验证](evals/repository-rag-real-model-2026-10-25.md) |
 | 自动化检查与本地数据维护 | [开发与验证](../README.md#开发与验证)、[本地数据与维护](../README.md#本地数据与维护) |
 | 定位运行记录、导出证据与诊断 | [运行评估工作流](evals/README.md) |
 | 单次 CLI 与真实模型评测 | [Agent 评测用法](evals/agent-evaluation.md) |

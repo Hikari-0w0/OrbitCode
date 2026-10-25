@@ -1,5 +1,5 @@
 export type ManagementView = "agents" | "skills" | "background" | "cleanup" | "environment";
-export type SettingsSection = "models" | "workspaces" | "mcp" | "runtime" | "recovery" | "appearance";
+export type SettingsSection = "knowledge" | "models" | "workspaces" | "mcp" | "runtime" | "recovery" | "appearance";
 export type OperationState<T> = {
     kind: "idle";
 } | {
