@@ -26,6 +26,12 @@ Skills、背景与记忆、历史清理在独立管理面板中操作。设置�
 
 本轮实现及验收边界见 [UI 重构验收清单](docs/specs/ui-interaction-redesign/checklist.md)。
 
+## 仓库知识检索
+
+可为工作区配置独立 Embedding 服务，手动构建 Markdown、TypeScript/TSX 与测试索引。Agent 通过只读 `search_knowledge` 按需混合检索并返回来源，修改前继续读取当前文件；Web/CLI 共享配置、权限和索引。文件变化时过滤旧正文，服务不可用时显式降级为关键词检索。
+
+使用说明见 [仓库知识检索](docs/specs/repository-rag/README.md)，实际验证与限制见 [RAG 真实模型评估记录](docs/evals/repository-rag-real-model-2026-10-25.md)。
+
 ## 配置
 
 环境要求：Node.js 20.9 或更高版本。

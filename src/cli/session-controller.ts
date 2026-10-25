@@ -1,3 +1,4 @@
+import { runKnowledgeCommand } from "@/cli/knowledge-commands";
 import {parseAgentCommand} from "@/cli/agent-commands";
 import { parseSkillCommand } from "@/runtime/skill-commands";
 import {ConversationCleanup} from "@/runtime/conversation-cleanup";
@@ -203,6 +204,7 @@ export class SessionController {
   private async command(name: string, argument: string, signal: AbortSignal): Promise<void> {
     const { renderer, conversations } = this.options;
     switch (name) {
+      case "knowledge": renderer.content(JSON.stringify(await runKnowledgeCommand(this.options.runtime,this.current().summary.workspaceId,argument),null,2)); return;
       case "delegation": {
         const [mode, kind, ...extra] = argument.split(/\s+/);
         if ((mode !== "collaborate" && mode !== "delegate-only") || extra.length || kind !== undefined && !["auto", "defined", "fork"].includes(kind)) throw new CliInteractionError("使用 /delegation collaborate|delegate-only [auto|defined|fork]。");

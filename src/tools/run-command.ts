@@ -1,3 +1,4 @@
+import { redactCommand } from "./permission-target";
 import type { CommandSandbox } from "@/tools/command-sandbox";
 import { preflightCommand } from "@/tools/command-preflight";
 import { SandboxUnavailableError } from "@/tools/macos-seatbelt-sandbox";
@@ -86,7 +87,7 @@ export function createRunCommandTool(sandbox: CommandSandbox) {
           },
           { workspace: context.workspace, signal: context.signal },
         );
-        const output = { ...execution };
+        const output = { ...execution, command: redactCommand(input.command, 8192), cwd: cwd.relativePath || "." };
         const meta = {
           ...emptyResultMeta(),
           truncated: execution.stdoutTruncated || execution.stderrTruncated,

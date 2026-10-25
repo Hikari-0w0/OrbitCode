@@ -1,3 +1,5 @@
+import { createSearchKnowledgeTool } from "@/tools/search-knowledge";
+import type { KnowledgeReader } from "@/core/retrieval/types";
 import {createReadMemoryTool, type MemoryContentReader} from "@/tools/read-memory";
 import type { CommandSandbox } from "@/tools/command-sandbox";
 import { editFileTool } from "@/tools/edit-file";
@@ -21,6 +23,7 @@ export function createDefaultToolRegistry(
   processController?: ManagedProcessController,
   externalTools: readonly RegisteredTool[] = [],
   memoryReader?: MemoryContentReader,
+  knowledgeReader?: KnowledgeReader,
 ): ToolRegistry {
   return new ToolRegistry([
     readFileTool,
@@ -33,6 +36,7 @@ export function createDefaultToolRegistry(
     searchCodeTool,
     ...(contextReader ? [createReadContextTool(contextReader)] : []),
     ...(memoryReader ? [createReadMemoryTool(memoryReader)] : []),
+    ...(knowledgeReader ? [createSearchKnowledgeTool(knowledgeReader)] : []),
     ...externalTools,
   ]);
 }

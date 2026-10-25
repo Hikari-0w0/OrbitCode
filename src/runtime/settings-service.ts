@@ -1,3 +1,4 @@
+import { parseKnowledgeConfig, publicKnowledgeConfig } from "@/runtime/knowledge/config";
 import { parseSubAgentLimits, type SubAgentLimits } from "@/core/sub-agents/types";
 import { MAX_MODEL_OUTPUT_TOKENS, type ModelThinkingConfig } from "@/models/provider";
 import { randomUUID } from "node:crypto";
@@ -26,6 +27,7 @@ type ProviderAdvancedSettings = {
 };
 
 export type SettingsAction =
+  | { readonly type: "knowledge-set"; readonly id: string; readonly config: unknown }
   | ({ readonly type: "provider-add"; readonly displayName: string; readonly model: string; readonly baseUrl: string; readonly windowTokens: number; readonly credential: StoredCredential } & ProviderAdvancedSettings)
   | ({ readonly type: "provider-edit"; readonly id: string; readonly displayName?: string; readonly model?: string; readonly baseUrl?: string; readonly windowTokens?: number; readonly credential?: StoredCredential } & ProviderAdvancedSettings)
   | { readonly type: "provider-enable"; readonly id: string; readonly enabled: boolean }
@@ -51,6 +53,7 @@ export class SettingsService {
     return {
       ...settings,
       source: stored ? "managed" : "empty",
+      workspaces: settings.workspaces.map(({knowledge,...workspace})=>({...workspace,...(knowledge?{knowledge:publicKnowledgeConfig(knowledge)}:{})})),
       providers: settings.providers.map(({ credential, ...provider }) => ({
         ...provider,
         credential: credential.kind === "environment"
@@ -71,6 +74,13 @@ export class SettingsService {
     if (settings.revision !== expectedRevision) throw new SettingsError("conflict", "设置已更新，请刷新后重试。");
     let next: ManagedSettings;
     switch (action.type) {
+      case "knowledge-set": {
+        if (!settings.workspaces.some(item=>item.id===action.id && item.enabled)) throw missing();
+        const previous=settings.workspaces.find(item=>item.id===action.id)?.knowledge;
+        const input=typeof action.config==="object" && action.config!==null && !Array.isArray(action.config)?action.config:undefined;
+        const knowledge=parseKnowledgeConfig(input && !("credential" in input) && previous ? {...input,credential:previous.credential} : action.config);
+        next={...settings,workspaces:settings.workspaces.map(item=>item.id===action.id?{...item,knowledge}:item)}; break;
+      }
       case "provider-add": {
         if (action.credential.kind === "none") throw new SettingsError("invalid", "新增模型需要凭据。");
         const provider = { ...providerFromInput(action), ...advancedSettings(action, action.windowTokens) };
@@ -165,6 +175,16 @@ export class SettingsService {
       }
     }
     await this.store.save(expectedRevision, next);
+    for (const previous of settings.workspaces) {
+      const current=next.workspaces.find(item=>item.id===previous.id);
+      if(previous.knowledge?.enabled && (!current?.enabled || !current.knowledge?.enabled)) {
+        const {KnowledgeStore}=await import("@/runtime/knowledge/store");
+        const {cancelBuild}=await import("@/runtime/knowledge/lifecycle");
+        const store=new KnowledgeStore(this.store.directory,previous.rootPath,previous.id);
+        const control=await store.control();
+        if(control.version || control.operation) await cancelBuild(store);
+      }
+    }
     return this.view();
   }
 }

@@ -28,12 +28,12 @@ export function assertLocalRequest(request: Request): void {
 export function openSettingsSession(request: Request): Headers {
   assertLocalRequest(request);
   for (const [token, expiresAt] of sessions) if (expiresAt <= Date.now()) sessions.delete(token);
-  const previous = cookieToken(request);
+  const previous = cookieTokens(request).find((token) => sessions.has(token));
   const sessionToken = previous && sessions.has(previous) ? previous : randomBytes(32).toString("hex");
   if (!sessions.has(sessionToken) && sessions.size >= 128) throw new LocalManagementError("session", "管理会话数量已达上限，请稍后重试。");
   sessions.set(sessionToken, Date.now() + sessionLifetimeMs);
   const headers = new Headers({ "cache-control": "no-store" });
-  headers.set("set-cookie", `${cookieName}=${sessionToken}; HttpOnly; SameSite=Strict; Path=/api/settings`);
+  headers.set("set-cookie", `${cookieName}=${sessionToken}; HttpOnly; SameSite=Strict; Path=/api`);
   headers.set("x-orbitcode-settings-token", sessionToken);
   return headers;
 }
@@ -47,14 +47,15 @@ export function assertSettingsMutation(request: Request): void {
 
 export function settingsSessionOwner(request: Request): string {
   assertLocalRequest(request);
-  const cookie = cookieToken(request);
   const token = request.headers.get("x-orbitcode-settings-token");
-  if (!cookie || !token || !equal(cookie, token) || (sessions.get(cookie) ?? 0) <= Date.now()) throw new LocalManagementError("session", "设置会话已失效，请刷新页面。");
-  return cookie;
+  // 不同 Path 的同名旧 Cookie 可能同时存在，必须匹配请求头，不能依赖发送顺序。
+  if (!token || !cookieTokens(request).some((cookie) => equal(cookie, token)) || (sessions.get(token) ?? 0) <= Date.now()) throw new LocalManagementError("session", "设置会话已失效，请刷新页面。");
+  return token;
 }
 
-function cookieToken(request: Request): string | undefined {
-  return request.headers.get("cookie")?.split(";").map((entry) => entry.trim()).find((entry) => entry.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1);
+function cookieTokens(request: Request): readonly string[] {
+  return (request.headers.get("cookie") ?? "").split(";").map((entry) => entry.trim())
+    .filter((entry) => entry.startsWith(`${cookieName}=`)).map((entry) => entry.slice(cookieName.length + 1));
 }
 
 function equal(first: string, second: string): boolean {

@@ -47,3 +47,5 @@ $orbitcode-spec 使用 docs/specs/<feature-slug>/ 中已有的四份文档继续
 - 上游文档发生范围或架构变化时，复查并重新批准受影响的下游文档。
 - 文档不得覆盖仓库根目录 `AGENTS.md` 中的技术、安全和交付约束。
 - 不在文档、日志、截图或示例中记录 API Key、完整环境变量或其他凭据。
+
+- [仓库知识检索：使用、设计与验收](repository-rag/README.md)

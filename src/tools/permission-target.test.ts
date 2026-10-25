@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  redactCommand,
   permissionTargetFailure,
   resolvePermissionSubject,
   summarizePermissionSubject,
@@ -148,4 +149,45 @@ for (const [reason, kind] of [["not-directory", "invalid-arguments"], ["not-file
     assert.match(result.error.message, /import.*原始断言/u);
   }
   assert.doesNotMatch(JSON.stringify(result), /secret|outside/);
+});
+
+test("命令摘要隐藏带空格的凭据、鉴权头和 URL 认证，保留普通命令", () => {
+  const commands = [
+    'TOKEN="SYNTHETIC PRIVATE VALUE" node app.js',
+    'curl --api-key="SYNTHETIC PRIVATE VALUE" example.test',
+    "curl -H 'Authorization: Bearer SYNTHETIC_PRIVATE_VALUE' example.test",
+    "curl -H 'X-API-Key: SYNTHETIC_PRIVATE_VALUE' example.test",
+    `curl -d '{"token":"SYNTHETIC PRIVATE VALUE"}' example.test`,
+    'curl https://user:SYNTHETIC_PRIVATE_VALUE@example.test',
+  ];
+  for (const command of commands) {
+    const summary = summarizePermissionSubject({ kind: "command", toolName: "run_command", toolKind: "command", command, canonicalCwd: "." });
+    assert.doesNotMatch(String(summary.command), /SYNTHETIC|PRIVATE|VALUE/, command);
+    assert.match(String(summary.command), /<redacted>/);
+  }
+  assert.equal(summarizePermissionSubject({ kind: "command", toolName: "run_command", toolKind: "command", command: "npm run build && npm test", canonicalCwd: "." }).command, "npm run build && npm test");
+});
+
+
+test("Basic Auth 的短参、长参、引号拼接和转义值均不进入展示摘要", () => {
+  const commands = [
+    "curl -u demo:SYNTHETIC_PRIVATE_PASSWORD https://example.invalid",
+    "curl --user demo:SYNTHETIC_PRIVATE_PASSWORD https://example.invalid",
+    "curl --user=demo:SYNTHETIC_PRIVATE_PASSWORD https://example.invalid",
+    "curl -udemo:SYNTHETIC_PRIVATE_PASSWORD https://example.invalid",
+    "curl --proxy-user=demo:SYNTHETIC_PRIVATE_PASSWORD https://example.invalid",
+    'curl -u "demo:SYNTHETIC PRIVATE PASSWORD" https://example.invalid',
+    "curl --user='demo:SYNTHETIC PRIVATE PASSWORD' https://example.invalid",
+    'curl -u demo:"SYNTHETIC PRIVATE PASSWORD" https://example.invalid',
+    String.raw`curl -u demo:SYNTHETIC\ PRIVATE\ PASSWORD https://example.invalid`,
+    'curl -u "demo:SYNTHETIC PRIVATE PASSWORD',
+  ];
+  for (const command of commands) {
+    const redacted = redactCommand(command, 8192);
+    assert.doesNotMatch(redacted, /SYNTHETIC|PRIVATE|PASSWORD/, command);
+    assert.match(redacted, /<redacted>/);
+  }
+  for (const command of ["npm test --updateSnapshot", "curl --upload-file file.txt https://example.invalid", "npm run build && npm test", "python -u app.py"]) {
+    assert.equal(redactCommand(command), command);
+  }
 });

@@ -29,6 +29,7 @@ class ScriptedProvider implements ChatProvider {
   readonly requests: Array<{
     readonly messages: readonly ConversationMessage[];
     readonly toolNames: readonly string[];
+    readonly toolChoice: Parameters<ChatProvider["stream"]>[1]["toolChoice"];
   }> = [];
 
   constructor(
@@ -45,6 +46,7 @@ class ScriptedProvider implements ChatProvider {
     this.requests.push({
       messages: messages.map((message) => ({ ...message })),
       toolNames: (options.tools ?? []).map((tool) => tool.function.name),
+      toolChoice: options.toolChoice,
     });
     const script = this.scripts.shift();
     if (!script) throw new Error("测试缺少 Provider 脚本。");
@@ -420,8 +422,11 @@ test("规则拒绝权限后 Agent Loop 收到结构化工具结果并继续模�
   );
   assert.equal(observed.at(-1)?.type, "stopped");
   assert.equal(provider.requests.length, 2);
+  assert.equal(provider.requests[1].messages.at(-1)?.role, "system");
+  assert.match(provider.requests[1].messages.at(-1)?.content ?? "", /运行时预算/);
+  assert.ok(agent.getHistory().every(message => !message.content?.includes("运行时预算")));
   assert.match(
-    provider.requests[1].messages.at(-1)?.content ?? "",
+    provider.requests[1].messages.filter(message => message.role === "tool").at(-1)?.content ?? "",
     /permission-denied/u,
   );
 });
@@ -445,6 +450,8 @@ test("最后允许迭代仍请求工具时不执行并停止", async () => {
   assert.equal(result.some((event) => event.type === "tool-started"), false);
   assert.equal(stopReason(result), "max-iterations");
   assert.deepEqual(agent.getHistory(), []);
+  assert.equal(provider.requests[0].toolChoice, "auto");
+  assert.deepEqual(provider.requests[0].toolNames, ["read_file", "find_files", "search_code", "write_file"]);
 });
 
 test("unlimited 模式可继续超过原硬上限并最终完成", async () => {

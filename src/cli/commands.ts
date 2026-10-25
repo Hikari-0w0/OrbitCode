@@ -3,7 +3,7 @@ export type CliInput =
   | { readonly type: "message"; readonly text: string }
   | { readonly type: "command"; readonly name: string; readonly argument: string };
 const commands = new Set([
-  "agents", "tasks", "task", "delegation",
+  "knowledge", "agents", "tasks", "task", "delegation",
   "skills", "skill", "background", "memory", "cleanup", "help", "status", "exit", "cancel", "providers", "provider", "workspaces", "workspace",
   "plan", "do", "execute-plan", "permissions", "approve", "new", "conversations", "resume",
   "history", "rename", "clear", "delete", "confirm", "compress", "retry-save", "recover", "tool", "export",
@@ -22,6 +22,7 @@ export function parseCliInput(line: string): CliInput {
   return { type: "command", name, argument };
 }
 export const COMMAND_HELP = `
+/knowledge config|on|off|status|build|update|rebuild|cancel|delete
 /agents /tasks /task show|wait|background|cancel <id>
 /task result <id> [offset]（分页读取子回复正文）
 /delegation collaborate|delegate-only [auto|defined|fork]（父级分工及新子任务类型）

@@ -134,3 +134,25 @@ function context() {
     deadlineMs: Date.now() + 1_000,
   };
 }
+
+test("Plan 实际公开并执行知识检索，同时继续拒绝写入和命令", async () => {
+  const { createSearchKnowledgeTool } = await import("@/tools/search-knowledge");
+  let queries = 0;
+  const registry = new ToolRegistry([
+    createSearchKnowledgeTool({ search: async (input) => {
+      queries++;
+      assert.equal(input.query, "工作区隔离");
+      return { kind: "failure", code: "not-indexed", message: "尚未构建", retryable: false, nextAction: "build" };
+    } }),
+    fakeTool("write_file", "workspace-write"),
+    fakeTool("run_command", "command"),
+  ]);
+  const plan = createModeToolPolicy(registry, "plan");
+  assert.deepEqual(plan.definitions().map(definition => definition.function.name), ["search_knowledge"]);
+  assert.deepEqual(plan.classify("search_knowledge"), { kind: "allowed", mutability: "read-only" });
+  const result = await plan.execute("search_knowledge", { query: "工作区隔离" }, context());
+  assert.equal(result.ok, true);
+  assert.equal(queries, 1);
+  assert.deepEqual(plan.classify("write_file"), { kind: "denied" });
+  assert.deepEqual(plan.classify("run_command"), { kind: "denied" });
+});

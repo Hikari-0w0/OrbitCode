@@ -12,9 +12,15 @@ import {
 import { WorkspaceError } from "@/tools/workspace";
 
 const MAX_COMMAND_SUMMARY_LENGTH = 512;
-const SENSITIVE_ASSIGNMENT = /\b([A-Za-z_][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH)[A-Za-z0-9_]*)=([^\s]+)/giu;
-const SENSITIVE_FLAG = /(--?(?:api[-_]?key|token|secret|password|passwd|authorization))(?:=|\s+)([^\s]+)/giu;
-const BEARER_TOKEN = /\bBearer\s+[^\s]+/giu;
+const SENSITIVE_ASSIGNMENT = /\b((?=[A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH))[A-Za-z_][A-Za-z0-9_]*)\s*=\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s;&|]+)/giu;
+const SENSITIVE_FLAG = /(--?(?:api[-_]?key|token|secret|password|passwd|authorization))(?:=|\s+)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s;&|]+)/giu;
+// 参数可以由多个引号片段拼接，也可以转义空格；不完整引号保守遮蔽至末尾。
+const SHELL_ARGUMENT = String.raw`(?:"(?:\\[\s\S]|[^"\\])*(?:"|$)|'[^']*(?:'|$)|\\[\s\S]|[^\s;&|()"'\\])+`;
+const BASIC_AUTH_ARGUMENT = new RegExp(String.raw`(^|[\s;&|()])(--(?:proxy-)?user(?:=|\s+)|-u\s*)(${SHELL_ARGUMENT})`, "giu");
+const SENSITIVE_HEADER = /(\b(?:authorization|x-api-key|api-key)\s*:\s*)[^"'\r\n]+/giu;
+const SENSITIVE_JSON = /(["'](?:api[_-]?key|access[_-]?token|token|secret|password|passwd|authorization)["']\s*:\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/giu;
+const URL_CREDENTIAL = /([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+:[^\s/@]+@/giu;
+const BEARER_TOKEN = /\bBearer\s+[^\s"']+/giu;
 
 export async function resolvePermissionSubject(
   call: PermissionOperation,
@@ -100,11 +106,19 @@ async function resolvePathTarget(
   return workspace.resolveWriteTarget(target.requestedPath);
 }
 
-function redactCommand(command: string): string {
+export function redactCommand(command: string, maxLength = MAX_COMMAND_SUMMARY_LENGTH): string {
   const redacted = command
+    .replace(BASIC_AUTH_ARGUMENT, (match: string, prefix: string, flag: string, _argument: string, offset: number, original: string) => {
+      // -u 也可表示 Python 无缓冲输出；短参仅在 curl 调用后视为认证参数。
+      if (flag.startsWith("-u") && !flag.startsWith("--") && !/\bcurl(?:\s|$)/iu.test(original.slice(0, offset))) return match;
+      return `${prefix}${flag}<redacted>`;
+    })
     .replace(SENSITIVE_ASSIGNMENT, "$1=<redacted>")
     .replace(SENSITIVE_FLAG, "$1=<redacted>")
+    .replace(SENSITIVE_HEADER, "$1<redacted>")
+    .replace(SENSITIVE_JSON, '$1"<redacted>"')
+    .replace(URL_CREDENTIAL, "$1<redacted>@")
     .replace(BEARER_TOKEN, "Bearer <redacted>");
-  if (redacted.length <= MAX_COMMAND_SUMMARY_LENGTH) return redacted;
-  return `${redacted.slice(0, MAX_COMMAND_SUMMARY_LENGTH)}…`;
+  if (redacted.length <= maxLength) return redacted;
+  return `${redacted.slice(0, maxLength)}…`;
 }

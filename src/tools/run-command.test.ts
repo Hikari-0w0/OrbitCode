@@ -37,6 +37,8 @@ test("命令工具保留非零退出、输出、超时和取消字段", async ()
     assert.equal(result.ok, false);
     assert.equal(result.ok ? undefined : result.error.kind, "command-failed");
     assert.deepEqual(result.ok ? undefined : result.output, {
+      command: "exit 7",
+      cwd: ".",
       stdout: "out",
       stderr: "err",
       exitCode: 7,
@@ -145,4 +147,26 @@ test("畸形命令在权限准备和沙箱执行前被拒绝", () => {
     }
   }
   assert.equal(probed, false);
+});
+
+test("命令结果展示脱敏命令，沙箱仍执行原文", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-command-display-"));
+  const command = 'API_TOKEN="synthetic secret with spaces" curl --password \'synthetic password\' https://example.test';
+  let executed = "";
+  try {
+    const tool = createRunCommandTool({
+      async probe() { return { available: true }; },
+      async run(input) {
+        executed = input.command;
+        return { stdout: "", stderr: "", exitCode: 0, terminationSignal: null, timedOut: false, cancelled: false, stdoutTruncated: false, stderrTruncated: false };
+      },
+    });
+    const result = await tool.execute({ command }, { workspace: await createWorkspaceBoundary(root), signal: new AbortController().signal, deadlineMs: Date.now() + 1000 });
+    assert.equal(executed, command);
+    assert.ok(result.ok);
+    assert.ok(typeof result.output === "object" && result.output !== null && "cwd" in result.output && "command" in result.output);
+    assert.equal(result.output.cwd, ".");
+    assert.match(String(result.output.command), /API_TOKEN=<redacted>.*--password=<redacted>/);
+    assert.doesNotMatch(JSON.stringify(result), /synthetic secret|synthetic password|with spaces/);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

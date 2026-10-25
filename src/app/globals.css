@@ -117,17 +117,77 @@ table {border-collapse:collapse;min-width:100%;font-size:14px} th,td {border:1px
 .messageActions pre {border:1px solid var(--line);padding:12px;max-height:300px}
 .messageTimeline {display:grid;gap:10px}
 .toolExecutionList {display:grid;gap:8px;margin:12px 0}
-.toolCard {overflow:hidden;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
-.toolCardHeader {display:flex;align-items:center;gap:9px;padding:10px 14px;min-height:44px}
-.toolCardHeader code {flex:1;min-width:0;overflow-wrap:anywhere}
-.toolCardHeader > span:last-child {font-size:12px;color:var(--text-dim)}
-.toolStateDot {width:6px;height:6px;border-radius:50%;background:var(--text-dim);flex-shrink:0}
-.toolCard--succeeded .toolStateDot,.toolCard--running .toolStateDot {background:var(--green)}
-.toolCard--failed .toolStateDot,.toolCard--timed-out .toolStateDot {background:var(--danger)}
-.toolCard--awaiting-approval .toolStateDot {background:var(--orange)}
+/* 工具结果按状态、摘要与证据分层，完整载荷按需展开。 */
+.toolCard {min-width:0;overflow:hidden;border:1px solid var(--line);border-radius:12px;background:var(--panel);box-shadow:0 2px 6px #00000003}
+.toolCardHeader {display:flex;align-items:center;gap:12px;padding:13px 16px;min-height:66px;background:var(--panel)}
+.toolKindIcon {display:grid;place-items:center;width:34px;height:34px;flex-shrink:0;border:1px solid var(--line-soft);border-radius:9px;background:var(--panel-raised);color:var(--text-soft)}
+.toolKindIcon svg {width:19px;height:19px}
+.toolCardIdentity {display:grid;gap:1px;min-width:0;flex:1}
+.toolCardIdentity strong {font-size:13px;font-weight:600;color:var(--text)}
+.toolCardIdentity code {font-size:11px;color:var(--text-dim);overflow-wrap:anywhere}
+.toolCardMeta {display:grid;justify-items:end;gap:4px;flex-shrink:0;font-size:11px;color:var(--text-dim);font-variant-numeric:tabular-nums}
+.toolStatus {display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border-radius:5px;background:var(--panel-raised);font-size:11px;font-weight:500;line-height:1.6;color:var(--text-soft)}
+.toolStateDot {display:inline-block;width:5px;height:5px;border-radius:50%;background:currentColor;flex-shrink:0}
+.toolStatus--succeeded {color:var(--green);background:var(--accent-soft)}
+.toolStatus--failed,.toolStatus--timed-out {color:var(--danger);background:var(--danger-soft)}
+.toolStatus--running,.toolStatus--awaiting-approval,.toolStatus--unavailable {color:var(--orange)}
+.toolCard--running {border-color:var(--control-line)}
+.toolCard--running .toolStateDot {animation:toolPulse 1.4s ease-in-out infinite}
+.toolCardBody {display:grid;gap:12px;border-top:1px solid var(--line-soft);padding:14px 16px}
+.toolResultStats {display:flex;gap:8px 14px;align-items:center;flex-wrap:wrap;min-width:0;font-size:12px;color:var(--text-dim)}
+.toolResultStats strong {font-size:12px;font-weight:600;color:var(--text-soft)}
+.toolResultStats code {color:var(--text);overflow-wrap:anywhere;font-size:12px}
+.toolOutputBlock {min-width:0;overflow:hidden;border:1px solid var(--line-soft);border-radius:7px;background:var(--bg)}
+.toolOutputLabel {padding:6px 10px;border-bottom:1px solid var(--line-soft);font-size:10px;font-weight:600;letter-spacing:.04em;color:var(--text-dim)}
+.toolOutputBlock pre,.toolMatch pre {margin:0;padding:10px 12px;max-height:260px;overflow:auto;font-size:12px;line-height:1.75;tab-size:2;color:var(--text-soft)}
+.toolSourceList,.toolMatchList,.toolFileList {display:grid;gap:8px;min-width:0}
+.toolSource {display:grid;gap:8px;min-width:0;padding:12px;border:1px solid var(--line-soft);border-radius:8px}
+.toolSourceHeading {display:flex;align-items:flex-start;gap:8px;min-width:0;color:var(--text-soft)}
+.toolSourceHeading code {flex:1;min-width:0;overflow-wrap:anywhere;font-size:12px;line-height:1.7}
+.toolSourceNumber {display:grid;place-items:center;width:20px;height:20px;flex-shrink:0;border-radius:5px;background:var(--accent-soft);color:var(--green);font:600 10px/1 ui-monospace,monospace}
+.toolSourceRange {flex-shrink:0;color:var(--text-dim);font-size:11px;line-height:20px;font-variant-numeric:tabular-nums}
+.toolSourceTitle {font-size:12px;line-height:1.6;font-weight:500;color:var(--text)}
+.toolSourceTags {display:flex;gap:6px;flex-wrap:wrap}
+.toolSourceTags span {padding:1px 6px;border:1px solid var(--line-soft);border-radius:4px;font-size:10px;color:var(--text-dim)}
+.toolSource .toolOutputBlock {border:0;border-radius:5px}
+.toolFileRow {display:block;padding:7px 10px;border:1px solid var(--line-soft);border-radius:5px;font-size:12px;overflow-wrap:anywhere;color:var(--text-soft)}
+.toolFileAction {margin-right:10px;font-size:10px;color:var(--green)}
+.toolMatch {overflow:hidden;min-width:0;border:1px solid var(--line-soft);border-radius:6px}
+.toolMatch .toolSourceHeading {padding:6px 10px;border-bottom:1px solid var(--line-soft);background:var(--bg)}
+.toolMatch pre {padding:7px 10px}
+.toolMoreResults {min-width:0}
+.toolMoreResults summary {min-height:32px;padding:5px 0;font-size:12px;color:var(--green)}
+.toolMoreResults[open] {display:grid;gap:8px}
+.toolMoreResults > :not(summary) {margin-top:8px}
+.toolResultHint,.toolEmptyResult,.toolPending {margin:0;color:var(--text-dim);font-size:12px;line-height:1.7;overflow-wrap:anywhere}
+.toolResultHint--warning {color:var(--orange)}
+.toolPending {display:flex;align-items:center;gap:8px;padding:0 16px 14px}
+.toolResultNotice {padding:11px 12px;border-radius:7px;background:var(--panel-raised);color:var(--orange);font-size:12px}
+.toolResultNotice--error {background:var(--danger-soft);color:var(--danger)}
+.toolResultNotice strong {font-size:12px;font-weight:600}
+.toolResultNotice p {margin:5px 0;white-space:pre-wrap;overflow-wrap:anywhere}
+.toolResultNotice code {font-size:10px;opacity:.85}
+.toolChangeSummary {display:flex;align-items:flex-start;gap:10px}
+.toolChangeMark {display:grid;place-items:center;width:24px;height:24px;border-radius:6px;background:var(--accent-soft);color:var(--green);font-size:13px}
+.toolChangeSummary > div {display:grid;gap:3px;min-width:0}
+.toolChangeSummary strong {font-size:12px;font-weight:500}
+.toolChangeSummary code {font-size:12px;overflow-wrap:anywhere}
+.toolChangeSummary span:last-child {font-size:11px;color:var(--text-dim)}
+.toolFieldList {display:grid;gap:7px;margin:0;font-size:12px}
+.toolFieldList > div {display:grid;grid-template-columns:minmax(80px,auto) minmax(0,1fr);gap:12px}
+.toolFieldList dt {color:var(--text-dim);overflow-wrap:anywhere}
+.toolFieldList dd {margin:0;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--text-soft)}
 .toolCardDetails {border-top:1px solid var(--line-soft)}
-.toolCardDetails summary {padding:10px 14px;font-size:12px}
-.toolCardDetails pre {padding:0 14px 14px;margin:0;max-height:300px;color:var(--text-soft)}
+.toolCardDetails summary {display:flex;align-items:center;gap:8px;min-height:36px;padding:8px 16px;font-size:11px;color:var(--text-dim);list-style:none}
+.toolCardDetails summary::-webkit-details-marker {display:none}
+.toolCardDetails summary::before {content:'›';display:inline-block;font-size:16px;line-height:1;transition:transform .15s}
+.toolCardDetails[open] summary::before {transform:rotate(90deg)}
+.toolCardDetails summary span {margin-left:auto;font-size:10px;opacity:.8}
+.toolCardDetails summary:hover {background:var(--panel-raised);color:var(--text)}
+.toolCardDetails pre {padding:10px 16px 14px;margin:0;max-height:360px;font-size:11px;line-height:1.7;background:var(--bg);color:var(--text-soft)}
+.toolTarget {display:block;padding:0 16px 12px;font-size:12px;overflow-wrap:anywhere}
+@keyframes toolPulse {50% {opacity:.3}}
+@media(prefers-reduced-motion:reduce) {.toolCard--running .toolStateDot {animation:none}}
 .permissionCard {background:var(--panel);border:1px solid var(--orange);border-radius:10px;padding:16px;display:grid;gap:12px;scroll-margin:20px}
 .toolCard .permissionCard {border-radius:0;border-width:1px 0 0}
 .permissionCardHeader {display:flex;justify-content:space-between;align-items:start;gap:12px}
