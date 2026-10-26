@@ -1,7 +1,8 @@
 import { redactCommand } from "./permission-target";
 import type { CommandSandbox } from "@/tools/command-sandbox";
 import { preflightCommand } from "@/tools/command-preflight";
-import { SandboxUnavailableError } from "@/tools/macos-seatbelt-sandbox";
+import { SandboxUnavailableError } from "@/tools/sandbox-error";
+import { runWithSandboxDeadline, waitForSandboxProbe } from "@/tools/sandbox-deadline";
 import { defineTool, successfulToolResult } from "@/tools/registry";
 import {
   integerSchema,
@@ -74,19 +75,20 @@ export function createRunCommandTool(sandbox: CommandSandbox) {
         });
       }
       try {
-        const availability = await sandbox.probe(context.workspace);
-        if (!availability.available) {
-          return toolFailure("sandbox-unavailable", "严格命令沙箱不可用。");
-        }
-        const execution = await sandbox.run(
-          {
-            command: input.command,
-            cwd,
-            timeoutMs: input.timeout_ms ?? DEFAULT_TIMEOUT_MS,
-            outputLimitBytes: OUTPUT_LIMIT_BYTES,
-          },
-          { workspace: context.workspace, signal: context.signal },
-        );
+        const timeoutMs = input.timeout_ms ?? DEFAULT_TIMEOUT_MS;
+        const execution = await runWithSandboxDeadline(timeoutMs, context.signal, async signal => {
+          const availability = await waitForSandboxProbe(sandbox.probe(context.workspace), signal);
+          if (!availability.available) throw new SandboxUnavailableError(availability.message);
+          return sandbox.run(
+            {
+              command: input.command,
+              cwd,
+              timeoutMs,
+              outputLimitBytes: OUTPUT_LIMIT_BYTES,
+            },
+            { workspace: context.workspace, signal },
+          );
+        });
         const output = { ...execution, command: redactCommand(input.command, 8192), cwd: cwd.relativePath || "." };
         const meta = {
           ...emptyResultMeta(),

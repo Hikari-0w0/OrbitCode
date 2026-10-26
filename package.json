@@ -12,6 +12,7 @@
     "cli": "tsx src/cli/main.ts",
     "eval:agent": "tsx scripts/run-agent-evals.ts",
     "test": "node scripts/run-tests.mjs",
+    "test:linux-sandbox": "node scripts/check-linux-sandbox.mjs",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "check": "npm run lint && npm run typecheck && npm run build"

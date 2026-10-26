@@ -1,13 +1,42 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { pathToFileURL } from "node:url";
 
 import { MacOsSeatbeltCommandSandbox } from "@/tools/macos-seatbelt-sandbox";
 import { createWorkspaceBoundary } from "@/tools/workspace";
+
+const executeFile = promisify(execFile);
+
+test("Seatbelt 阻止原生接口读取仅含合成凭据的父进程环境", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-parent-environment-"));
+  const project = process.cwd();
+  try {
+    await executeFile("/usr/bin/clang", [path.join(project, "tests/fixtures/sandbox/read-parent-environment.c"), "-o", path.join(root, "reader")], { env: { PATH: "/usr/bin:/bin", NODE_ENV: "test" } });
+    const source = `import {spawnSync} from 'node:child_process';
+import {createWorkspaceBoundary} from ${JSON.stringify(pathToFileURL(path.join(project, "src/tools/workspace.ts")).href)};
+import {createCommandSandbox} from ${JSON.stringify(pathToFileURL(path.join(project, "src/tools/platform-sandbox.ts")).href)};
+const secret=process.env.ORBITCODE_SYNTHETIC_SECRET;
+const control=spawnSync('./reader',[String(process.pid),secret],{cwd:process.cwd(),env:{PATH:'/usr/bin:/bin'}});
+const workspace=await createWorkspaceBoundary(process.cwd());
+const result=await createCommandSandbox({}).run({command:'./reader '+process.pid+' '+secret,cwd:await workspace.resolveExistingDirectory(),timeoutMs:10000,outputLimitBytes:1024},{workspace,signal:new AbortController().signal});
+const own=await createCommandSandbox({}).run({command:'./reader self SELF_QUERY_SENTINEL',cwd:await workspace.resolveExistingDirectory(),timeoutMs:10000,outputLimitBytes:1024},{workspace,signal:new AbortController().signal});
+process.stdout.write(JSON.stringify({control:control.status,sandbox:result.exitCode,self:own.exitCode}));`;
+    const script = path.join(root, "supervisor.mjs");
+    await writeFile(script, source);
+    const result = await executeFile(process.execPath, ["--import", path.join(project, "node_modules/tsx/dist/loader.mjs"), script], {
+      cwd: root, timeout: 20000,
+      env: { PATH: "/usr/bin:/bin", NODE_ENV: "test", TSX_TSCONFIG_PATH: path.join(project, "tsconfig.json"), ORBITCODE_SYNTHETIC_SECRET: "ONLY_SYNTHETIC_PROCESS_SENTINEL" },
+    });
+    assert.deepEqual(JSON.parse(result.stdout), { control: 0, sandbox: 2, self: 0 });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test("Seatbelt 允许工作区命令并阻断外部、敏感与环境逃逸", async () => {
   assert.equal(process.platform, "darwin", "当前验收环境必须执行 Darwin 安全用例");
@@ -136,6 +165,43 @@ test("Seatbelt 允许命令访问网络，同时保持最小环境", async () =>
     await new Promise<void>((resolve) => httpServer.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("Seatbelt 仅在显式配置时禁网，主进程仍能访问开发服务", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-seatbelt-offline-"));
+  const server = createHttpServer((_request, response) => response.end("host-network-ok"));
+  try {
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address(); assert.ok(address && typeof address !== "string");
+    const url = `http://127.0.0.1:${address.port}`;
+    const workspace = await createWorkspaceBoundary(root);
+    const sandbox = new MacOsSeatbeltCommandSandbox({ network: "deny" });
+    assert.deepEqual(await sandbox.probe(workspace), { available: true });
+    const result = await sandbox.run({ command: `/usr/bin/curl --max-time 1 -fsS ${url}`, cwd: await workspace.resolveExistingDirectory(), timeoutMs: 3000, outputLimitBytes: 1024 }, { workspace, signal: new AbortController().signal });
+    assert.notEqual(result.exitCode, 0);
+    assert.equal(await (await fetch(url)).text(), "host-network-ok");
+  } finally { await new Promise<void>(resolve => server.close(() => resolve())); await rm(root, { recursive: true, force: true }); }
+});
+
+test("Seatbelt 可显式授权只读工具链，不授予工作区外写权限", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-seatbelt-toolchain-"));
+  const tools = await mkdtemp(path.join(tmpdir(), "orbitcode-seatbelt-tools-"));
+  try {
+    await mkdir(path.join(tools, "bin"));
+    const executable = path.join(tools, "bin/custom-sandbox-tool");
+    await writeFile(executable, "#!/bin/sh\nprintf custom-ok", { mode: 0o755 });
+    const workspace = await createWorkspaceBoundary(root);
+    const sandbox = new MacOsSeatbeltCommandSandbox({ readOnlyRoots: [tools] });
+    assert.deepEqual(await sandbox.probe(workspace), { available: true });
+    // 本例检查权限兼容性；短时限与取消由独立用例覆盖，避免全仓负载污染功能断言。
+    const request = { cwd: await workspace.resolveExistingDirectory(), timeoutMs: 10000, outputLimitBytes: 1024 };
+    const execution = await sandbox.run({ ...request, command: "custom-sandbox-tool" }, { workspace, signal: new AbortController().signal });
+    assert.equal(execution.exitCode, 0, JSON.stringify(execution));
+    assert.equal(execution.stdout, "custom-ok");
+    assert.notEqual((await sandbox.run({ ...request, command: `printf changed > '${executable}'` }, { workspace, signal: new AbortController().signal })).exitCode, 0);
+    assert.equal(await readFile(executable, "utf8"), "#!/bin/sh\nprintf custom-ok");
+    assert.equal((await new MacOsSeatbeltCommandSandbox({ readOnlyRoots: ["/"] }).probe(workspace)).available, false);
+  } finally { await rm(root, { recursive: true, force: true }); await rm(tools, { recursive: true, force: true }); }
 });
 
 test("Seatbelt 命令输出受限并可超时终止进程组", async () => {

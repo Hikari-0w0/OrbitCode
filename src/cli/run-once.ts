@@ -17,7 +17,7 @@ import { ConversationRuntimeManager } from "@/runtime/conversation-runtime-manag
 import { loadMcpConfig } from "@/runtime/mcp-config";
 import { PermissionSessionManager } from "@/runtime/permission-session-manager";
 import { loadWorkspaceCatalog, resolveWorkspaceBoundary } from "@/runtime/workspace-config";
-import { MacOsSeatbeltCommandSandbox } from "@/tools/macos-seatbelt-sandbox";
+import { createCommandSandbox } from "@/tools/platform-sandbox";
 import type { Environment } from "@/lib/environment";
 import type { RuntimeTurnEvent } from "@/runtime/types";
 
@@ -53,7 +53,7 @@ export async function runOnce(options: {
   const loadWorkspaces = (context?: Awaited<ReturnType<typeof loadConfig>>) => loadWorkspaceCatalog({ cwd, settingsStore,
     ...(context ? { managedSettings: context.managedSettings ?? null } : {}) });
   const runtime = new AgentRuntime({ userConfigRoot: userConfigurationRoot(dataDir), store, manager, guard, permissions, log,
-    sandbox: new MacOsSeatbeltCommandSandbox(), loadConfig, loadWorkspaces,
+    sandbox: createCommandSandbox(environment), loadConfig, loadWorkspaces,
     loadMcp: async (workspaceRoot, context) => loadMcpConfig({ workspaceRoot, environment: context.environment,
       managedSettings: context.managedSettings ?? null, settingsStore,
       ...(dataDir ? { userHome: dataDir } : {}) }),

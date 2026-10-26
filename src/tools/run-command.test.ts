@@ -8,6 +8,24 @@ import type { CommandSandbox } from "@/tools/command-sandbox";
 import { createRunCommandTool } from "@/tools/run-command";
 import { createWorkspaceBoundary } from "@/tools/workspace";
 
+test("命令工具入口的额外能力探测也计入命令总时限", { timeout: 2000 }, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-command-probe-budget-"));
+  let finishProbe: (() => void) | undefined;
+  const pending = new Promise<{ available: true }>(resolve => { finishProbe = () => resolve({ available: true }); });
+  let executed = false;
+  try {
+    const workspace = await createWorkspaceBoundary(root);
+    const tool = createRunCommandTool({ async probe() { return pending; }, async run() { executed = true; throw new Error("不应执行"); } });
+    const result = await tool.execute({ command: "printf should-not-run", timeout_ms: 100 }, { workspace, signal: new AbortController().signal, deadlineMs: Date.now() + 5000 });
+    assert.equal(result.ok, false);
+    assert.equal(result.ok ? undefined : result.error.kind, "timeout");
+    assert.ok(finishProbe); finishProbe();
+    await pending;
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(executed, false);
+  } finally { finishProbe?.(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("命令工具保留非零退出、输出、超时和取消字段", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "orbitcode-command-tool-"));
   try {
