@@ -25,7 +25,7 @@ import { PermissionSessionManager } from "@/runtime/permission-session-manager";
 import { loadProviderContext } from "@/runtime/config";
 import { loadWorkspaceCatalog, WorkspaceCatalogError } from "@/runtime/workspace-config";
 import { loadMcpConfig } from "@/runtime/mcp-config";
-import { MacOsSeatbeltCommandSandbox } from "@/tools/macos-seatbelt-sandbox";
+import { createCommandSandbox } from "@/tools/platform-sandbox";
 import { SessionController, CliInteractionError } from "@/cli/session-controller";
 import { TerminalRenderer } from "@/cli/renderer";
 import { terminalText } from "@/cli/terminal-text";
@@ -110,7 +110,7 @@ export async function runCli({
     const permissions = new PermissionSessionManager();
     const conversations = new ConversationService(actualStore, manager, guard, loadConfig);
     const runtime = new AgentRuntime({ userConfigRoot: dataDir ? userConfigurationRoot(dataDir) : userConfigRoot ?? userConfigurationRoot(), store: actualStore, manager, guard, permissions, log: actualLog,
-      sandbox: new MacOsSeatbeltCommandSandbox(), loadConfig, loadWorkspaces,
+      sandbox: createCommandSandbox(environment), loadConfig, loadWorkspaces,
       ...(dataDir ? { loadMcp: async (workspaceRoot: string, context: Awaited<ReturnType<typeof loadConfig>>) => loadMcpConfig({ workspaceRoot,
         environment: context.environment, managedSettings: context.managedSettings ?? null, settingsStore, userHome: dataDir }),
         permissionLocations: (workspaceRoot: string) => ({ user: path.join(dataDir, "permissions.yaml"),

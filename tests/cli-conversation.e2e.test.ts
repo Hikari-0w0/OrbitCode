@@ -64,6 +64,8 @@ test("保存失败后禁止新任务，重试保存不重放模型或工具", as
 test("配置失效历史仍可读、导出，执行不能静默换绑", async () => {
   const fixture = await runtimeFixture(() => ({ chunks: [{ data: textDelta("保留历史") + DONE_EVENT }] }));
   try {
+    // 本例统计主执行请求；后台笔记提取不属于换绑行为，不能污染请求数断言。
+    await fixture.runtime.memory.setEnabled(false);
     await fixture.controller.handleLine("问题");
     const saved = await fixture.checkpoint();
     const { rename } = await import("node:fs/promises");

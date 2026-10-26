@@ -1,5 +1,10 @@
 import type { ResolvedWorkspacePath, WorkspaceBoundary } from "@/tools/types";
 
+export type CommandSandboxOptions = {
+  readonly network?: "allow" | "deny";
+  readonly readOnlyRoots?: readonly string[];
+};
+
 export type SandboxAvailability =
   | { readonly available: true }
   | { readonly available: false; readonly message: string };

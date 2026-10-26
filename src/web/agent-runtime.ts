@@ -2,7 +2,7 @@ import {userConfigurationRoot} from "@/runtime/background-service";
 import { webMcpHost } from "@/runtime/mcp-host";
 import { AgentRuntime } from "@/runtime/agent-runtime";
 import { ConversationService } from "@/runtime/conversation-service";
-import { MacOsSeatbeltCommandSandbox } from "@/tools/macos-seatbelt-sandbox";
+import { createCommandSandbox } from "@/tools/platform-sandbox";
 import { localConversationStore, conversationRuntimeManager, conversationOperationGuard } from "@/web/conversation-store";
 import { permissionSessionManager } from "@/web/permission-session-store";
 import { localAgentRunLog } from "@/web/agent-run-log-store";
@@ -17,7 +17,7 @@ export const webAgentRuntime = new AgentRuntime({
   mcpConnections: webMcpHost(),
   store: localConversationStore, manager: conversationRuntimeManager,
   guard: conversationOperationGuard, permissions: permissionSessionManager,
-  sandbox: new MacOsSeatbeltCommandSandbox(), log: localAgentRunLog,
+  sandbox: createCommandSandbox(), log: localAgentRunLog,
   loadConfig: loadWebProviderContext,
   loadWorkspaces: (context) => loadWorkspaceCatalog({ managedSettings: context.managedSettings ?? null }),
   loadMcp: async (workspaceRoot, context) => loadMcpConfig({ workspaceRoot, environment: context.environment,

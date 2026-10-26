@@ -1,6 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -12,21 +10,29 @@ import type {
   SandboxAvailability,
   SandboxManagedProcess,
 } from "@/tools/command-sandbox";
-import { isProtectedPath } from "@/tools/protected-paths";
+import { spawnAndCollect, spawnManaged } from "@/tools/sandbox-process";
+import { SandboxUnavailableError } from "@/tools/sandbox-error";
+export { SandboxUnavailableError } from "@/tools/sandbox-error";
+import type { CommandSandboxOptions } from "@/tools/command-sandbox";
+import { resolveSandboxReadRoots } from "@/tools/sandbox-read-roots";
+import { collectSandboxProtectedEntries, type SandboxProtectedEntry } from "@/tools/sandbox-protected-entries";
 import type { WorkspaceBoundary } from "@/tools/types";
+import { createWorkspaceBoundary } from "@/tools/workspace";
+import { runWithSandboxDeadline, waitForSandboxProbe } from "@/tools/sandbox-deadline";
 
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 const SHELL = "/bin/sh";
-const TERMINATION_GRACE_MS = 250;
 const SYSTEM_RUNTIME_READ_ROOTS = ["/private/etc/ssl"] as const;
 
 export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
+  constructor(private readonly options: CommandSandboxOptions = {}) {}
+
   private readonly probes = new Map<string, Promise<SandboxAvailability>>();
 
   probe(workspace: WorkspaceBoundary): Promise<SandboxAvailability> {
     const existing = this.probes.get(workspace.root);
     if (existing) return existing;
-    const pending = this.performProbe(workspace).catch(() => ({
+    const pending = this.performProbe().catch(() => ({
       available: false as const,
       message: "严格命令隔离能力探测失败。",
     }));
@@ -38,11 +44,11 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
     request: CommandRequest,
     options: { readonly workspace: WorkspaceBoundary; readonly signal: AbortSignal },
   ): Promise<CommandExecution> {
-    const availability = await this.probe(options.workspace);
-    if (!availability.available) {
-      throw new SandboxUnavailableError(availability.message);
-    }
-    return this.runIsolated(request, options.workspace, options.signal);
+    return runWithSandboxDeadline(request.timeoutMs, options.signal, async signal => {
+      const availability = await waitForSandboxProbe(this.probe(options.workspace), signal);
+      if (!availability.available) throw new SandboxUnavailableError(availability.message);
+      return this.runIsolated(request, options.workspace, signal);
+    });
   }
 
   async start(
@@ -56,9 +62,7 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
     return this.startIsolated(request, options.workspace);
   }
 
-  private async performProbe(
-    workspace: WorkspaceBoundary,
-  ): Promise<SandboxAvailability> {
+  private async performProbe(): Promise<SandboxAvailability> {
     if (process.platform !== "darwin") {
       return { available: false, message: "当前平台没有可用的严格命令隔离后端。" };
     }
@@ -69,14 +73,13 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
       return { available: false, message: "系统未提供可验证的 Seatbelt 执行器。" };
     }
 
-    const runtimeRoot = path.join(workspace.root, ".orbitcode-runtime");
-    const probeRoot = path.join(runtimeRoot, `probe-${randomUUID()}`);
+    const probeRoot = await mkdtemp(path.join(tmpdir(), "orbitcode-capability-probe-"));
     const outsideRoot = await mkdtemp(path.join(tmpdir(), "orbitcode-sandbox-probe-"));
     const outsideFile = path.join(outsideRoot, "outside.txt");
     const allowedFile = path.join(probeRoot, "allowed.txt");
     const protectedFile = path.join(probeRoot, ".env");
     try {
-      await mkdir(probeRoot, { recursive: true, mode: 0o700 });
+      const workspace = await createWorkspaceBoundary(probeRoot);
       await writeFile(allowedFile, "allowed", { mode: 0o600 });
       await writeFile(protectedFile, "ORBITCODE_PROBE_SECRET=hidden", { mode: 0o600 });
       await writeFile(outsideFile, "outside", { mode: 0o600 });
@@ -86,9 +89,9 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
         existed: true,
       };
       const baseRequest = { cwd, timeoutMs: 2_000, outputLimitBytes: 8_192 };
-      const signal = new AbortController().signal;
+      const signal = AbortSignal.timeout(5000);
       const allowed = await this.runIsolated(
-        { ...baseRequest, command: "cat allowed.txt && printf updated > written.txt" },
+        { ...baseRequest, command: "/bin/cat allowed.txt && printf updated > written.txt" },
         workspace,
         signal,
       );
@@ -99,12 +102,12 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
         return { available: false, message: "Seatbelt 工作区写入探测结果异常。" };
       }
       const outside = await this.runIsolated(
-        { ...baseRequest, command: `cat ${quoteShell(outsideFile)}` },
+        { ...baseRequest, command: `/bin/cat ${quoteShell(outsideFile)}` },
         workspace,
         signal,
       );
       const protectedRead = await this.runIsolated(
-        { ...baseRequest, command: "cat .env" },
+        { ...baseRequest, command: "/bin/cat .env" },
         workspace,
         signal,
       );
@@ -114,7 +117,7 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
         signal,
       );
       const childEscape = await this.runIsolated(
-        { ...baseRequest, command: `sh -c 'cat ${quoteShell(outsideFile)}'` },
+        { ...baseRequest, command: `/bin/sh -c ${quoteShell(`/bin/cat ${quoteShell(outsideFile)}`)}` },
         workspace,
         signal,
       );
@@ -130,7 +133,6 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
     } finally {
       await rm(probeRoot, { recursive: true, force: true }).catch(() => undefined);
       await rm(outsideRoot, { recursive: true, force: true }).catch(() => undefined);
-      await removeEmptyDirectory(runtimeRoot);
     }
   }
 
@@ -142,21 +144,23 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), "orbitcode-sandbox-run-"));
     const privateRuntimeRoot = await realpath(runtimeRoot);
     const executionRoot = path.join(privateRuntimeRoot, "home");
-    await mkdir(executionRoot, { mode: 0o700 });
-    const protectedPaths = await collectProtectedPaths(workspace.root);
-    const developerRoot = await resolveDeveloperRoot();
-    const profile = await createProfile(
-      workspace.root,
-      protectedPaths,
-      developerRoot,
-      privateRuntimeRoot,
-    );
-    const environment = createCommandEnvironment(
-      workspace.root,
-      executionRoot,
-      developerRoot,
-    );
     try {
+      await mkdir(executionRoot, { mode: 0o700 });
+      const protectedPaths = await collectProtectedPaths(workspace.root, signal);
+      const developerRoot = await resolveDeveloperRoot();
+      const profile = await createProfile(
+        workspace.root,
+        protectedPaths,
+        developerRoot,
+        privateRuntimeRoot,
+        this.options,
+      );
+      const environment = createCommandEnvironment(
+        workspace.root,
+        executionRoot,
+        developerRoot,
+        this.options.readOnlyRoots,
+      );
       return await spawnAndCollect(
         SANDBOX_EXEC,
         ["-p", profile, SHELL, "-c", request.command],
@@ -180,8 +184,8 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), "orbitcode-sandbox-process-"));
     const privateRuntimeRoot = await realpath(runtimeRoot);
     const executionRoot = path.join(privateRuntimeRoot, "home");
-    await mkdir(executionRoot, { mode: 0o700 });
     try {
+      await mkdir(executionRoot, { mode: 0o700 });
       const protectedPaths = await collectProtectedPaths(workspace.root);
       const developerRoot = await resolveDeveloperRoot();
       const profile = await createProfile(
@@ -189,11 +193,13 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
         protectedPaths,
         developerRoot,
         privateRuntimeRoot,
+        this.options,
       );
       const environment = createCommandEnvironment(
         workspace.root,
         executionRoot,
         developerRoot,
+        this.options.readOnlyRoots,
       );
       const managed = spawnManaged(
         SANDBOX_EXEC,
@@ -213,30 +219,28 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
   }
 }
 
-export class SandboxUnavailableError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "SandboxUnavailableError";
-  }
-}
-
 async function createProfile(
   workspaceRoot: string,
-  protectedPaths: readonly string[],
+  protectedPaths: readonly SandboxProtectedEntry[],
   developerRoot: string | undefined,
   privateRuntimeRoot: string,
+  options: CommandSandboxOptions,
 ): Promise<string> {
   const executable = await realpath(process.execPath).catch(() => process.execPath);
   const runtimeRoot = path.dirname(path.dirname(executable));
   const trustedReadRoots = [
     runtimeRoot,
     privateRuntimeRoot,
+    ...await resolveSandboxReadRoots(options.readOnlyRoots ?? [], workspaceRoot),
     ...SYSTEM_RUNTIME_READ_ROOTS,
     ...(developerRoot === undefined ? [] : [developerRoot]),
   ];
   const protectedRules = protectedPaths.map(
-    (target) => `(deny file-read* file-write* (literal ${schemeString(target)}))`,
+    (target) => `(deny file-read* file-write* (${target.directory ? "subpath" : "literal"} ${schemeString(target.path)}))`,
   );
+  // 文件规则按路径匹配，必须阻止改名其祖先目录；同目录的普通文件仍可读写。
+  const protectedAncestors = new Set(protectedPaths.flatMap(target => ancestorDirectories(target.path).filter(directory => isWithinTrustedRoot(workspaceRoot, directory))));
+  const ancestorRules = [...protectedAncestors].map(directory => `(deny file-write-unlink (literal ${schemeString(directory)}))`);
   const dataRoots = [
     "/Applications",
     "/Library",
@@ -278,12 +282,17 @@ async function createProfile(
   return [
     "(version 1)",
     "(allow default)",
+    // 环境过滤还不足以保密，kern.procargs2 等接口也不能查询父进程等其他进程。
+    '(deny sysctl-read (sysctl-name-regex #"^kern\\.procargs"))',
+    '(deny process-info* (target others))',
+    ...(options.network === "deny" ? ["(deny network*)"] : []),
     `(deny file-write* (require-all ` +
       `(require-not (subpath ${schemeString(workspaceRoot)})) ` +
       `(require-not (subpath ${schemeString(privateRuntimeRoot)})) ` +
       `(require-not (literal ${schemeString("/dev/null")}))))`,
     ...readBoundaryRules,
     ...protectedRules,
+    ...ancestorRules,
     // 记忆目录可能在命令启动后创建，按目录段保护其整个子树。
     '(deny file-read* file-write* (regex #"(^|/)(memory-v1|memory-state-v1|knowledge-v1)(/|$)"))',
   ].join("\n");
@@ -334,130 +343,27 @@ async function resolveDeveloperRoot(): Promise<string | undefined> {
 
 function isWithinTrustedRoot(root: string, target: string): boolean {
   const relative = path.relative(root, target);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
-async function collectProtectedPaths(root: string): Promise<readonly string[]> {
-  const result: string[] = [];
-  const ignored = new Set([".git", "node_modules", ".next", "dist", "build", "coverage"]);
-  async function visit(directory: string, relativeBase: string): Promise<void> {
-    const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
-    for (const entry of entries) {
-      const relativePath = relativeBase ? `${relativeBase}/${entry.name}` : entry.name;
-      const absolutePath = path.join(directory, entry.name);
-      if (isProtectedPath(relativePath)) {
-        result.push(absolutePath);
-        continue;
-      }
-      if (entry.isDirectory() && !entry.isSymbolicLink() && !ignored.has(entry.name)) {
-        await visit(absolutePath, relativePath);
-      }
-    }
-  }
-  await visit(root, "");
-  for (const name of [
-    ".env",
-    ".env.local",
-    ".env.development",
-    ".env.production",
-    ".env.test",
-    "orbitcode.yaml",
-    ".npmrc",
-    ".netrc",
-    ".git-credentials",
-    "auth.json",
-  ]) {
-    // 工作区内容是运行时用户数据，不应被 Next.js 当作部署依赖追踪。
-    result.push(path.join(/* turbopackIgnore: true */ root, name));
-  }
-  return [...new Set(result)].sort();
-}
-
-function spawnAndCollect(
-  executable: string,
-  args: readonly string[],
-  options: {
-    readonly cwd: string;
-    readonly env: Record<string, string>;
-    readonly signal: AbortSignal;
-    readonly timeoutMs: number;
-    readonly outputLimitBytes: number;
-  },
-): Promise<CommandExecution> {
-  return new Promise((resolve, reject) => {
-    if (options.signal.aborted) {
-      resolve(emptyExecution({ cancelled: true }));
-      return;
-    }
-    let child: ChildProcess;
-    try {
-      child = spawn(executable, [...args], {
-        cwd: options.cwd,
-        // Next.js 把 NODE_ENV 扩展为必填字段，但子进程环境允许有意省略它。
-        env: options.env as NodeJS.ProcessEnv,
-        detached: true,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    } catch (error) {
-      reject(error);
-      return;
-    }
-    const stdout = new OutputCollector(options.outputLimitBytes);
-    const stderr = new OutputCollector(options.outputLimitBytes);
-    child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
-    let timedOut = false;
-    let cancelled = false;
-    let settled = false;
-    let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
-    const terminate = (reason: "timeout" | "cancelled"): void => {
-      if (settled) return;
-      timedOut = reason === "timeout";
-      cancelled = reason === "cancelled";
-      killProcessGroup(child, "SIGTERM");
-      forceKillTimer = setTimeout(() => killProcessGroup(child, "SIGKILL"), TERMINATION_GRACE_MS);
-    };
-    const timeout = setTimeout(() => terminate("timeout"), options.timeoutMs);
-    const abort = (): void => terminate("cancelled");
-    options.signal.addEventListener("abort", abort, { once: true });
-    child.once("error", (error) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(error);
-    });
-    child.once("close", (exitCode, terminationSignal) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve({
-        stdout: stdout.text(),
-        stderr: stderr.text(),
-        exitCode,
-        terminationSignal,
-        timedOut,
-        cancelled,
-        stdoutTruncated: stdout.truncated,
-        stderrTruncated: stderr.truncated,
-      });
-    });
-    function cleanup(): void {
-      clearTimeout(timeout);
-      if (forceKillTimer !== undefined) clearTimeout(forceKillTimer);
-      options.signal.removeEventListener("abort", abort);
-    }
-  });
+async function collectProtectedPaths(root: string, signal?: AbortSignal): Promise<readonly SandboxProtectedEntry[]> {
+  const entries = await collectSandboxProtectedEntries(root, signal);
+  const paths = new Set(entries.map(entry => entry.path));
+  const reserved = [".env", ".env.local", ".env.development", ".env.production", ".env.test", "orbitcode.yaml", ".npmrc", ".netrc", ".git-credentials", "auth.json"];
+  return [...entries, ...reserved.map(name => path.join(root, name)).filter(target => !paths.has(target)).map(target => ({ path: target, directory: false }))];
 }
 
 function createCommandEnvironment(
   workspaceRoot: string,
   executionRoot: string,
   developerRoot: string | undefined,
+  readOnlyRoots: readonly string[] = [],
 ): Record<string, string> {
   return {
     PATH: [
       path.join(workspaceRoot, "node_modules", ".bin"),
       path.dirname(process.execPath),
+      ...readOnlyRoots.map(root => path.join(root, "bin")),
       ...(developerRoot === undefined
         ? []
         : [path.join(developerRoot, "usr", "bin")]),
@@ -476,107 +382,10 @@ function createCommandEnvironment(
   };
 }
 
-function spawnManaged(
-  executable: string,
-  args: readonly string[],
-  options: { readonly cwd: string; readonly env: Record<string, string> },
-): SandboxManagedProcess {
-  const child = spawn(executable, [...args], {
-    cwd: options.cwd,
-    env: options.env as NodeJS.ProcessEnv,
-    detached: true,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let settled = false;
-  const completion = new Promise<{
-    readonly exitCode: number | null;
-    readonly terminationSignal: NodeJS.Signals | null;
-  }>((resolve, reject) => {
-    child.once("error", (error) => {
-      if (settled) return;
-      settled = true;
-      reject(error);
-    });
-    child.once("close", (exitCode, terminationSignal) => {
-      if (settled) return;
-      settled = true;
-      resolve({ exitCode, terminationSignal });
-    });
-  });
-  return {
-    pid: child.pid ?? 0,
-    stdout: child.stdout,
-    stderr: child.stderr,
-    completion,
-    async stop() {
-      if (settled) return;
-      killProcessGroup(child, "SIGTERM");
-      const forceKill = setTimeout(
-        () => killProcessGroup(child, "SIGKILL"),
-        TERMINATION_GRACE_MS,
-      );
-      try {
-        await completion.catch(() => undefined);
-      } finally {
-        clearTimeout(forceKill);
-      }
-    },
-  };
-}
-
-class OutputCollector {
-  private readonly chunks: Buffer[] = [];
-  private capturedBytes = 0;
-  truncated = false;
-
-  constructor(private readonly limitBytes: number) {}
-
-  push(chunk: Buffer): void {
-    const remaining = this.limitBytes - this.capturedBytes;
-    if (remaining > 0) {
-      const captured = chunk.subarray(0, remaining);
-      this.chunks.push(captured);
-      this.capturedBytes += captured.byteLength;
-    }
-    if (chunk.byteLength > remaining) this.truncated = true;
-  }
-
-  text(): string {
-    return new TextDecoder("utf-8").decode(Buffer.concat(this.chunks));
-  }
-}
-
-function killProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
-  if (!child.pid) return;
-  try {
-    process.kill(-child.pid, signal);
-  } catch {
-    child.kill(signal);
-  }
-}
-
-function emptyExecution(options: { readonly cancelled: boolean }): CommandExecution {
-  return {
-    stdout: "",
-    stderr: "",
-    exitCode: null,
-    terminationSignal: null,
-    timedOut: false,
-    cancelled: options.cancelled,
-    stdoutTruncated: false,
-    stderrTruncated: false,
-  };
-}
-
 function schemeString(value: string): string {
   return JSON.stringify(value);
 }
 
 function quoteShell(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
-async function removeEmptyDirectory(directory: string): Promise<void> {
-  const entries = await readdir(directory).catch(() => ["not-empty"]);
-  if (entries.length === 0) await rm(directory, { recursive: true, force: true }).catch(() => undefined);
 }

@@ -172,7 +172,7 @@ Plan 模式中的需求澄清使用普通多轮对话。最新一条成功 Plan 
 
 只有严格独立的 `/plan` 和 `/do` 会切换模式，`/plan 请分析这个任务` 会作为普通用户消息发送。切换 Provider 会创建新的 Do Mode 对话；清空会话会恢复 Do Mode，刷新页面则恢复已保存模式。
 
-文件和命令工具只接受当前选定 Workspace 内的相对路径，拒绝路径穿越、符号链接和敏感配置文件。`run_command` 可以联网，因此 Agent 能直接执行 `npm install` 等开发命令；命令仍需通过工具能力和拒绝规则检查，并会过滤服务端环境变量、阻止访问 Workspace 外的用户数据。当前平台无法通过沙箱能力探测时，命令工具直接返回不可用，不会降级为普通子进程。
+文件和命令工具只接受当前选定 Workspace 内的相对路径，拒绝路径穿越、符号链接和敏感配置文件。`run_command` 默认可以联网，因此 Agent 能直接执行 `npm install` 等开发命令；命令仍需通过工具能力和拒绝规则检查，并会过滤服务端环境变量、阻止访问 Workspace 外的用户数据。macOS 使用 Seatbelt，Linux 使用 bubblewrap；可选禁网与只读工具链配置见[跨平台命令沙箱](docs/command-sandbox.md)。当前平台无法通过沙箱能力探测时，命令工具直接返回不可用，不会降级为普通子进程。
 
 ### 工具权限与自主执行
 
@@ -283,7 +283,7 @@ npm run check
 
 `npm test` 自动收集 `src/`、`tests/` 下的 `.test.ts` 和 `.test.tsx`，不收集 `tmp/` 中的评测项目。定向检查可使用 `npm test -- src/core/agent-loop.test.ts`；`npm run check` 依次执行 lint、类型检查和生产构建，不包含测试。涉及页面还需启动服务检查实际浏览器、错误覆盖层和控制台。
 
-本地生产运行先执行 `npm run build`，再执行 `npm run start`。Web 默认仅监听 `127.0.0.1`，开发入口为本机使用设计；命令执行目前依赖 macOS Seatbelt 沙箱，其他平台探测不通过时返回不可用，不会降级。不要将本地工作台直接作为公网服务。
+本地生产运行先执行 `npm run build`，再执行 `npm run start`。Web 默认仅监听 `127.0.0.1`，开发入口为本机使用设计；Linux 命令执行需安装 bubblewrap 并允许所需 namespace，Docker 默认策略可能阻止隔离初始化，运行条件和专项测试见[命令沙箱文档](docs/command-sandbox.md)。探测不通过时返回不可用，不会降级。不要将本地工作台直接作为公网服务。
 
 真实模型评测需另外配置模型并明确选择场景和预算，见 [评测用法](docs/evals/agent-evaluation.md)。自动化测试通过不代表真实模型完成任意任务的效果或性能已验证。
 
