@@ -8,6 +8,8 @@ import {
   stringSchema,
 } from "@/tools/schema";
 import { emptyResultMeta, toolFailure } from "@/tools/types";
+import type { WalkOptions, WorkspaceBoundary, WorkspaceEntry } from "@/tools/types";
+import { WorkspaceError } from "@/tools/workspace";
 
 
 const MAX_SCAN_BYTES = 1024 * 1024;
@@ -23,7 +25,7 @@ export const searchCodeTool = defineTool({
     path: optionalSchema(stringSchema({
       minLength: 1,
       maxLength: 1_024,
-      description: "搜索起始目录，相对 Workspace 根目录，例如 src 或 src/core；省略则搜索根目录。只能传目录，不能传文件、glob、绝对路径、./ 或 ../。单文件搜索用 path 指定父目录、file_pattern 指定文件模式。",
+      description: "搜索文件或起始目录，相对 Workspace 根目录，例如 src/core 或 src/core/agent-loop.ts；省略则搜索根目录。不能传 glob、绝对路径或 ../。",
     })),
     file_pattern: optionalSchema(stringSchema({ minLength: 1, maxLength: 512, description: "相对 Workspace 根目录的文件 glob，例如 src/core/agent-loop.ts 或 **/*.ts；不是相对 path 目录。" })),
     case_sensitive: optionalSchema(booleanSchema()),
@@ -34,7 +36,7 @@ export const searchCodeTool = defineTool({
     resolve: (input) => ({
       kind: "path",
       requestedPath: input.path ?? ".",
-      resolution: "existing-directory",
+      resolution: "existing-path",
     }),
   },
   async execute(input, context) {
@@ -60,7 +62,7 @@ export const searchCodeTool = defineTool({
     let skippedFiles = 0;
     let truncated = false;
     try {
-      outer: for await (const entry of context.workspace.walk({
+      outer: for await (const entry of searchEntries(context.workspace, {
         path: input.path,
         pattern: input.file_pattern,
         signal: context.signal,
@@ -122,3 +124,16 @@ export const searchCodeTool = defineTool({
     }
   },
 });
+
+async function* searchEntries(workspace: WorkspaceBoundary, options: WalkOptions): AsyncIterable<WorkspaceEntry> {
+  options.signal.throwIfAborted();
+  try { await workspace.resolveExistingDirectory(options.path); }
+  catch (error) {
+    if (!(error instanceof WorkspaceError) || error.kind !== "not-directory" || options.path === undefined) throw error;
+    const file = await workspace.resolveExistingFile(options.path);
+    if (!file.identity) throw new WorkspaceError("execution-failed", "文件身份缺失。");
+    yield { relativePath: file.relativePath, absolutePath: file.absolutePath, byteLength: file.identity.size };
+    return;
+  }
+  yield* workspace.walk(options);
+}

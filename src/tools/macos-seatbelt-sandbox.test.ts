@@ -14,7 +14,38 @@ import { createWorkspaceBoundary } from "@/tools/workspace";
 
 const executeFile = promisify(execFile);
 
-test("Seatbelt 阻止原生接口读取仅含合成凭据的父进程环境", async () => {
+test("祖先目录兼容允许逐级打开目录，但不能读取兄弟文件", async () => {
+  const parent = await mkdtemp(path.join(tmpdir(), "orbitcode-ancestor-"));
+  const root = path.join(parent, "project");
+  try {
+    await mkdir(root);
+    await writeFile(path.join(parent, "outside.txt"), "synthetic-outside");
+    const workspace = await createWorkspaceBoundary(root), cwd = await workspace.resolveExistingDirectory();
+    const sandbox = new MacOsSeatbeltCommandSandbox({ macosAncestorDirectoryAccess: "read" });
+    const run = (command: string) => sandbox.run({ command, cwd, timeoutMs: 10000, outputLimitBytes: 1024 }, { workspace, signal: new AbortController().signal });
+    assert.equal((await run("node -e 'const fs=require(\"node:fs\"),path=require(\"node:path\");let p=process.cwd();while(p!==path.dirname(p)){p=path.dirname(p);fs.closeSync(fs.openSync(p,\"r\"));}'")).exitCode, 0);
+    assert.notEqual((await run("cat ../outside.txt")).exitCode, 0);
+    assert.notEqual((await run("cat /private/etc/hosts")).exitCode, 0);
+  } finally { await rm(parent, { recursive: true, force: true }); }
+});
+
+test("显式提供的Bun在祖先目录兼容模式读取隔离环境与临时目录", { skip: !process.env.ORBITCODE_TEST_BUN_BINARY }, async () => {
+  const binary = process.env.ORBITCODE_TEST_BUN_BINARY;
+  assert.ok(binary && path.isAbsolute(binary));
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-bun-compat-"));
+  try {
+    const workspace = await createWorkspaceBoundary(root), cwd = await workspace.resolveExistingDirectory();
+    const sandbox = new MacOsSeatbeltCommandSandbox({ macosAncestorDirectoryAccess: "read", readOnlyRoots: [path.dirname(binary)], temporaryDirectory: "workspace" });
+    const command = `'${binary.replaceAll("'", "'\\''")}' -e 'const fs=require("node:fs");if(!process.env.TMPDIR||!process.env.HOME||!process.env.PATH)process.exit(3);fs.writeFileSync(process.env.TMPDIR+"/bun-result.txt",process.cwd());console.log("bun-environment-ok")'`;
+    const result = await sandbox.run({ command, cwd, timeoutMs: 10000, outputLimitBytes: 1024 }, { workspace, signal: new AbortController().signal });
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.match(result.stdout, /bun-environment-ok/);
+    assert.equal(await readFile(path.join(workspace.root, ".orbitcode-tmp/bun-result.txt"), "utf8"), workspace.root);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+for (const ancestorAccess of ["metadata", "read"] as const) {
+test(`Seatbelt ${ancestorAccess} 阻止原生接口读取仅含合成凭据的父进程环境`, async () => {
   const root = await mkdtemp(path.join(tmpdir(), "orbitcode-parent-environment-"));
   const project = process.cwd();
   try {
@@ -22,11 +53,13 @@ test("Seatbelt 阻止原生接口读取仅含合成凭据的父进程环境", as
     const source = `import {spawnSync} from 'node:child_process';
 import {createWorkspaceBoundary} from ${JSON.stringify(pathToFileURL(path.join(project, "src/tools/workspace.ts")).href)};
 import {createCommandSandbox} from ${JSON.stringify(pathToFileURL(path.join(project, "src/tools/platform-sandbox.ts")).href)};
+import {parseCommandSecurity} from ${JSON.stringify(pathToFileURL(path.join(project, "src/tools/command-security.ts")).href)};
+const sandbox=createCommandSandbox({},process.platform,parseCommandSecurity({macosAncestorDirectoryAccess:${JSON.stringify(ancestorAccess)},environmentFileAccess:'allow'}));
 const secret=process.env.ORBITCODE_SYNTHETIC_SECRET;
 const control=spawnSync('./reader',[String(process.pid),secret],{cwd:process.cwd(),env:{PATH:'/usr/bin:/bin'}});
 const workspace=await createWorkspaceBoundary(process.cwd());
-const result=await createCommandSandbox({}).run({command:'./reader '+process.pid+' '+secret,cwd:await workspace.resolveExistingDirectory(),timeoutMs:10000,outputLimitBytes:1024},{workspace,signal:new AbortController().signal});
-const own=await createCommandSandbox({}).run({command:'./reader self SELF_QUERY_SENTINEL',cwd:await workspace.resolveExistingDirectory(),timeoutMs:10000,outputLimitBytes:1024},{workspace,signal:new AbortController().signal});
+const result=await sandbox.run({command:'./reader '+process.pid+' '+secret,cwd:await workspace.resolveExistingDirectory(),timeoutMs:10000,outputLimitBytes:1024},{workspace,signal:new AbortController().signal});
+const own=await sandbox.run({command:'./reader self SELF_QUERY_SENTINEL',cwd:await workspace.resolveExistingDirectory(),timeoutMs:10000,outputLimitBytes:1024},{workspace,signal:new AbortController().signal});
 process.stdout.write(JSON.stringify({control:control.status,sandbox:result.exitCode,self:own.exitCode}));`;
     const script = path.join(root, "supervisor.mjs");
     await writeFile(script, source);
@@ -37,6 +70,7 @@ process.stdout.write(JSON.stringify({control:control.status,sandbox:result.exitC
     assert.deepEqual(JSON.parse(result.stdout), { control: 0, sandbox: 2, self: 0 });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+}
 
 test("Seatbelt 允许工作区命令并阻断外部、敏感与环境逃逸", async () => {
   assert.equal(process.platform, "darwin", "当前验收环境必须执行 Darwin 安全用例");

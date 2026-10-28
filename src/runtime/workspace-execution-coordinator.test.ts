@@ -3,6 +3,29 @@ test('同根写入互斥，排队可取消，其他根不阻塞',async()=>{const
 test('不同工作区入口经真实路径归一后使用同一写入许可',async()=>{const{mkdtemp,mkdir,symlink,rm}=await import('node:fs/promises');const{tmpdir}=await import('node:os');const path=await import('node:path');const{createWorkspaceBoundary}=await import('@/tools/workspace');const root=await mkdtemp(path.join(tmpdir(),'shared-root-'));try{await mkdir(path.join(root,'real'));await symlink(path.join(root,'real'),path.join(root,'alias'));const a=await createWorkspaceBoundary(path.join(root,'real')),b=await createWorkspaceBoundary(path.join(root,'alias'));assert.equal(a.root,b.root);const c=new WorkspaceExecutionCoordinator(),release=await c.acquire(a.root,new AbortController().signal);let entered=false;const next=c.acquire(b.root,new AbortController().signal).then(unlock=>{entered=true;unlock();});assert.equal(entered,false);release();await next;assert.equal(entered,true);}finally{await rm(root,{recursive:true,force:true});}});
 
 const signal=()=>new AbortController().signal;
+test('同轮许可可复用且引用全部归还后才放行其他任务，取消不能借用许可',async()=>{
+ const coordinator=new WorkspaceExecutionCoordinator(),scope=coordinator.createExecutionScope();
+ const process=await scope.acquire('/service',signal());
+ let externalEntered=false;
+ const outside=coordinator.acquire('/service',signal()).then(release=>{externalEntered=true;release();});
+ const verification=await scope.acquire('/service',signal());
+ const read=await scope.acquireRead('/service',signal());
+ const aborted=new AbortController();aborted.abort();
+ await assert.rejects(scope.acquire('/service',aborted.signal));
+ process();process();await Promise.resolve();assert.equal(externalEntered,false);
+ verification();await Promise.resolve();assert.equal(externalEntered,false);
+ read();await outside;assert.equal(externalEntered,true);
+});
+test('不同轮作用域不能复用许可，独立只读任务不能借父轮作用域升级',async()=>{
+ const coordinator=new WorkspaceExecutionCoordinator(),first=coordinator.createExecutionScope(),second=coordinator.createExecutionScope();
+ const release=await first.acquire('/a',signal());let entered=false;
+ const waiting=second.acquire('/a',signal()).then(unlock=>{entered=true;unlock();});
+ await Promise.resolve();assert.equal(entered,false);release();await waiting;
+ await coordinator.runTask('/a','read-only',signal(),async()=>{
+  await assert.rejects(first.acquire('/a',signal()),/升级/);
+  const unlock=await first.acquireRead('/a',signal());unlock();
+ },async()=>{});
+});
 function deferred(){let resolve!:()=>void;const promise=new Promise<void>(done=>{resolve=done;});return {promise,resolve};}
 test('任务独占覆盖读取、推理、写回和清理，两个递增不会覆盖旧版本',async()=>{
  const coordinator=new WorkspaceExecutionCoordinator();let value=0,cleaned=0;

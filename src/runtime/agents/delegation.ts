@@ -35,6 +35,7 @@ import { childInstructions } from "./child-instructions";
 import { assessChildOutput } from "@/runtime/child-execution/output-verifier";
 export function createDelegationTool(input:{
   requestBudget: ModelRequestBudget;
+  toolFailurePolicy?: import("@/core/tool-failure-budget").ToolFailurePolicy;
   verifyRead?: (path: string, context: import("@/tools/types").ToolExecutionContext) => Promise<import("@/tools/types").ToolExecutionResult>;
   parentExecution?: import("@/core/sub-agents/parent-execution").ParentExecutionContract;
   childResults: import("@/lib/child-result-store").ChildResultStore;
@@ -111,7 +112,7 @@ export function createDelegationTool(input:{
           const needsMcp=specification.tools.some(name=>name.startsWith("mcp__"));
           const externalTools=needsMcp?await input.initialize(permissions.gateway,signal,deadlineAt,leases):[];
           for(const name of specification.requiredExternalTools)if(!externalTools.some(tool=>tool.name===name))throw new Error("子任务所需 MCP 工具未获授权或不可用。");
-          child=await createChildSession({child:{id,store,history,referenceAliases,maxRuntimeMs:Math.max(1,deadlineAt-Date.now()),maxIterations},config:plan.config,provider:input.requestBudget.wrap(input.provider(plan.config),plan.config.maxOutputTokens),sandbox:input.sandbox,workspace:input.workspace,catalog:input.skills,readMemory:input.readMemory,inheritedSkills:plan.inheritedSkills,modelIds:input.modelIds,parentTools:tools,externalTools,restrict:access=>new ChildToolPolicy(access,tools,undefined,input.currentTools),options:{childExecutionFacts:()=>handoff.promptFacts(),maxIterations,maxRuntimeMs:Math.max(1,deadlineAt-Date.now()),writes:input.writes,promptEnvironment:plan.environment,optionalPromptContext:{...plan.optional,childRole:childInstructions(plan.role?.instructions)},permissionGatewayForMode:()=>permissions.gateway}});
+          child=await createChildSession({child:{id,store,history,referenceAliases,maxRuntimeMs:Math.max(1,deadlineAt-Date.now()),maxIterations},config:plan.config,provider:input.requestBudget.wrap(input.provider(plan.config),plan.config.maxOutputTokens),sandbox:input.sandbox,workspace:input.workspace,catalog:input.skills,readMemory:input.readMemory,inheritedSkills:plan.inheritedSkills,modelIds:input.modelIds,parentTools:tools,externalTools,restrict:access=>new ChildToolPolicy(access,tools,undefined,input.currentTools),options:{toolFailurePolicy: input.toolFailurePolicy,childExecutionFacts:()=>handoff.promptFacts(),maxIterations,maxRuntimeMs:Math.max(1,deadlineAt-Date.now()),writes:input.writes,promptEnvironment:plan.environment,optionalPromptContext:{...plan.optional,childRole:childInstructions(plan.role?.instructions)},permissionGatewayForMode:()=>permissions.gateway}});
           return runChildExecution({id,handoff,agent:child.agent,prompt:task.prompt+(specification.output?"\n本次声明的文件产物与确定性验收要求："+JSON.stringify(specification.output):""),mode:specification.mode,signal,deadlineAt,usage:child.modelUsage,saveReply:(reply,facts)=>input.childResults.save(contract.scope,id,reply,facts),runLog:{...input.runLog,providerId:specification.provider.id,conversationId:id,createRunId:()=>id,parentRunId:contract.turnId,parentCallId:contract.callId}});
           });
         }};

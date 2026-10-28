@@ -1,11 +1,11 @@
 import { defineTool, successfulToolResult } from "@/tools/registry";
-import { createHash } from "node:crypto";
 import { integerSchema, objectSchema, optionalSchema, stringSchema } from "@/tools/schema";
 import { fileToolFailure } from "@/tools/file-tool-result";
 import { WORKSPACE_RELATIVE_PATH_DESCRIPTION } from "@/tools/workspace-path";
-import { toolFailure, type ToolInputSchema } from "@/tools/types";
+import type { ToolInputSchema } from "@/tools/types";
 
 export const MAX_TEXT_FILE_BYTES = 512 * 1024;
+export const MAX_TEXT_SCAN_BYTES = 32 * 1024 * 1024;
 const MAX_READ_LINES = 2_000;
 const DEFAULT_READ_LINES = 200;
 
@@ -32,7 +32,7 @@ const readFileSchema: ToolInputSchema<ReadFileInput> = {
 export const readFileTool = defineTool({
   name: "read_file",
   description:
-    "读取授权 Workspace 内 UTF-8 文本文件的最新内容，检查或准备修改文件时优先使用本工具。已定位代码时优先用start_line/end_line读取连续原文，结果range给出实际行号与是否覆盖全文。省略行参数则完整读取。分段内容不能当作完整文件覆盖写入；不要用shell替代读取。",
+    "读取授权 Workspace 内 UTF-8 文本文件的最新内容，检查或准备修改文件时优先使用本工具。已定位代码时优先用start_line/end_line读取连续原文，最多扫描32MiB、返回512KiB，结果range给出实际行号与是否覆盖全文。省略行参数则完整读取，文件上限512KiB。分段内容不能当作完整文件覆盖写入；不要用shell替代读取。",
   inputSchema: readFileSchema,
   mutability: "read-only",
   permission: {
@@ -45,23 +45,21 @@ export const readFileTool = defineTool({
   },
   async execute(input, context) {
     try {
-      const snapshot = await context.workspace.readTextFile(input.path, {
-        maxBytes: MAX_TEXT_FILE_BYTES,
-      });
       if (input.start_line !== undefined || input.end_line !== undefined) {
-        // 保留换行符，分段结果仍可作为精确替换的原文；文件指纹始终针对完整快照。
-        const lines = snapshot.content.match(/[^\n]*\n|[^\n]+$/gu) ?? [""];
         const startLine = input.start_line ?? 1;
-        if (startLine > lines.length) return toolFailure("invalid-arguments", `起始行超过文件总行数 ${lines.length}。`, { retryable: true });
-        const endLine = Math.min(input.end_line ?? startLine + DEFAULT_READ_LINES - 1, lines.length);
+        const snapshot = await context.workspace.readTextFileRange(input.path, {
+          startLine, endLine: input.end_line ?? startLine + DEFAULT_READ_LINES - 1,
+          maxScanBytes: MAX_TEXT_SCAN_BYTES, maxOutputBytes: MAX_TEXT_FILE_BYTES, signal: context.signal,
+        });
         return successfulToolResult({
           path: snapshot.path.relativePath,
-          content: lines.slice(startLine - 1, endLine).join(""),
+          content: snapshot.content,
           byteLength: snapshot.byteLength,
-          sha256: createHash("sha256").update(snapshot.content).digest("hex"),
-          range: { startLine, endLine, totalLines: lines.length, complete: startLine === 1 && endLine === lines.length },
+          sha256: snapshot.sha256,
+          range: { ...snapshot.range },
         });
       }
+      const snapshot = await context.workspace.readTextFile(input.path, { maxBytes: MAX_TEXT_FILE_BYTES });
       return successfulToolResult({
         path: snapshot.path.relativePath,
         content: snapshot.content,

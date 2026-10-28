@@ -14,6 +14,9 @@ import { spawnAndCollect, spawnManaged } from "@/tools/sandbox-process";
 import { SandboxUnavailableError } from "@/tools/sandbox-error";
 export { SandboxUnavailableError } from "@/tools/sandbox-error";
 import type { CommandSandboxOptions } from "@/tools/command-sandbox";
+import { parseCommandSecurity, type CommandSecuritySettings } from "@/tools/command-security";
+import { shortTemporaryDirectory, workspaceTemporaryDirectory } from "@/tools/workspace-temporary-directory";
+import { resolveSandboxWritableRoots } from "@/tools/sandbox-writable-roots";
 import { resolveSandboxReadRoots } from "@/tools/sandbox-read-roots";
 import { collectSandboxProtectedEntries, type SandboxProtectedEntry } from "@/tools/sandbox-protected-entries";
 import type { WorkspaceBoundary } from "@/tools/types";
@@ -21,11 +24,13 @@ import { createWorkspaceBoundary } from "@/tools/workspace";
 import { runWithSandboxDeadline, waitForSandboxProbe } from "@/tools/sandbox-deadline";
 
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
-const SHELL = "/bin/sh";
+const SHELL = "/bin/bash";
 const SYSTEM_RUNTIME_READ_ROOTS = ["/private/etc/ssl"] as const;
 
 export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
-  constructor(private readonly options: CommandSandboxOptions = {}) {}
+  readonly security: CommandSecuritySettings;
+  private readonly options: CommandSecuritySettings;
+  constructor(options: CommandSandboxOptions = {}) { this.options = this.security = parseCommandSecurity(options); }
 
   private readonly probes = new Map<string, Promise<SandboxAvailability>>();
 
@@ -77,7 +82,7 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
     const outsideRoot = await mkdtemp(path.join(tmpdir(), "orbitcode-sandbox-probe-"));
     const outsideFile = path.join(outsideRoot, "outside.txt");
     const allowedFile = path.join(probeRoot, "allowed.txt");
-    const protectedFile = path.join(probeRoot, ".env");
+    const protectedFile = path.join(probeRoot, "auth.json");
     try {
       const workspace = await createWorkspaceBoundary(probeRoot);
       await writeFile(allowedFile, "allowed", { mode: 0o600 });
@@ -107,7 +112,7 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
         signal,
       );
       const protectedRead = await this.runIsolated(
-        { ...baseRequest, command: "/bin/cat .env" },
+        { ...baseRequest, command: "/bin/cat auth.json" },
         workspace,
         signal,
       );
@@ -146,24 +151,27 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
     const executionRoot = path.join(privateRuntimeRoot, "home");
     try {
       await mkdir(executionRoot, { mode: 0o700 });
-      const protectedPaths = await collectProtectedPaths(workspace.root, signal);
+      const temporaryRoot = this.options.temporaryDirectory === "short" ? await shortTemporaryDirectory(workspace.root) : this.options.temporaryDirectory === "workspace" ? await workspaceTemporaryDirectory(workspace.root) : executionRoot;
+      const writableRoots = await resolveSandboxWritableRoots([...this.options.writableRoots, ...(this.options.temporaryDirectory === "short" ? [temporaryRoot] : [])], workspace.root, this.options.readOnlyRoots);
+      const protectedPaths = await collectProtectedPaths([workspace.root, ...writableRoots], signal, this.options.maxScanEntries, this.options.npmrcAccess, this.options.environmentFileAccess);
       const developerRoot = await resolveDeveloperRoot();
       const profile = await createProfile(
         workspace.root,
         protectedPaths,
         developerRoot,
         privateRuntimeRoot,
-        this.options,
+        { ...this.options, writableRoots },
       );
       const environment = createCommandEnvironment(
         workspace.root,
         executionRoot,
         developerRoot,
         this.options.readOnlyRoots,
+        temporaryRoot,
       );
       return await spawnAndCollect(
         SANDBOX_EXEC,
-        ["-p", profile, SHELL, "-c", request.command],
+        ["-p", profile, SHELL, "--noprofile", "--norc", "-o", "pipefail", "-c", request.command],
         {
           cwd: request.cwd.absolutePath,
           env: environment,
@@ -186,24 +194,27 @@ export class MacOsSeatbeltCommandSandbox implements CommandSandbox {
     const executionRoot = path.join(privateRuntimeRoot, "home");
     try {
       await mkdir(executionRoot, { mode: 0o700 });
-      const protectedPaths = await collectProtectedPaths(workspace.root);
+      const temporaryRoot = this.options.temporaryDirectory === "short" ? await shortTemporaryDirectory(workspace.root) : this.options.temporaryDirectory === "workspace" ? await workspaceTemporaryDirectory(workspace.root) : executionRoot;
+      const writableRoots = await resolveSandboxWritableRoots([...this.options.writableRoots, ...(this.options.temporaryDirectory === "short" ? [temporaryRoot] : [])], workspace.root, this.options.readOnlyRoots);
+      const protectedPaths = await collectProtectedPaths([workspace.root, ...writableRoots], undefined, this.options.maxScanEntries, this.options.npmrcAccess, this.options.environmentFileAccess);
       const developerRoot = await resolveDeveloperRoot();
       const profile = await createProfile(
         workspace.root,
         protectedPaths,
         developerRoot,
         privateRuntimeRoot,
-        this.options,
+        { ...this.options, writableRoots },
       );
       const environment = createCommandEnvironment(
         workspace.root,
         executionRoot,
         developerRoot,
         this.options.readOnlyRoots,
+        temporaryRoot,
       );
       const managed = spawnManaged(
         SANDBOX_EXEC,
-        ["-p", profile, SHELL, "-c", request.command],
+        ["-p", profile, SHELL, "--noprofile", "--norc", "-o", "pipefail", "-c", request.command],
         { cwd: request.cwd.absolutePath, env: environment },
       );
       return {
@@ -231,15 +242,16 @@ async function createProfile(
   const trustedReadRoots = [
     runtimeRoot,
     privateRuntimeRoot,
+    ...(options.writableRoots ?? []),
     ...await resolveSandboxReadRoots(options.readOnlyRoots ?? [], workspaceRoot),
     ...SYSTEM_RUNTIME_READ_ROOTS,
     ...(developerRoot === undefined ? [] : [developerRoot]),
   ];
   const protectedRules = protectedPaths.map(
-    (target) => `(deny file-read* file-write* (${target.directory ? "subpath" : "literal"} ${schemeString(target.path)}))`,
+    (target) => `(deny ${target.publicNpmrc === undefined ? "file-read* file-write*" : "file-write*"} (${target.directory ? "subpath" : "literal"} ${schemeString(target.path)}))`,
   );
   // 文件规则按路径匹配，必须阻止改名其祖先目录；同目录的普通文件仍可读写。
-  const protectedAncestors = new Set(protectedPaths.flatMap(target => ancestorDirectories(target.path).filter(directory => isWithinTrustedRoot(workspaceRoot, directory))));
+  const protectedAncestors = new Set(protectedPaths.flatMap(target => ancestorDirectories(target.path).filter(directory => [workspaceRoot, ...(options.writableRoots ?? [])].some(root => isWithinTrustedRoot(root, directory)))));
   const ancestorRules = [...protectedAncestors].map(directory => `(deny file-write-unlink (literal ${schemeString(directory)}))`);
   const dataRoots = [
     "/Applications",
@@ -263,13 +275,15 @@ async function createProfile(
     ...ancestorDirectories(workspaceRoot),
     ...trustedReadRoots.flatMap(ancestorDirectories),
   ];
+  // 部分运行时通过打开逐级祖先目录确定 cwd；只放开目录本身，不放开其文件子树。
+  const dataReadExemptions = options.macosAncestorDirectoryAccess === "read" ? metadataReadExemptions : systemReadExemptions;
   const readBoundaryRules = dataRoots.flatMap((dataRoot) => [
     createReadBoundaryRule(
       "file-read-data",
       dataRoot,
       workspaceRoot,
       trustedReadRoots,
-      systemReadExemptions,
+      dataReadExemptions,
     ),
     createReadBoundaryRule(
       "file-read-metadata",
@@ -289,6 +303,7 @@ async function createProfile(
     `(deny file-write* (require-all ` +
       `(require-not (subpath ${schemeString(workspaceRoot)})) ` +
       `(require-not (subpath ${schemeString(privateRuntimeRoot)})) ` +
+      (options.writableRoots ?? []).map(root => `(require-not (subpath ${schemeString(root)})) `).join("") +
       `(require-not (literal ${schemeString("/dev/null")}))))`,
     ...readBoundaryRules,
     ...protectedRules,
@@ -346,11 +361,12 @@ function isWithinTrustedRoot(root: string, target: string): boolean {
   return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
-async function collectProtectedPaths(root: string, signal?: AbortSignal): Promise<readonly SandboxProtectedEntry[]> {
-  const entries = await collectSandboxProtectedEntries(root, signal);
+async function collectProtectedPaths(root: string | readonly string[], signal?: AbortSignal, maxEntries?: number, npmrcAccess?: "blocked" | "public-only", environmentFileAccess: "blocked" | "allow" = "blocked"): Promise<readonly SandboxProtectedEntry[]> {
+  const roots = typeof root === "string" ? [root] : root;
+  const entries = await collectSandboxProtectedEntries(roots, signal, maxEntries, npmrcAccess, environmentFileAccess);
   const paths = new Set(entries.map(entry => entry.path));
   const reserved = [".env", ".env.local", ".env.development", ".env.production", ".env.test", "orbitcode.yaml", ".npmrc", ".netrc", ".git-credentials", "auth.json"];
-  return [...entries, ...reserved.map(name => path.join(root, name)).filter(target => !paths.has(target)).map(target => ({ path: target, directory: false }))];
+  return [...entries, ...roots.flatMap(directory => reserved.filter(name => environmentFileAccess !== "allow" || !name.startsWith(".env")).map(name => path.join(directory, name))).filter(target => !paths.has(target)).map(target => ({ path: target, directory: false }))];
 }
 
 function createCommandEnvironment(
@@ -358,6 +374,7 @@ function createCommandEnvironment(
   executionRoot: string,
   developerRoot: string | undefined,
   readOnlyRoots: readonly string[] = [],
+  temporaryRoot = executionRoot,
 ): Record<string, string> {
   return {
     PATH: [
@@ -375,7 +392,11 @@ function createCommandEnvironment(
     LANG: "en_US.UTF-8",
     LC_ALL: "en_US.UTF-8",
     HOME: executionRoot,
-    TMPDIR: executionRoot,
+    TMPDIR: temporaryRoot,
+    XDG_CACHE_HOME: path.join(temporaryRoot, "cache"),
+    npm_config_cache: path.join(temporaryRoot, "cache", "npm"),
+    PNPM_HOME: path.join(temporaryRoot, "cache", "pnpm"),
+    BUN_INSTALL_CACHE_DIR: path.join(temporaryRoot, "cache", "bun"),
     ...(developerRoot === undefined
       ? {}
       : { SDKROOT: path.join(developerRoot, "SDKs", "MacOSX.sdk") }),

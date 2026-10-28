@@ -13,6 +13,8 @@ export function fileToolFailure(
     return toolFailure("execution-failed", "文件工具执行失败。", { sideEffect });
   }
   switch (error.kind) {
+    case "invalid-range":
+      return toolFailure("invalid-arguments", error.message, { retryable: true, sideEffect });
     case "invalid-path":
     case "permission-denied":
       return toolFailure("permission-denied", error.message, { retryable: true, sideEffect });

@@ -7,6 +7,8 @@ import test from "node:test";
 import { AgentLoop } from "@/core/agent-loop";
 import { ContextManager } from "@/core/context/context-manager";
 import type { ContextPolicyConfig } from "@/core/context/types";
+import { approximateTextTokens } from "@/core/context/token-estimator";
+import { buildFixedSystemPrompt } from "@/core/system-prompt/fixed-prompt";
 import { LocalContextStore } from "@/lib/local-context-store";
 import { OpenAICompatibleProvider } from "@/models/openai-provider";
 import { createModeToolPolicy } from "@/tools/mode-policy";
@@ -142,7 +144,7 @@ test("自动重量压缩使用无工具摘要并在同一 Agent 轮继续", asyn
       sessionId: "heavy-session",
       config: policy({
         // 压缩前由旧历史触发阈值，压缩后为固定提示的正常增长保留余量。
-        windowTokens: 10_000,
+        windowTokens: approximateTextTokens(buildFixedSystemPrompt()) + 8_000,
         recentMessagesTokens: 100,
         automaticReserveTokens: 1_000,
         manualReserveTokens: 300,

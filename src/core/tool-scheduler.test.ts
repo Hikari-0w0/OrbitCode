@@ -27,6 +27,17 @@ test.before(async () => {
   workspace = await createWorkspaceBoundary(process.cwd());
 });
 
+test("命令调度继承配置时限并始终受父截止约束", async () => {
+  let observed = 0;
+  const tool = defineTool({ name: "run_command", description: "记录执行预算", inputSchema: objectSchema({}), mutability: "command", permission: { targetKind: "command", resolve: () => ({ kind: "command", command: "check" }) }, async execute(_input, context) { observed = context.deadlineMs - Date.now(); return successfulToolResult({}); } });
+  const access = createModeToolPolicy(new ToolRegistry([tool]), "do");
+  const run = (deadlineMs: number) => collect(scheduleToolCalls({ commandTimeoutMs: 600000, deadlineMs, calls: [{ id: "deadline", name: "run_command", argumentsJson: "{}" }], access, workspace: requireWorkspace(), signal: new AbortController().signal }));
+  await run(Date.now() + 900000);
+  assert.ok(observed > 590000 && observed <= 600000);
+  await run(Date.now() + 5000);
+  assert.ok(observed > 0 && observed <= 5000);
+});
+
 test("连续只读调用并发，副作用调用串行且结果恢复原序", async () => {
   const intervals: Interval[] = [];
   const registry = registryWithIntervals(intervals);

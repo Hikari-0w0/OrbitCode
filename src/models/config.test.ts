@@ -330,3 +330,14 @@ test("上下文配置支持默认阈值并拒绝非法关系", async () => {
     /未知字段/,
   );
 });
+
+
+test("YAML 推理深度接受 low/high/max，非法类型与层级不能进入请求", async () => {
+  for (const reasoningEffort of ["low", "high", "max"] as const) {
+    const provider = await load(VALID_PROVIDER.replace("    context:", `    reasoning_effort: ${reasoningEffort}\n    context:`));
+    assert.equal(provider.reasoningEffort, reasoningEffort);
+  }
+  for (const value of ["none", "medium", "false", "12", "{}", "null"]) {
+    await assert.rejects(load(VALID_PROVIDER.replace("    context:", `    reasoning_effort: ${value}\n    context:`)), /reasoning_effort/);
+  }
+});

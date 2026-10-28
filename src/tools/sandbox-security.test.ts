@@ -7,6 +7,37 @@ import test from "node:test";
 import { createCommandSandbox } from "@/tools/platform-sandbox";
 import { createWorkspaceBoundary } from "@/tools/workspace";
 import { resolveSandboxReadRoots } from "@/tools/sandbox-read-roots";
+import { EVALUATION_COMMAND_SECURITY, parseCommandSecurity } from "@/tools/command-security";
+import { createRunCommandTool } from "@/tools/run-command";
+
+test("显式环境文件授权支持跨命令测试配置，同时保护其他凭据和外部目录", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-env-access-"));
+  const outside = await mkdtemp(path.join(tmpdir(), "orbitcode-env-outside-"));
+  try {
+    await mkdir(path.join(root, "app"));
+    await writeFile(path.join(root, "app/.env.test"), "VALUE=synthetic\n");
+    await writeFile(path.join(root, "auth.json"), "synthetic-private");
+    await link(path.join(root, "auth.json"), path.join(root, ".env.alias"));
+    await writeFile(path.join(outside, ".env"), "synthetic-outside");
+    await symlink(path.join(outside, ".env"), path.join(root, ".env.escape"));
+    const workspace = await createWorkspaceBoundary(root), cwd = await workspace.resolveExistingDirectory();
+    const run = (access: "blocked" | "allow", command: string) => createCommandSandbox({}, process.platform,
+      parseCommandSecurity({ environmentFileAccess: access })).run({ command, cwd, timeoutMs: 10000, outputLimitBytes: 2048 }, { workspace, signal: new AbortController().signal });
+    assert.notEqual((await run("blocked", "cat app/.env.test")).exitCode, 0);
+    assert.equal((await run("allow", "cat app/.env.test")).stdout, "VALUE=synthetic\n");
+    assert.equal((await run("allow", "printf 'VALUE=changed\\n' > .env")).exitCode, 0);
+    assert.equal((await run("allow", "cat .env")).stdout, "VALUE=changed\n");
+    assert.notEqual((await run("blocked", "cat .env")).exitCode, 0);
+    for (const command of ["cat auth.json", "cat .env.alias", "cat .env.escape", "printf changed > auth.json", "printf changed > .env.alias"]) {
+      const result = await run("allow", command);
+      assert.notEqual(result.exitCode, 0, command);
+      assert.doesNotMatch(result.stdout, /synthetic-private|synthetic-outside/);
+    }
+    assert.equal(await readFile(path.join(root, "auth.json"), "utf8"), "synthetic-private");
+    // 此开关明确只作用于命令，文件工具继续使用原有配置文件边界。
+    await assert.rejects(workspace.resolveExistingFile(".env"));
+  } finally { await rm(root, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
+});
 
 async function fixture() {
   const root = await mkdtemp(path.join(tmpdir(), "orbitcode-security-"));
@@ -16,6 +47,78 @@ async function fixture() {
   const cwd = await workspace.resolveExistingDirectory();
   return { root, run: (command: string, timeoutMs = 5000) => sandbox.run({ command, cwd, timeoutMs, outputLimitBytes: 1024 }, { workspace, signal: new AbortController().signal }), close: () => rm(root, { recursive: true, force: true }) };
 }
+
+test("评测预设执行合法引号命令、冗余cd和长命令，并使用配置的输出容量", async () => {
+  const root=await mkdtemp(path.join(tmpdir(),"orbitcode-relaxed-command-"));
+  try {
+    const workspace=await createWorkspaceBoundary(root);
+    const tool=createRunCommandTool(createCommandSandbox({},process.platform,EVALUATION_COMMAND_SECURITY));
+    for(const command of ['"/usr/bin/true"','cd . && printf ok',`printf ok #${"x".repeat(9000)}`]) {
+      const parsed=tool.inputSchema.parse({cwd:".",command});assert.equal(parsed.ok,true);if(!parsed.ok)continue;
+      const result=await tool.execute(parsed.value,{workspace,signal:new AbortController().signal,deadlineMs:Date.now()+10000});assert.equal(result.ok,true,JSON.stringify(result));
+    }
+    const parsed=tool.inputSchema.parse({command:"node -e 'process.stdout.write(\"x\".repeat(200000))'"});assert.ok(parsed.ok);
+    const result=await tool.execute(parsed.value,{workspace,signal:new AbortController().signal,deadlineMs:Date.now()+10000});assert.ok(result.ok);
+    const output=result.output;assert.ok(output!==null&&typeof output==="object"&&"stdout" in output&&typeof output.stdout==="string");
+    assert.equal(output.stdout.length,200000);assert.equal(result.meta.truncated,false);
+  }finally{await rm(root,{recursive:true,force:true});}
+});
+
+test("公开npmrc可读取且不能直接或经硬链接改写，认证配置仍保护", async () => {
+  const root=await mkdtemp(path.join(tmpdir(),"orbitcode-public-npmrc-"));
+  try {
+    const workspace=await createWorkspaceBoundary(root),cwd=await workspace.resolveExistingDirectory();
+    const file=path.join(root,".npmrc"),content="registry=https://registry.npmjs.org/\nlink-workspace-packages=true\n";
+    await writeFile(file,content);await link(file,path.join(root,"npmrc-alias.txt"));
+    const sandbox=createCommandSandbox({},process.platform,EVALUATION_COMMAND_SECURITY);
+    const run=(command:string)=>sandbox.run({command,cwd,timeoutMs:10000,outputLimitBytes:1024},{workspace,signal:new AbortController().signal});
+    assert.equal((await run("cat .npmrc")).stdout,content);
+    const npm=await run("npm config get registry");assert.equal(npm.exitCode,0,npm.stderr);assert.match(npm.stdout,/https:\/\/registry.npmjs.org\//);assert.doesNotMatch(npm.stderr,/EPERM/);
+    assert.notEqual((await run("printf changed > .npmrc")).exitCode,0);
+    assert.notEqual((await run("printf changed > npmrc-alias.txt")).exitCode,0);
+    assert.notEqual((await run("ln .npmrc new-alias.txt && printf changed > new-alias.txt")).exitCode,0);
+    assert.equal(await readFile(file,"utf8"),content);
+    for(const text of ["//registry.npmjs.org/:_authToken=synthetic-private\n","registry=https://user:pass@example.invalid/\n","registry=${REGISTRY_SECRET}\n","# token=synthetic-private\nregistry=https://registry.npmjs.org/\n"]){
+      await writeFile(file,text);const result=await run("cat .npmrc");assert.notEqual(result.exitCode,0);assert.ok(!result.stdout.includes("synthetic-private"));assert.notEqual((await run("cat npmrc-alias.txt")).exitCode,0);
+    }
+  }finally{await rm(root,{recursive:true,force:true});}
+});
+
+test("额外可写目录只放开显式授权且保护跨目录凭据硬链接", async () => {
+  const root=await mkdtemp(path.join(tmpdir(),"orbitcode-write-workspace-"));
+  const extra=await mkdtemp(path.join(tmpdir(),"orbitcode-write-extra-"));
+  const other=await mkdtemp(path.join(tmpdir(),"orbitcode-write-other-"));
+  const quote=(value:string)=>`'${value.replaceAll("'","'\\''")}'`;
+  try {
+    const workspace=await createWorkspaceBoundary(root),cwd=await workspace.resolveExistingDirectory();
+    await writeFile(path.join(root,".env"),"synthetic-private");await link(path.join(root,".env"),path.join(extra,"credential-alias.txt"));
+    const sandbox=createCommandSandbox({},process.platform,parseCommandSecurity({...EVALUATION_COMMAND_SECURITY,environmentFileAccess:"blocked",writableRoots:[extra]}));
+    const run=(command:string)=>sandbox.run({command,cwd,timeoutMs:10000,outputLimitBytes:1024},{workspace,signal:new AbortController().signal});
+    assert.equal((await run(`printf ready > ${quote(path.join(extra,"build.txt"))}`)).exitCode,0);
+    assert.equal(await readFile(path.join(extra,"build.txt"),"utf8"),"ready");
+    assert.notEqual((await run(`cat ${quote(path.join(extra,"credential-alias.txt"))}`)).exitCode,0);
+    assert.notEqual((await run(`printf changed > ${quote(path.join(other,"outside.txt"))}`)).exitCode,0);
+  }finally{await Promise.all([root,extra,other].map(directory=>rm(directory,{recursive:true,force:true})));}
+});
+
+test("可配置工作区临时目录跨命令保留，同时继续保护凭据和拒绝外部符号链接", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-configured-temp-"));
+  const outside = await mkdtemp(path.join(tmpdir(), "orbitcode-configured-outside-"));
+  try {
+    const workspace = await createWorkspaceBoundary(root);
+    const cwd = await workspace.resolveExistingDirectory();
+    const sandbox = createCommandSandbox({},process.platform,parseCommandSecurity({network:"allow",temporaryDirectory:"workspace",maxScanEntries:1000000}));
+    const run = (command: string) => sandbox.run({command,cwd,timeoutMs:10000,outputLimitBytes:1024},{workspace,signal:new AbortController().signal});
+    await writeFile(path.join(root,".env"),"synthetic-private");
+    assert.equal((await run('printf cache > "$TMPDIR/cache.txt"')).exitCode,0);
+    assert.equal((await run('cat "$TMPDIR/cache.txt"')).stdout,"cache");
+    assert.notEqual((await run('cat .env')).exitCode,0);
+    await rm(path.join(root,".orbitcode-tmp"),{recursive:true});
+    await symlink(outside,path.join(root,".orbitcode-tmp"));
+    await assert.rejects(run('printf bad > "$TMPDIR/escaped.txt"'),/临时目录/);
+    await assert.rejects(readFile(path.join(outside,"escaped.txt")));
+  } finally { await rm(root,{recursive:true,force:true});await rm(outside,{recursive:true,force:true}); }
+});
 
 test("沙箱阻止敏感文件硬链接、依赖目录密钥与敏感符号链接别名", async () => {
   const f = await fixture();

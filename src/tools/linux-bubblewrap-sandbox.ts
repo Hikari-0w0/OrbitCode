@@ -8,13 +8,16 @@ import { spawnAndCollect, spawnManaged } from "@/tools/sandbox-process";
 import type { WorkspaceBoundary } from "@/tools/types";
 import { createWorkspaceBoundary } from "@/tools/workspace";
 import { runWithSandboxDeadline, waitForSandboxProbe } from "@/tools/sandbox-deadline";
+import { parseCommandSecurity, type CommandSecuritySettings } from "@/tools/command-security";
 
 const BWRAP = "/usr/bin/bwrap";
 
 export class LinuxBubblewrapCommandSandbox implements CommandSandbox {
   private readonly probes = new Map<string, Promise<SandboxAvailability>>();
 
-  constructor(private readonly options: CommandSandboxOptions = {}) {}
+  readonly security: CommandSecuritySettings;
+  private readonly options: CommandSecuritySettings;
+  constructor(options: CommandSandboxOptions = {}) { this.options = this.security = parseCommandSecurity(options); }
 
   probe(workspace: WorkspaceBoundary): Promise<SandboxAvailability> {
     const previous = this.probes.get(workspace.root);

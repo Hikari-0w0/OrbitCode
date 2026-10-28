@@ -281,6 +281,18 @@ table {border-collapse:collapse;min-width:100%;font-size:14px} th,td {border:1px
 .settingsCard ul {display:grid;gap:12px;padding:0;list-style:none}.settingsCard li {display:flex;flex-wrap:wrap;gap:8px;align-items:center;border:1px solid var(--line);padding:16px;border-radius:10px}.settingsCard li strong {font-size:14px}.settingsCard li small {font-size:12px;color:var(--text-dim)}.settingsCard li code {overflow-wrap:anywhere}.settingsCard li button {font-size:12px;padding:8px 10px}
 .settingsForm {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;padding-top:24px;margin-top:24px;border-top:1px solid var(--line)}
 .settingsForm label {display:grid;gap:6px;font-size:13px;color:var(--text-soft)}.settingsForm input,.settingsForm select {width:100%}.settingsForm button {align-self:end}
+.commandSecurityForm > h3,.commandSecurityForm > p,.commandSecurityWide {grid-column:1/-1}
+.commandSecurityForm > h3,.commandSecurityForm > p {margin:0;line-height:1.65}
+.commandSecurityForm textarea {width:100%;min-height:88px;resize:vertical}
+@media(max-width:640px) {
+  .settingsPage {padding:24px 16px 48px}
+  .settingsLayout {grid-template-columns:minmax(0,1fr);gap:20px}
+  .settingsNavigation {position:static;display:flex;flex-wrap:wrap}
+  .settingsCard {padding:16px}
+  .settingsForm {grid-template-columns:minmax(0,1fr)}
+  .settingsForm > * {min-width:0}
+  .commandSecurityForm > p {overflow-wrap:anywhere}
+}
 .settingsNotice {padding:14px 18px;border:1px solid var(--line);border-radius:10px;margin-bottom:20px;background:var(--accent-soft);font-size:13px;color:var(--text)}
 
 @keyframes pulse {50%{opacity:.35}}

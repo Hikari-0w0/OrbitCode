@@ -1,4 +1,5 @@
 "use client";
+import { isReasoningEffort } from "@/models/reasoning-effort";
 import type { useSettings } from "./use-settings";
 export function ModelSettings({ controller }: {
     readonly controller: ReturnType<typeof useSettings>;
@@ -19,6 +20,7 @@ export function ModelSettings({ controller }: {
                 setModelId(provider.model);
                 setApiUrl(provider.baseUrl);
                 setWindowTokens(provider.context.windowTokens);
+                controller.setReasoningEffort(provider.reasoningEffort ?? "default");
                 controller.setMaxOutputTokens(provider.maxOutputTokens?.toString() ?? "");
                 controller.setThinkingMode(provider.thinking ? provider.thinking.enabled ? "enabled" : "disabled" : "default");
                 controller.setThinkingApiStyle(provider.thinking?.apiStyle ?? "siliconflow");
@@ -38,6 +40,11 @@ export function ModelSettings({ controller }: {
           <label>{keyKind === "local" ? "API Key" : "环境变量名"}<input required={!editingProviderId} type={keyKind === "local" ? "password" : "text"} autoComplete="off" placeholder={editingProviderId ? "留空保留原凭据" : undefined} value={keyValue} onChange={(event) => setKeyValue(event.target.value)}/></label>
           <label>上下文窗口 Tokens<input required type="number" min={16000} max={10000000} value={windowTokens} onChange={(event) => setWindowTokens(Number(event.target.value))}/></label>
           <label>最大输出 Tokens<input type="number" min={1} max={Math.min(windowTokens, 1048576)} placeholder="留空使用服务商默认值" value={controller.maxOutputTokens} onChange={event => controller.setMaxOutputTokens(event.target.value)}/></label>
+          <label>推理深度<select value={controller.reasoningEffort} onChange={event => {
+            const value = event.target.value;
+            if (value === "default" || isReasoningEffort(value)) controller.setReasoningEffort(value);
+          }}><option value="default">默认（GLM-5.3 系列为 high）</option><option value="low">low · 低</option><option value="high">high · 高</option><option value="max">max · 最高</option></select></label>
+          <p>推理深度取决于服务商支持。GLM-5.3 系列保持思考，通常使用 high；需要更低延迟可选择 low。</p>
           <label>思考模式<select value={controller.thinkingMode} onChange={event => {
             const mode = event.target.value;
             if (mode === "default" || mode === "enabled" || mode === "disabled") controller.setThinkingMode(mode);

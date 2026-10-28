@@ -125,7 +125,7 @@ test("默认工具定义明确要求 Workspace 相对路径", () => {
     if (definition.function.name === "search_code") {
       const schema = JSON.stringify(definition.function.parameters);
       assert.match(schema, /相对 Workspace 根目录/);
-      assert.match(schema, /只能传目录/);
+      assert.match(schema, /搜索文件或起始目录/);
       assert.match(schema, /file_pattern/);
       assert.match(schema, /绝对路径/);
       continue;

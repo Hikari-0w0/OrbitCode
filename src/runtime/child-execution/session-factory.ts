@@ -66,7 +66,7 @@ export async function createChildSession(input: {
       { read: request => child.store.read({ sessionId: child.id, ...request, reference: resolveReference(request.reference) }), search: request => child.store.search({ sessionId: child.id, ...request, reference: resolveReference(request.reference) }) }, processes,
       [...input.externalTools, createLoadSkillTool(load), createReadSkillResourceTool(resources)], input.readMemory);
     const agent = createAgentSession({ provider, registry, workspace, skills, resources, parentTools: input.parentTools,
-      restrict: input.restrict, options: { ...input.options, consumeChildResults: undefined, childBudgetReminder: true, maxIterations: child.maxIterations, maxRuntimeMs: child.maxRuntimeMs, contextManager, completionTracker } });
+      restrict: input.restrict, options: { ...input.options, commandTimeoutMs: Math.max(input.sandbox.security?.maxTimeoutMs ?? 120000, input.sandbox.security?.maxReadyTimeoutMs ?? 30000), consumeChildResults: undefined, childBudgetReminder: true, maxIterations: child.maxIterations, maxRuntimeMs: child.maxRuntimeMs, contextManager, completionTracker } });
     return { agent, close: () => processes.close(), modelUsage: () => modelUsage.snapshot() };
   } catch (error) {
     await processes.close();

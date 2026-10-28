@@ -736,6 +736,10 @@ test("工具结果向后续模型请求公开可复制的完成证据 ID", async
   const payload = JSON.parse(toolMessage?.content ?? "null") as unknown;
   assert.ok(isRecord(payload));
   assert.equal(payload.evidence_call_id, "e_test_run_1");
+  assert.ok(provider.requests[1]?.messages.some(message => message.role === "system" && message.content.includes("本轮执行证据摘要") && message.content.includes("e_test_run_1")));
+  const request = provider.requests[1]?.messages ?? [];
+  assert.ok(request.findIndex(message => message.role === "system" && message.content.includes("本轮执行证据摘要")) > request.findLastIndex(message => message.role === "tool"));
+  assert.doesNotMatch(JSON.stringify(agent.getHistory()), /本轮执行证据摘要/u);
 });
 
 test("仅外部工具返回时记录调用证据，不补报或重复调用", async () => {
@@ -1149,6 +1153,7 @@ function benchmarkWorkspaceBoundary(writes: string[]): WorkspaceBoundary {
     },
     async *walk() {},
     async readTextFile() { throw new Error("unused"); },
+    async readTextFileRange() { throw new Error("unused"); },
     async atomicWrite(target) { writes.push(target.relativePath); },
     async replaceSnapshot() { throw new Error("unused"); },
   };

@@ -75,6 +75,8 @@ providers:
 
 `.env` 和 `orbitcode.yaml` 均不会被 Git 跟踪。非隔离运行会加载当前工作目录的 `.env`，但不会覆盖进程中已经导出的同名变量。使用 `--data-dir` 的 CLI 评测不会自动加载该文件。
 
+模型条目可设置 `reasoning_effort: high`（`low` / `high` / `max`），Web「设置 → 模型 → 推理深度」可编辑同一参数。GLM-5.3 和 GLM-5.3-Flash 在未显式配置时默认发送 `high`；其他模型省略时沿用服务商默认值。GLM-5.3 系列为强制思考模型，应调整推理深度而非关闭思考；第三方接口是否支持该参数仍以服务商为准。
+
 `thinking` 为可选配置。为兼容既有配置，省略 `api_style` 时使用 SiliconFlow 的 `enable_thinking` 参数；连接 DeepSeek 官方 API 时必须设置 `api_style: deepseek`，此时 OrbitCode 会发送官方的 `thinking.type` 参数，且不接受仅由 SiliconFlow 支持的 `budget_tokens`。
 
 旧版 YAML 可在模型条目中添加 `max_tokens: 32768`，显式设置单次输出预算；省略时维持服务商默认值。该值不同于 `context.window_tokens`，须按服务商实际输出上限设置，OrbitCode 本地接受 1 到 1048576 且不超过配置上下文窗口的整数，不会绕过服务商限制。导入托管设置、编辑模型及建立运行快照时会保留此字段，设置页可编辑最大输出预算；留空使用服务商默认值，也可选择思考模式、参数格式及适用的思考预算。遇到非成功结束原因时，错误记录区分 `length`、`content_filter`、`insufficient_system_resource` 和 `aborted`；截断的工具参数不会执行。

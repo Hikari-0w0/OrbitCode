@@ -71,7 +71,7 @@ test("两次普通参数失败后仍可修复验证，不因报告门禁隐藏�
   } finally { await f.close(); }
 });
 
-test("子搜索误传文件可纠正；耗尽预算仍交接读取与定位，原生日志保留原因", async () => {
+test("子读取误传目录可纠正；耗尽预算仍交接读取与定位，原生日志保留原因", async () => {
   let parentStep = 0, childStep = 0;
   const f = await runtimeFixture(request => {
     const body = request.body as { messages: { role: string; content?: string }[]; tools?: { function: { name: string } }[] };
@@ -79,7 +79,7 @@ test("子搜索误传文件可纠正；耗尽预算仍交接读取与定位，�
       assert.ok(body.tools?.some(tool => tool.function.name === "search_code"));
       if (++childStep > 1) assert.ok(body.messages.some(message => message.content?.includes(`第 ${childStep}/4 轮`)));
       if(childStep===4) { const suffix=body.messages.at(-1)?.content??"";assert.match(suffix,/当前子执行事实/);assert.match(suffix,/a\.txt/);assert.match(suffix,/"readFileCount":1/); }
-      if (childStep === 1) return call("search_code", { path: "a.txt", query: "proof" }, "wrong-target");
+      if (childStep === 1) return call("read_file", { path: "directory" }, "wrong-target");
       if (childStep === 2) return call("search_code", { file_pattern: "a.txt", query: "proof" }, "correct-target");
       return call("read_file", { path: "a.txt" }, `read-${childStep}`);
     }
@@ -92,6 +92,7 @@ test("子搜索误传文件可纠正；耗尽预算仍交接读取与定位，�
   }, { terminal: true });
   try {
     await f.runtime.memory.setEnabled(false);
+    await mkdir(path.join(f.root, "directory"));
     await mkdir(path.join(f.root, ".orbitcode/agents"), { recursive: true });
     await writeFile(path.join(f.root, ".orbitcode/agents/limited.md"), (await readFile("agents/explorer.md", "utf8")).replace("name: explorer", "name: limited").replace("max-iterations: 16", "max-iterations: 4"));
     await writeFile(path.join(f.root, "a.txt"), "proof actual-content-not-for-handoff");
@@ -102,14 +103,14 @@ test("子搜索误传文件可纠正；耗尽预算仍交接读取与定位，�
     assert.equal(childStep, 4);
     assert.equal(result.stopReason, "max-iterations");
     assert.equal(result.finalReply, "");
-    assert.equal(result.failures[0].targetFailureReason, "not-directory");
+    assert.equal(result.failures[0].targetFailureReason, "not-file");
     assert.equal(result.failures[0].callId, "wrong-target");
     assert.equal(result.failures[0].iteration, 1);
     assert.equal(result.failures.at(-1)?.kind, "cancelled");
     assert.deepEqual(result.handoff?.reads?.files, [{ path: "a.txt", callId: "read-3", sha256:createHash("sha256").update("proof actual-content-not-for-handoff").digest("hex"),byteLength:36 }]);
     assert.deepEqual(result.handoff?.reads?.matches, [{ path: "a.txt", line: 1, callId: "correct-target" }]);
     const logs = await f.log.findAllForConversation(task.id);
-    assert.equal(logs[0].tools[0].targetFailureReason, "not-directory");
+    assert.equal(logs[0].tools[0].targetFailureReason, "not-file");
     assert.equal(logs[0].tools[0].iteration, 1);
     const delivery = cp.context.messages.find(message => message.kind === "child-result");
     assert.ok(delivery && "content" in delivery);

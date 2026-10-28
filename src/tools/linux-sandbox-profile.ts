@@ -1,8 +1,11 @@
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, realpath, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { CommandSandboxOptions } from "@/tools/command-sandbox";
 import { collectSandboxProtectedEntries } from "@/tools/sandbox-protected-entries";
 import { resolveSandboxReadRoots } from "@/tools/sandbox-read-roots";
+import { shortTemporaryDirectory, workspaceTemporaryDirectory } from "@/tools/workspace-temporary-directory";
+import { resolveSandboxWritableRoots } from "@/tools/sandbox-writable-roots";
 
 export const LINUX_SANDBOX_HOME = "/.orbitcode-home";
 const SYSTEM_ROOTS = ["/usr", "/bin", "/sbin", "/lib", "/lib64"];
@@ -22,6 +25,8 @@ export async function linuxSandboxArguments(input: {
   if (!within(root, cwd)) throw new Error("命令工作目录不在授权工作区内。");
   const runtime = path.dirname(path.dirname(await realpath(process.execPath)));
   const extraRoots = await resolveSandboxReadRoots(input.options.readOnlyRoots ?? [], root);
+  const temporaryRoot = input.options.temporaryDirectory === "short" ? await shortTemporaryDirectory(root) : input.options.temporaryDirectory === "workspace" ? await workspaceTemporaryDirectory(root) : "/tmp";
+  const writableRoots = await resolveSandboxWritableRoots([...(input.options.writableRoots ?? []), ...(input.options.temporaryDirectory === "short" ? [temporaryRoot] : [])], root, extraRoots);
   const trustedRoots = [...SYSTEM_ROOTS, runtime, ...extraRoots];
   const roots = new Set<string>();
   for (const directory of trustedRoots) {
@@ -43,11 +48,16 @@ export async function linuxSandboxArguments(input: {
     if (await lstat(target).catch(error => { if (missing(error)) return undefined; throw error; })) args.push("--ro-bind", target, target);
   }
   args.push("--proc", "/proc", "--remount-ro", "/proc", "--dev", "/dev", "--bind", root, root);
-  for (const target of await collectSandboxProtectedEntries(root, input.signal)) {
-    args.push("--ro-bind", target.directory ? input.blockedDirectory : input.blockedFile, target.path);
+  for (const directory of writableRoots) args.push("--bind", directory, directory);
+  for (const target of await collectSandboxProtectedEntries([root, ...writableRoots], input.signal, input.options.maxScanEntries, input.options.npmrcAccess, input.options.environmentFileAccess)) {
+    if (target.publicNpmrc !== undefined) {
+      const snapshot = path.join(path.dirname(input.blockedFile), `public-npmrc-${randomUUID()}`);
+      await writeFile(snapshot, target.publicNpmrc, { mode: 0o600, flag: "wx" });
+      args.push("--ro-bind", snapshot, target.path);
+    } else args.push("--ro-bind", target.directory ? input.blockedDirectory : input.blockedFile, target.path);
   }
   const searchPath = [path.join(root, "node_modules", ".bin"), path.dirname(process.execPath), ...extraRoots.map(directory => path.join(directory, "bin")), "/usr/local/bin", "/usr/bin", "/bin", "/usr/local/sbin", "/usr/sbin", "/sbin"].join(":");
-  args.push("--clearenv", "--setenv", "PATH", searchPath, "--setenv", "HOME", LINUX_SANDBOX_HOME, "--setenv", "TMPDIR", "/tmp", "--setenv", "LANG", "C.UTF-8", "--setenv", "LC_ALL", "C.UTF-8", "--chdir", cwd, "--", "/bin/sh", "-c", input.command);
+  args.push("--clearenv", "--setenv", "PATH", searchPath, "--setenv", "HOME", LINUX_SANDBOX_HOME, "--setenv", "TMPDIR", temporaryRoot, "--setenv", "XDG_CACHE_HOME", path.join(temporaryRoot, "cache"), "--setenv", "npm_config_cache", path.join(temporaryRoot, "cache", "npm"), "--setenv", "PNPM_HOME", path.join(temporaryRoot, "cache", "pnpm"), "--setenv", "BUN_INSTALL_CACHE_DIR", path.join(temporaryRoot, "cache", "bun"), "--setenv", "LANG", "C.UTF-8", "--setenv", "LC_ALL", "C.UTF-8", "--chdir", cwd, "--", "/bin/bash", "--noprofile", "--norc", "-o", "pipefail", "-c", input.command);
   return args;
 }
 

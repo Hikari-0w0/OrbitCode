@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { runSettingsOperation } from "@/components/settings/settings-operation";
+import { isReasoningEffort, type ModelReasoningEffort } from "@/models/reasoning-effort";
 import type { PublicSettings } from "@/runtime/settings-types";
 import type { AgentIterationLimit } from "@/core/agent-events";
 import type { SettingsAction } from "@/runtime/settings-service";
@@ -48,6 +49,7 @@ export function useSettings() {
     const [thinkingMode, setThinkingMode] = useState<"default" | "enabled" | "disabled">("default");
     const [thinkingApiStyle, setThinkingApiStyle] = useState<"siliconflow" | "deepseek">("siliconflow");
     const [thinkingBudget, setThinkingBudget] = useState("");
+    const [reasoningEffort, setReasoningEffort] = useState<ModelReasoningEffort | "default">("default");
     const [workspaceName, setWorkspaceName] = useState("");
     const [renamingWorkspaceId, setRenamingWorkspaceId] = useState<string>();
     const [workspacePath, setWorkspacePath] = useState("");
@@ -139,6 +141,7 @@ export function useSettings() {
             setEditingProviderId(undefined);
             setMaxOutputTokens("");
             setThinkingMode("default");
+            setReasoningEffort("default");
             setThinkingApiStyle("siliconflow");
             setThinkingBudget("");
             setRenamingWorkspaceId(undefined);
@@ -301,7 +304,7 @@ export function useSettings() {
     }
     function submitModel(event: FormEvent<HTMLFormElement>): void {
         event.preventDefault();
-        const advanced = { maxOutputTokens: maxOutputTokens === "" ? null : Number(maxOutputTokens),
+        const advanced = { reasoningEffort: isReasoningEffort(reasoningEffort) ? reasoningEffort : null, maxOutputTokens: maxOutputTokens === "" ? null : Number(maxOutputTokens),
             thinking: thinkingMode === "default" ? null : { enabled: thinkingMode === "enabled", apiStyle: thinkingApiStyle,
                 ...(thinkingMode === "enabled" && thinkingApiStyle === "siliconflow" && thinkingBudget !== "" ? { budgetTokens: Number(thinkingBudget) } : {}) } };
         const credential = keyValue ? keyKind === "local" ? { kind: "local" as const, value: keyValue } : { kind: "environment" as const, variable: keyValue } : undefined;
@@ -351,6 +354,7 @@ export function useSettings() {
         setModelName("");
         setMaxOutputTokens("");
         setThinkingMode("default");
+        setReasoningEffort("default");
         setThinkingApiStyle("siliconflow");
         setThinkingBudget("");
         setModelId("");
@@ -369,7 +373,7 @@ export function useSettings() {
             setDefaultPermissionMode(state.settings.defaultPermissionMode ?? "default");
         }
     }
-    return { maxOutputTokens, setMaxOutputTokens, thinkingMode, setThinkingMode, thinkingApiStyle, setThinkingApiStyle, thinkingBudget, setThinkingBudget, state, busy, notice, probeStatus, mcpStatus, importPreview, modelName, setModelName, modelId, setModelId, apiUrl, setApiUrl, keyKind, setKeyKind, keyValue, setKeyValue, windowTokens, setWindowTokens, editingProviderId, setEditingProviderId, workspaceName, setWorkspaceName, workspacePath, setWorkspacePath, renamingWorkspaceId, setRenamingWorkspaceId, mcpName, setMcpName, mcpType, setMcpType, mcpWorkspace, setMcpWorkspace, mcpTarget, setMcpTarget, mcpArgs, setMcpArgs, mcpVariables, setMcpVariables, maxIterations, setMaxIterations, maxRuntimeMinutes, setMaxRuntimeMinutes, defaultPermissionMode, setDefaultPermissionMode, setNotice, refresh, apply, importLegacy, recoverInvalidSettings, probeProvider, manageMcp, submitModel, submitWorkspace, submitMcp, dirty, setDirty, dialog, confirmLeave, resetForm };
+    return { reasoningEffort, setReasoningEffort, maxOutputTokens, setMaxOutputTokens, thinkingMode, setThinkingMode, thinkingApiStyle, setThinkingApiStyle, thinkingBudget, setThinkingBudget, state, busy, notice, probeStatus, mcpStatus, importPreview, modelName, setModelName, modelId, setModelId, apiUrl, setApiUrl, keyKind, setKeyKind, keyValue, setKeyValue, windowTokens, setWindowTokens, editingProviderId, setEditingProviderId, workspaceName, setWorkspaceName, workspacePath, setWorkspacePath, renamingWorkspaceId, setRenamingWorkspaceId, mcpName, setMcpName, mcpType, setMcpType, mcpWorkspace, setMcpWorkspace, mcpTarget, setMcpTarget, mcpArgs, setMcpArgs, mcpVariables, setMcpVariables, maxIterations, setMaxIterations, maxRuntimeMinutes, setMaxRuntimeMinutes, defaultPermissionMode, setDefaultPermissionMode, setNotice, refresh, apply, importLegacy, recoverInvalidSettings, probeProvider, manageMcp, submitModel, submitWorkspace, submitMcp, dirty, setDirty, dialog, confirmLeave, resetForm };
 }
 function isSettings(value: unknown): value is PublicSettings {
     return typeof value === "object" && value !== null && "revision" in value && typeof value.revision === "number" && "providers" in value && Array.isArray(value.providers) && "workspaces" in value && Array.isArray(value.workspaces) && "mcpServers" in value && Array.isArray(value.mcpServers);

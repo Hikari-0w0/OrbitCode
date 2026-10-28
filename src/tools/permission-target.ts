@@ -83,7 +83,7 @@ export function permissionTargetFailure(error: unknown): ToolExecutionResult {
   const reason = error instanceof WorkspaceError ? error.kind : "unresolved";
   const result = error instanceof WorkspaceError && (error.kind === "not-directory" || error.kind === "not-file")
     ? toolFailure("invalid-arguments", error.kind === "not-directory"
-      ? "工具目标要求目录，但收到文件；search_code.path 只能传目录，单文件使用 file_pattern。"
+      ? "工具目标要求目录，但收到文件；请核对该工具的路径类型，传入已有目录。"
       : "工具目标要求文件，但收到目录；先用 find_files 查找文件。", { retryable: true })
     : error instanceof WorkspaceError && error.kind === "protected-path"
       ? toolFailure("protected-path", "工具不能访问受保护的配置或凭据路径。", { retryable: true })
@@ -99,6 +99,13 @@ async function resolvePathTarget(
 ) {
   if (target.resolution === "existing-file") {
     return workspace.resolveExistingFile(target.requestedPath);
+  }
+  if (target.resolution === "existing-path") {
+    try { return await workspace.resolveExistingDirectory(target.requestedPath); }
+    catch (error) {
+      if (!(error instanceof WorkspaceError) || error.kind !== "not-directory") throw error;
+      return workspace.resolveExistingFile(target.requestedPath);
+    }
   }
   if (target.resolution === "existing-directory") {
     return workspace.resolveExistingDirectory(target.requestedPath);

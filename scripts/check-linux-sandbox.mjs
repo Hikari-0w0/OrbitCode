@@ -20,7 +20,7 @@ function run(executable, args) {
 
 try {
   // 只复制测试 bundle 和内置能力资源，避免把项目环境文件或用户数据带入镜像。
-  for (const [source, output] of [["src/tools/linux-bubblewrap-sandbox.test.ts", "linux-tests.cjs"], ["src/tools/sandbox-security.test.ts", "security-tests.cjs"], ["tests/linux-sandbox-cli.e2e.test.ts", "cli-tests.cjs"]]) {
+  for (const [source, output] of [["src/tools/linux-bubblewrap-sandbox.test.ts", "linux-tests.cjs"], ["src/tools/sandbox-security.test.ts", "security-tests.cjs"], ["tests/linux-sandbox-cli.e2e.test.ts", "cli-tests.cjs"], ["src/tools/command-outcome.integration.test.ts", "outcome-tests.cjs"]]) {
     run(path.join(projectRoot, "node_modules/.bin/esbuild"), [source, "--bundle", "--platform=node", "--format=cjs", "--log-level=error", `--outfile=${path.join(context, output)}`]);
   }
   run(path.join(projectRoot, "node_modules/.bin/esbuild"), ["src/cli/main.ts", "--bundle", "--platform=node", "--format=esm", "--log-level=error", '--banner:js=import { createRequire } from "node:module"; const require = createRequire(import.meta.url);', `--outfile=${path.join(context, "cli.mjs")}`]);
@@ -41,7 +41,7 @@ COPY . /checks
 ENV NEXT_RUNTIME=nodejs
 ENV ORBITCODE_TEST_CLI_ENTRY=/checks/cli.mjs
 ENTRYPOINT ["node", "--test"]
-CMD ["linux-tests.cjs", "security-tests.cjs", "cli-tests.cjs"]
+CMD ["linux-tests.cjs", "security-tests.cjs", "cli-tests.cjs", "outcome-tests.cjs"]
 `);
   run("docker", ["build", ...platformArguments, "--build-arg", `BASE_IMAGE=${baseImage}`, "-t", image, context]);
   for (const user of ["0:0", "1000:1000"]) {

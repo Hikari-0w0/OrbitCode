@@ -110,7 +110,7 @@ export async function runCli({
     const permissions = new PermissionSessionManager();
     const conversations = new ConversationService(actualStore, manager, guard, loadConfig);
     const runtime = new AgentRuntime({ userConfigRoot: dataDir ? userConfigurationRoot(dataDir) : userConfigRoot ?? userConfigurationRoot(), store: actualStore, manager, guard, permissions, log: actualLog,
-      sandbox: createCommandSandbox(environment), loadConfig, loadWorkspaces,
+      sandbox: createCommandSandbox(environment), createSandbox: context => createCommandSandbox(environment, process.platform, context.managedSettings?.commandSecurity), loadConfig, loadWorkspaces,
       ...(dataDir ? { loadMcp: async (workspaceRoot: string, context: Awaited<ReturnType<typeof loadConfig>>) => loadMcpConfig({ workspaceRoot,
         environment: context.environment, managedSettings: context.managedSettings ?? null, settingsStore, userHome: dataDir }),
         permissionLocations: (workspaceRoot: string) => ({ user: path.join(dataDir, "permissions.yaml"),

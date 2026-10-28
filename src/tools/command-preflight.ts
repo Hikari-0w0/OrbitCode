@@ -3,7 +3,8 @@ import type { SchemaIssue } from "@/tools/types";
 export function preflightCommand(input: {
   readonly command: string;
   readonly cwd?: string;
-}): readonly SchemaIssue[] {
+}, mode: "strict" | "off" = "strict"): readonly SchemaIssue[] {
+  if (mode === "off") return [];
   const command = input.command.trim();
   const issues: SchemaIssue[] = [];
   if (isJsonDocument(command)) {

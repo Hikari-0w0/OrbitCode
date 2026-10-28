@@ -80,6 +80,7 @@ type AuthorizedCall = {
 type SchedulerOptions = {
   readonly writes?: import("@/tools/types").WorkspaceWriteCoordinator;
   readonly deadlineMs?: number;
+  readonly commandTimeoutMs?: number;
   readonly calls: readonly ModelToolCall[];
   readonly access: ToolAccess;
   readonly workspace: WorkspaceBoundary;
@@ -92,6 +93,7 @@ export async function* scheduleToolCalls(
   options: SchedulerOptions,
 ): AsyncIterable<ToolScheduleEvent> {
   const concurrency = options.readOnlyConcurrency ?? MAX_READ_ONLY_CONCURRENCY;
+  if (options.commandTimeoutMs !== undefined && (!Number.isSafeInteger(options.commandTimeoutMs) || options.commandTimeoutMs < 100 || options.commandTimeoutMs > 86_400_000)) throw new Error("命令调度时限必须为100–86400000毫秒。");
   if (
     !Number.isInteger(concurrency) ||
     concurrency < 1 ||
@@ -272,7 +274,8 @@ async function safeExecute(
 ): Promise<ToolExecutionResult> {
   let release: (() => void) | undefined;
   let transferred = false;
-  const deadlineMs = call.prepared.budget === "parent-run" ? (options.deadlineMs ?? Date.now() + 300_000) : Math.min(options.deadlineMs ?? Infinity, executionContext(options, call.prepared.mutability).deadlineMs);
+  const baseContext = executionContext(options, call.prepared.mutability);
+  const deadlineMs = call.prepared.budget === "parent-run" ? (options.deadlineMs ?? Date.now() + 300_000) : Math.min(options.deadlineMs ?? Infinity, baseContext.deadlineMs);
   const signal = AbortSignal.any([options.signal, AbortSignal.timeout(Math.max(1, deadlineMs - Date.now()))]);
   try {
     // 编排工具在各自执行边界取得许可，不能持有父级读锁等待子任务。
@@ -285,7 +288,7 @@ async function safeExecute(
     for (const permission of call.permissions) { const failure = await permission.revalidate(signal); if (failure) return failure; }
     return await options.access.executePrepared(
       call.prepared,
-      { ...executionContext(options, call.prepared.mutability), signal, takeWriteLease: () => { transferred = true; return release; }, callId: call.call.id, deadlineMs: call.prepared.budget === "parent-run" ? (options.deadlineMs ?? Date.now() + 300_000) : Math.min(options.deadlineMs ?? Infinity, executionContext(options, call.prepared.mutability).deadlineMs), emitSkillEvent },
+      { ...baseContext, signal, takeWriteLease: () => { transferred = true; return release; }, callId: call.call.id, deadlineMs, emitSkillEvent },
     );
   } catch (error) {
     if (error instanceof WorkspaceAccessError) return toolFailure(error.kind, error.message);
@@ -296,7 +299,7 @@ async function safeExecute(
 }
 
 function executionContext(
-  options: Pick<SchedulerOptions, "workspace" | "signal">,
+  options: Pick<SchedulerOptions, "workspace" | "signal" | "commandTimeoutMs">,
   mutability: ToolMutability,
 ) {
   return {
@@ -304,7 +307,7 @@ function executionContext(
     signal: options.signal,
     deadlineMs:
       Date.now() +
-      (mutability === "external" ? 60_000 : mutability === "command" ? COMMAND_TOOL_TIMEOUT_MS : FILE_TOOL_TIMEOUT_MS),
+      (mutability === "external" ? 60_000 : mutability === "command" ? options.commandTimeoutMs ?? COMMAND_TOOL_TIMEOUT_MS : FILE_TOOL_TIMEOUT_MS),
   };
 }
 

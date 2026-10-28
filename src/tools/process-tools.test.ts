@@ -5,6 +5,18 @@ import type { CommandSandbox } from "@/tools/command-sandbox";
 import { ManagedProcessController, ManagedProcessError } from "@/tools/managed-process";
 import { createProcessTools } from "@/tools/process-tools";
 import { createWorkspaceBoundary } from "@/tools/workspace";
+import { EVALUATION_COMMAND_SECURITY } from "@/tools/command-security";
+
+test("受管进程的格式预检、就绪等待和容量描述使用同一评测配置", async () => {
+  const workspace=await createWorkspaceBoundary(process.cwd());
+  const controller=new ManagedProcessController({security:EVALUATION_COMMAND_SECURITY,async probe(){return {available:true};},async run(){throw new Error("unused");}},workspace);
+  const [start]=createProcessTools(controller);
+  assert.equal(start.prepareUnknown({command:'"/usr/bin/true"',cwd:".",ready_timeout_ms:120000}).kind,"ready");
+  assert.equal(start.prepareUnknown({command:"cd . && npm test",cwd:"."}).kind,"ready");
+  assert.equal(start.prepareUnknown({command:"run",ready_timeout_ms:300001}).kind,"failure");
+  assert.match(start.description,/最多16个/);assert.match(start.description,/300000ms/);
+  await controller.close();
+});
 
 test("进程工具拒绝畸形命令和不属于本轮的进程 ID", async () => {
   const workspace = await createWorkspaceBoundary(process.cwd());

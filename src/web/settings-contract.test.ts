@@ -14,8 +14,12 @@ function mutation(body: unknown): Request {
 
 test("设置契约拒绝未知字段和错误类型，不把错误值当作保留动作", async () => {
   for (const action of [
+    { type: "command-security-set", config: { network: "sometimes" } },
+    { type: "command-security-set", config: { disableSandbox: true } },
     { type: "provider-edit", id: "example", model: 42 },
     { type: "provider-edit", id: "example", maxOutputTokens: "32768" },
+    { type: "provider-edit", id: "example", reasoningEffort: "medium" },
+    { type: "provider-edit", id: "example", reasoningEffort: false },
     { type: "provider-edit", id: "example", thinking: { enabled: "true" } },
     { type: "provider-edit", id: "example", thinking: { enabled: true, unexpected: true } },
     { type: "provider-edit", id: "example", unexpected: "synthetic-marker" },
