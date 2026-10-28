@@ -1,9 +1,7 @@
 import type { ResolvedWorkspacePath, WorkspaceBoundary } from "@/tools/types";
+import type { CommandSecuritySettings } from "@/tools/command-security";
 
-export type CommandSandboxOptions = {
-  readonly network?: "allow" | "deny";
-  readonly readOnlyRoots?: readonly string[];
-};
+export type CommandSandboxOptions = Partial<CommandSecuritySettings>;
 
 export type SandboxAvailability =
   | { readonly available: true }
@@ -46,6 +44,7 @@ export type SandboxManagedProcess = {
 };
 
 export interface CommandSandbox {
+  readonly security?: CommandSecuritySettings;
   probe(workspace: WorkspaceBoundary): Promise<SandboxAvailability>;
   run(
     request: CommandRequest,

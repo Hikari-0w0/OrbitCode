@@ -105,6 +105,7 @@ export type ProviderErrorOptions = {
   readonly traceId?: string;
   readonly timeoutPhase?: ProviderTimeoutPhase;
   readonly retryable?: boolean;
+  readonly retryAfterMs?: number;
   readonly finishReason?: ProviderFinishReason;
   readonly cause?: unknown;
 };
@@ -115,6 +116,7 @@ export class ProviderError extends Error {
   readonly traceId?: string;
   readonly timeoutPhase?: ProviderTimeoutPhase;
   readonly retryable: boolean;
+  readonly retryAfterMs?: number;
   readonly finishReason?: ProviderFinishReason;
 
   constructor(
@@ -129,6 +131,7 @@ export class ProviderError extends Error {
     this.traceId = options.traceId;
     this.timeoutPhase = options.timeoutPhase;
     this.finishReason = options.finishReason;
+    this.retryAfterMs = options.retryAfterMs;
     this.retryable =
       options.retryable ??
       (kind === "network" || kind === "stream" || kind === "timeout");

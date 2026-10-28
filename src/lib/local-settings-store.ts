@@ -1,4 +1,6 @@
 import { parseKnowledgeConfig } from "@/runtime/knowledge/config";
+import { isToolFailurePolicy } from "@/core/tool-failure-policy";
+import { parseCommandSecurity } from "@/tools/command-security";
 import { parseSubAgentLimits } from "@/core/sub-agents/types";
 import { randomUUID } from "node:crypto";
 import { open, mkdir, rename, rm, lstat, chmod, link } from "node:fs/promises";
@@ -9,6 +11,8 @@ import path from "node:path";
 import { EMPTY_SETTINGS, SettingsError, type ManagedSettings } from "@/runtime/settings-types";
 import { acquireSettingsLock } from "@/lib/settings-lock";
 import { MAX_MODEL_OUTPUT_TOKENS } from "@/models/provider";
+
+import { isReasoningEffort } from "@/models/reasoning-effort";
 
 const MAX_BYTES = 256 * 1024;
 
@@ -118,7 +122,8 @@ export class LocalSettingsStore {
 
 function validateSettings(value: unknown): ManagedSettings {
   if (!record(value) || value.schemaVersion !== 1 || !Number.isSafeInteger(value.revision) || Number(value.revision) < 0) throw invalid();
-  if (Object.keys(value).some((key) => !["schemaVersion", "revision", "providers", "workspaces", "mcpServers", "defaultProviderId", "defaultWorkspaceId", "maxIterations", "maxRuntimeMinutes", "defaultPermissionMode", "subAgents"].includes(key))) throw invalid();
+  if (Object.keys(value).some((key) => !["schemaVersion", "revision", "providers", "workspaces", "mcpServers", "defaultProviderId", "defaultWorkspaceId", "maxIterations", "maxRuntimeMinutes", "defaultPermissionMode", "subAgents", "commandSecurity", "toolFailurePolicy"].includes(key))) throw invalid();
+  if (value.commandSecurity !== undefined) { try { value.commandSecurity = parseCommandSecurity(value.commandSecurity); } catch { throw invalid(); } }
   if (!Array.isArray(value.providers) || !Array.isArray(value.workspaces) || !Array.isArray(value.mcpServers)) throw invalid();
   if (value.providers.length > 32 || value.workspaces.length > 32 || value.mcpServers.length > 32) throw invalid();
   const providerIds = new Set<string>();
@@ -126,8 +131,9 @@ function validateSettings(value: unknown): ManagedSettings {
     if (!record(provider) || !identifier(provider.id) || !shortText(provider.displayName, 80) || !shortText(provider.model, 256) || !httpUrl(provider.baseUrl) || typeof provider.enabled !== "boolean" || !record(provider.context)) throw invalid();
     const providerUrl = new URL(provider.baseUrl);
     if (providerUrl.username || providerUrl.password || providerUrl.search || providerUrl.hash) throw invalid();
-    if (Object.keys(provider).some((key) => !["id", "displayName", "model", "baseUrl", "credential", "context", "thinking", "transport", "maxOutputTokens", "enabled"].includes(key))) throw invalid();
+    if (Object.keys(provider).some((key) => !["id", "displayName", "model", "baseUrl", "credential", "context", "thinking", "reasoningEffort", "transport", "maxOutputTokens", "enabled"].includes(key))) throw invalid();
     if (provider.maxOutputTokens !== undefined && (!Number.isSafeInteger(provider.maxOutputTokens) || Number(provider.maxOutputTokens) < 1 || Number(provider.maxOutputTokens) > Math.min(MAX_MODEL_OUTPUT_TOKENS, Number(provider.context.windowTokens)))) throw invalid();
+    if (provider.reasoningEffort !== undefined && !isReasoningEffort(provider.reasoningEffort)) throw invalid();
     if (provider.thinking !== undefined && (!record(provider.thinking) || typeof provider.thinking.enabled !== "boolean" ||
       Object.keys(provider.thinking).some((key) => !["enabled", "budgetTokens", "apiStyle"].includes(key)) ||
       (provider.thinking.budgetTokens !== undefined && (!Number.isSafeInteger(provider.thinking.budgetTokens) || Number(provider.thinking.budgetTokens) < 128 || Number(provider.thinking.budgetTokens) > 32768)) ||
@@ -185,6 +191,7 @@ function validateSettings(value: unknown): ManagedSettings {
   }
   if (value.defaultProviderId !== undefined && (!providerIds.has(String(value.defaultProviderId)) || !value.providers.some((p: unknown) => record(p) && p.id === value.defaultProviderId && p.enabled))) throw invalid();
   if (value.defaultWorkspaceId !== undefined && (!workspaceIds.has(String(value.defaultWorkspaceId)) || !value.workspaces.some((w: unknown) => record(w) && w.id === value.defaultWorkspaceId && w.enabled))) throw invalid();
+  if (value.toolFailurePolicy !== undefined && !isToolFailurePolicy(value.toolFailurePolicy)) throw invalid();
   if (value.maxIterations !== undefined && value.maxIterations !== "unlimited" && (!Number.isSafeInteger(value.maxIterations) || Number(value.maxIterations) < 1 || Number(value.maxIterations) > 32)) throw invalid();
   if (value.maxRuntimeMinutes !== undefined && (!Number.isSafeInteger(value.maxRuntimeMinutes) || Number(value.maxRuntimeMinutes) < 1 || Number(value.maxRuntimeMinutes) > 1440)) throw invalid();
   if (value.defaultPermissionMode !== undefined && !["strict", "default", "permissive"].includes(String(value.defaultPermissionMode))) throw invalid();

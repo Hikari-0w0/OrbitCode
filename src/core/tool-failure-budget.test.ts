@@ -10,6 +10,17 @@ function call(argumentsJson = '{"path":"a"}'): ModelToolCall {
   return { id: crypto.randomUUID(), name: "write_file", argumentsJson };
 }
 
+test("只提醒模式不会因诊断失败停止，相同参数模式允许更换参数后继续", () => {
+  const failure = toolFailure("command-failed", "断言失败", { retryable: true });
+  const warn = new ToolFailureBudget("warn");
+  for (let index = 0; index < 20; index++) assert.notEqual(warn.observe(call(), failure).action, "stop");
+  const exact = new ToolFailureBudget("exact");
+  for (let index = 0; index < 10; index++) assert.notEqual(exact.observe(call(JSON.stringify({ command: String(index) })), failure).action, "stop");
+  const repeated = call();
+  for (let index = 0; index < 3; index++) assert.notEqual(exact.observe(repeated, failure).action, "stop");
+  assert.equal(exact.observe(repeated, failure).action, "stop");
+});
+
 test("精确重复失败先要求切换方案，达到预算后停止", () => {
   const budget = new ToolFailureBudget();
   const repeated = call();

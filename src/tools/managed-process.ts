@@ -7,9 +7,8 @@ import type {
   SandboxManagedProcess,
 } from "@/tools/command-sandbox";
 import type { WorkspaceBoundary } from "@/tools/types";
+import { DEFAULT_COMMAND_SECURITY, type CommandSecuritySettings } from "@/tools/command-security";
 
-const DEFAULT_MAX_PROCESSES = 4;
-const DEFAULT_LOG_BYTES = 128 * 1024;
 const CONNECT_TIMEOUT_MS = 150;
 const LOOPBACK_HOSTS = ["127.0.0.1", "::1"] as const;
 
@@ -60,6 +59,7 @@ export class ManagedProcessError extends Error {
 }
 
 export class ManagedProcessController {
+  readonly security: CommandSecuritySettings;
   readonly #records = new Map<string, ProcessRecord>();
   readonly #maxProcesses: number;
   readonly #logBytes: number;
@@ -70,8 +70,10 @@ export class ManagedProcessController {
     private readonly workspace: WorkspaceBoundary,
     options: { readonly maxProcesses?: number; readonly logBytes?: number } = {},
   ) {
-    this.#maxProcesses = options.maxProcesses ?? DEFAULT_MAX_PROCESSES;
-    this.#logBytes = options.logBytes ?? DEFAULT_LOG_BYTES;
+    const security = sandbox.security ?? DEFAULT_COMMAND_SECURITY;
+    this.security = { ...security, maxProcesses: options.maxProcesses ?? security.maxProcesses, processLogBytes: options.logBytes ?? security.processLogBytes };
+    this.#maxProcesses = this.security.maxProcesses;
+    this.#logBytes = this.security.processLogBytes;
   }
 
   async start(input: {
@@ -143,7 +145,7 @@ export class ManagedProcessController {
         await this.#waitForPort(
           record,
           input.readyPort,
-          input.readyTimeoutMs ?? 10_000,
+          Math.min(input.readyTimeoutMs ?? this.security.defaultReadyTimeoutMs, this.security.maxReadyTimeoutMs),
           input.signal,
         );
         record.portObservation = { port: input.readyPort, scope: "tcp-connectivity-only" };
@@ -179,6 +181,18 @@ export class ManagedProcessController {
       nextCursor: logs.nextCursor,
       truncated: logs.truncated,
     };
+  }
+
+  async waitStatus(processId: string, cursor: number, waitMs: number, waitFor: "output" | "exit", signal: AbortSignal): Promise<ManagedProcessSnapshot> {
+    if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > 60000) throw new ManagedProcessError("start", "进程状态等待必须为0–60000毫秒。");
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+      if (signal.aborted) throw new ManagedProcessError("cancelled", "进程状态等待已取消。");
+      const snapshot = this.status(processId, cursor);
+      if (snapshot.status !== "running" || Date.now() >= deadline || (waitFor === "output" && (snapshot.logs.length > 0 || snapshot.truncated))) return snapshot;
+      try { await abortableDelay(Math.min(50, Math.max(1, deadline - Date.now())), signal); }
+      catch (error) { if (signal.aborted) throw new ManagedProcessError("cancelled", "进程状态等待已取消。"); throw error; }
+    }
   }
 
   async stop(processId: string): Promise<ManagedProcessSnapshot> {
@@ -245,22 +259,24 @@ class ProcessLogBuffer {
 
   push(stream: "stdout" | "stderr", value: Buffer | string): void {
     const source = Buffer.isBuffer(value) ? value : Buffer.from(value);
-    const captured = source.byteLength > this.limitBytes
-      ? source.subarray(source.byteLength - this.limitBytes)
-      : source;
+    const normalized = Buffer.from(new TextDecoder("utf-8").decode(source));
+    let offset = Math.max(0, normalized.byteLength - this.limitBytes);
+    while (offset < normalized.byteLength && (normalized[offset] & 0xc0) === 0x80) offset += 1;
     const chunk = {
       cursor: this.#nextCursor,
       stream,
-      text: new TextDecoder("utf-8").decode(captured),
+      text: normalized.subarray(offset).toString("utf8"),
     } as const;
+    // 单个大块也可能丢失前缀，不能只在淘汰整个日志块时报告截断。
+    if (offset > 0 || source.byteLength > this.limitBytes) this.#droppedThrough = chunk.cursor;
     this.#nextCursor += 1;
     this.#chunks.push(chunk);
-    this.#bytes += captured.byteLength;
+    this.#bytes += normalized.byteLength - offset;
     while (this.#bytes > this.limitBytes && this.#chunks.length > 1) {
       const removed = this.#chunks.shift();
       if (!removed) break;
       this.#bytes -= Buffer.byteLength(removed.text, "utf8");
-      this.#droppedThrough = removed.cursor;
+      this.#droppedThrough = Math.max(this.#droppedThrough, removed.cursor);
     }
   }
 

@@ -5,6 +5,10 @@ import type { ContextPolicyConfig } from "@/core/context/types";
 import type { ModelThinkingConfig, ProviderTransportPolicy } from "@/models/provider";
 import type { McpServerConfig } from "@/runtime/mcp-config";
 import type { PermissionMode } from "@/core/permissions/types";
+import type { ToolFailurePolicy } from "@/core/tool-failure-policy";
+import type { CommandSecuritySettings } from "@/tools/command-security";
+
+import type { ModelReasoningEffort } from "@/models/reasoning-effort";
 
 export type StoredCredential =
   | { readonly kind: "environment"; readonly variable: string }
@@ -19,6 +23,7 @@ export type ManagedProvider = {
   readonly credential: StoredCredential;
   readonly context: ContextPolicyConfig;
   readonly thinking?: ModelThinkingConfig;
+  readonly reasoningEffort?: ModelReasoningEffort;
   readonly transport?: ProviderTransportPolicy;
   readonly maxOutputTokens?: number;
   readonly enabled: boolean;
@@ -41,6 +46,8 @@ export type ManagedMcpServer = {
 };
 
 export type ManagedSettings = {
+  readonly toolFailurePolicy?: ToolFailurePolicy;
+  readonly commandSecurity?: CommandSecuritySettings;
   readonly subAgents?: SubAgentLimits;
   readonly schemaVersion: 1;
   readonly revision: number;

@@ -83,6 +83,7 @@ export type AgentRuntimeOptions = {
   readonly guard: ConversationOperationGuard;
   readonly permissions: PermissionSessionManager;
   readonly sandbox: CommandSandbox;
+  readonly createSandbox?: (context: ProviderContext) => CommandSandbox;
   readonly log: AgentRunLogSink;
   readonly loadConfig: () => Promise<ProviderContext>;
   readonly loadWorkspaces: (context: ProviderContext) => Promise<WorkspaceCatalog>;
@@ -203,6 +204,7 @@ export class AgentRuntime {
     let activeTurn: { readonly sessionId: string; readonly turnId: string } | undefined;
     let activeConversation: GuardedConversationOperation | undefined;
     let managedProcesses: ManagedProcessController | undefined;
+    const turnWrites = this.writes.createExecutionScope();
     let savedTurn = false;
     let savedCheckpoint: ConversationCheckpoint | undefined;
     const mcpLeases: McpConnectionLease[] = [];
@@ -243,6 +245,7 @@ export class AgentRuntime {
       }
       if (pendingToolCalls(checkpoint.context.messages).length) throw new ConversationRepositoryError("busy", "会话含未完成工具调用，请先恢复检查点。");
       const context = await this.options.loadConfig();
+      const sandbox = this.options.createSandbox?.(context) ?? this.options.sandbox;
       const providerConfig = resolveRuntimeProvider(context, checkpoint.summary.providerId);
       const workspaceCatalog = await this.options.loadWorkspaces(context);
       const workspace = await resolveWorkspaceBoundary(
@@ -302,10 +305,10 @@ export class AgentRuntime {
         sessionId: input.conversationId,
         ...request,
       }), search: (request: import("@/core/context/context-search").ContextSearchInput) => this.options.store.search({ sessionId: input.conversationId, ...request }) };
-      managedProcesses = new ManagedProcessController(this.options.sandbox, workspace);
+      managedProcesses = new ManagedProcessController(sandbox, workspace);
       const completionTracker = new CompletionTracker();
       const registry = createDefaultToolRegistry(
-        this.options.sandbox,
+        sandbox,
         readContext,
         managedProcesses,
         [],
@@ -346,7 +349,7 @@ export class AgentRuntime {
       const buildAgent = (externalTools: readonly RegisteredTool[], deadlineMs: number) => {
         for (const tool of externalTools) if (tool.externalIdentity) toolIdentities.set(tool.name, tool.externalIdentity);
         const modelIds = new Set(context.providers.map(provider => provider.name));
-        const common = { writes:this.writes, consumeChildResults:()=>childDelivery.consume(), maxIterations: context.maxIterations, maxRuntimeMs: Math.max(1, Math.min(context.maxRuntimeMs, deadlineMs - Date.now())), promptEnvironment: createPromptEnvironment({ workspace: binding.workspace }), optionalPromptContext: {...background.snapshot.optional,availableAgents:agentCatalog.summary || undefined,parentExecution:parentExecution.mode,delegationKind:parentExecution.delegationKind} };
+        const common = { commandTimeoutMs: Math.max(sandbox.security?.maxTimeoutMs ?? 120000, sandbox.security?.maxReadyTimeoutMs ?? 30000), toolFailurePolicy: context.managedSettings?.toolFailurePolicy, writes:turnWrites, consumeChildResults:()=>childDelivery.consume(), maxIterations: context.maxIterations, maxRuntimeMs: Math.max(1, Math.min(context.maxRuntimeMs, deadlineMs - Date.now())), promptEnvironment: createPromptEnvironment({ workspace: binding.workspace }), optionalPromptContext: {...background.snapshot.optional,availableAgents:agentCatalog.summary || undefined,parentExecution:parentExecution.mode,delegationKind:parentExecution.delegationKind} };
         const skills = new SkillSession(locked.skills, catalog, { tools: () => new Set(combinedRegistry.descriptors().map(tool => tool.name)), providerId: binding.providerId, modelIds,
           validateCapacity: (active: readonly ActivatedSkill[]) => {
             const optional = { ...background.snapshot.optional, activatedSkills: active.map(item => item.instructions).join("\n\n") || undefined };
@@ -357,7 +360,7 @@ export class AgentRuntime {
         const resources = new SkillResources(skills, workspace);
         const load: SkillLoader = async (request, execution) => {
           try {
-            const releaseRead = await this.writes.acquireRead(workspace.root, execution.signal);
+            const releaseRead = await turnWrites.acquireRead(workspace.root, execution.signal);
             const { activation } = await skills.resolve(request.name, request.arguments, execution.signal).finally(releaseRead);
             if (activation.definition.mode === "shared") { skills.activate(activation); return successfulToolResult({ name: request.name, instructions: activation.instructions, generation: skills.snapshot().generation }); }
             if (++isolatedCount > 4) throw new SkillError("capacity", "本回合独立 Skill 调用最多 4 次。");
@@ -377,14 +380,14 @@ export class AgentRuntime {
                 const childConfig = resolveRuntimeProvider(context, activation.definition.model ?? binding.providerId);
                 return createIsolatedSkillSession({ child, config: childConfig,
                   provider: requestBudget.wrap(this.options.createProvider?.(childConfig) ?? createChatProvider(childConfig),childConfig.maxOutputTokens),
-                  sandbox: this.options.sandbox, workspace, catalog, activation, modelIds, parentTools, externalTools, readMemory,
-                  options: { ...common, permissionGatewayForMode: gatewayForMode } });
+                  sandbox, workspace, catalog, activation, modelIds, parentTools, externalTools, readMemory,
+                  options: { ...common, writes: this.writes, permissionGatewayForMode: gatewayForMode } });
               } }));
             },{acquire:async ownedSignal=>{workspaceLease=await this.writes.acquireTask(workspace.root,access,ownedSignal);},close:async()=>{workspaceLease?.release(cleanupFailed?"failed":"complete");}}).catch(error=>isolatedSignal.aborted ? toolFailure(execution.signal.aborted?"cancelled":"timeout","独立 Skill 等待或执行预算已结束。") : skillFailure(error,execution.signal));
           } catch (error) { return skillFailure(error, execution.signal); }
         };
-        const delegation=createDelegationTool({requestBudget,parentExecution,verifyRead:(path,execution)=>readOutputArtifact({path,context:execution,gateway:gatewayForMode(input.mode),writes:this.writes,tools:async()=>{const current=(await this.options.store.load(input.conversationId)).skills?.active??[];return new Set(combinedRegistry.descriptors().map(t=>t.name).filter(name=>skills.active().every(active=>active.definition.allowedTools.includes(name))&&current.every(active=>active.definition.allowedTools.includes(name))));}}),childResults:this.options.store.childResults,readMemory,tasks:this.tasks,limits:subLimits,scope:taskScope,turnId:runtimeTurnId,workspace,contextManager,parentStore:this.options.store,toolDescriptors:()=>combinedRegistry.descriptors(),currentTools:async()=>{const current=(await this.options.store.load(input.conversationId)).skills?.active??[];return new Set(combinedRegistry.descriptors().map(t=>t.name).filter(name=>skills.active().every(active=>active.definition.allowedTools.includes(name))&&current.every(active=>active.definition.allowedTools.includes(name))));},catalog:signal=>loadAgentCatalog({workspaceRoot:workspace.root,userRoot:this.options.userConfigRoot??userConfigurationRoot(),signal}),skills:catalog,active:()=>skills.active(),parentTools:()=>new Set(combinedRegistry.descriptors().map(t=>t.name).filter(name=>skills.active().every(active=>active.definition.allowedTools.includes(name)))),modelIds,parentConfig:providerConfig,resolveConfig:id=>resolveRuntimeProvider(context,id),provider:config=>this.options.createProvider?.(config)??createChatProvider(config),parentIterations:context.maxIterations==="unlimited"?32:context.maxIterations,parentRuntimeMs:context.maxRuntimeMs,mode:input.mode,parentMode:this.options.permissions.getSession(input.permissionSessionId).mode,rules:parentRules,currentPermissions:async()=>({agentMode:this.activeModes.get(input.conversationId)??(await this.options.store.load(input.conversationId)).mode,mode:this.options.permissions.getSession(input.permissionSessionId).mode,rules:(await loadPermissionRules({workspaceRoot:workspace.root,toolTargets,...(this.options.permissionLocations?{locations:this.options.permissionLocations(workspace.root)}:{})})).rules}),sandbox:this.options.sandbox,optional:background.snapshot.optional,environment:common.promptEnvironment,writes:this.writes,runLog:{sink:this.options.log,source:input.source,conversationId:input.conversationId,providerId:binding.providerId,workspaceId:binding.workspace.id,revisionBefore:input.expectedRevision},initialize:async(gateway,signal,deadlineAt,leases)=>{const ownLeases:McpConnectionLease[]=[];try{const generator=initializeMcpWorkspace({writes:this.writes,workspaceRoot:workspace.root,mode:input.mode,signal,deadlineMs:deadlineAt,load:loadMcp,manager:mcpManager,gateway,leases:ownLeases});for(;;){const next=await generator.next();if(next.done)return next.value;}}finally{leases.push(...ownLeases);}}});
-        const combinedRegistry: ToolRegistry = createDefaultToolRegistry(this.options.sandbox, readContext, managedProcesses, [...externalTools, delegation, createLoadSkillTool(load), createReadSkillResourceTool(resources)], readMemory, knowledgeReader);
+        const delegation=createDelegationTool({toolFailurePolicy: context.managedSettings?.toolFailurePolicy,requestBudget,parentExecution,verifyRead:(path,execution)=>readOutputArtifact({path,context:execution,gateway:gatewayForMode(input.mode),writes:turnWrites,tools:async()=>{const current=(await this.options.store.load(input.conversationId)).skills?.active??[];return new Set(combinedRegistry.descriptors().map(t=>t.name).filter(name=>skills.active().every(active=>active.definition.allowedTools.includes(name))&&current.every(active=>active.definition.allowedTools.includes(name))));}}),childResults:this.options.store.childResults,readMemory,tasks:this.tasks,limits:subLimits,scope:taskScope,turnId:runtimeTurnId,workspace,contextManager,parentStore:this.options.store,toolDescriptors:()=>combinedRegistry.descriptors(),currentTools:async()=>{const current=(await this.options.store.load(input.conversationId)).skills?.active??[];return new Set(combinedRegistry.descriptors().map(t=>t.name).filter(name=>skills.active().every(active=>active.definition.allowedTools.includes(name))&&current.every(active=>active.definition.allowedTools.includes(name))));},catalog:signal=>loadAgentCatalog({workspaceRoot:workspace.root,userRoot:this.options.userConfigRoot??userConfigurationRoot(),signal}),skills:catalog,active:()=>skills.active(),parentTools:()=>new Set(combinedRegistry.descriptors().map(t=>t.name).filter(name=>skills.active().every(active=>active.definition.allowedTools.includes(name)))),modelIds,parentConfig:providerConfig,resolveConfig:id=>resolveRuntimeProvider(context,id),provider:config=>this.options.createProvider?.(config)??createChatProvider(config),parentIterations:context.maxIterations==="unlimited"?32:context.maxIterations,parentRuntimeMs:context.maxRuntimeMs,mode:input.mode,parentMode:this.options.permissions.getSession(input.permissionSessionId).mode,rules:parentRules,currentPermissions:async()=>({agentMode:this.activeModes.get(input.conversationId)??(await this.options.store.load(input.conversationId)).mode,mode:this.options.permissions.getSession(input.permissionSessionId).mode,rules:(await loadPermissionRules({workspaceRoot:workspace.root,toolTargets,...(this.options.permissionLocations?{locations:this.options.permissionLocations(workspace.root)}:{})})).rules}),sandbox,optional:background.snapshot.optional,environment:common.promptEnvironment,writes:this.writes,runLog:{sink:this.options.log,source:input.source,conversationId:input.conversationId,providerId:binding.providerId,workspaceId:binding.workspace.id,revisionBefore:input.expectedRevision},initialize:async(gateway,signal,deadlineAt,leases)=>{const ownLeases:McpConnectionLease[]=[];try{const generator=initializeMcpWorkspace({writes:this.writes,workspaceRoot:workspace.root,mode:input.mode,signal,deadlineMs:deadlineAt,load:loadMcp,manager:mcpManager,gateway,leases:ownLeases});for(;;){const next=await generator.next();if(next.done)return next.value;}}finally{leases.push(...ownLeases);}}});
+        const combinedRegistry: ToolRegistry = createDefaultToolRegistry(sandbox, readContext, managedProcesses, [...externalTools, delegation, createLoadSkillTool(load), createReadSkillResourceTool(resources)], readMemory, knowledgeReader);
         const agent = createAgentSession({ provider, registry: combinedRegistry, workspace, skills, resources, restrict:access=>new ParentExecutionPolicy(access,parentExecution), options: { ...common, contextManager, completionTracker, permissionGatewayForMode: gatewayForMode } });
         const command = parseSkillCommand(input.input);
         if (command && parentExecution.mode==="delegate-only") throw new SkillError("invalid-arguments", "仅委派模式不能直接执行父级 Skill，请由子任务加载或切换协作模式。");

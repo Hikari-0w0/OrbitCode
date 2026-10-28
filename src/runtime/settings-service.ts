@@ -1,5 +1,9 @@
 import { parseKnowledgeConfig, publicKnowledgeConfig } from "@/runtime/knowledge/config";
+import { parseCommandSecurity } from "@/tools/command-security";
+import { resolveSandboxReadRoots } from "@/tools/sandbox-read-roots";
+import { resolveSandboxWritableRoots } from "@/tools/sandbox-writable-roots";
 import { parseSubAgentLimits, type SubAgentLimits } from "@/core/sub-agents/types";
+import { isToolFailurePolicy, type ToolFailurePolicy } from "@/core/tool-failure-policy";
 import { MAX_MODEL_OUTPUT_TOKENS, type ModelThinkingConfig } from "@/models/provider";
 import { randomUUID } from "node:crypto";
 import type { AgentIterationLimit } from "@/core/agent-events";
@@ -21,12 +25,16 @@ import {
 } from "@/core/context/types";
 import { EMPTY_SETTINGS, SettingsError, type ManagedMcpServer, type ManagedProvider, type ManagedSettings, type ManagedWorkspace, type PublicSettings, type StoredCredential } from "@/runtime/settings-types";
 
+import { isReasoningEffort, type ModelReasoningEffort } from "@/models/reasoning-effort";
+
 type ProviderAdvancedSettings = {
   readonly maxOutputTokens?: number | null;
   readonly thinking?: ModelThinkingConfig | null;
+  readonly reasoningEffort?: ModelReasoningEffort | null;
 };
 
 export type SettingsAction =
+  | { readonly type: "command-security-set"; readonly config: unknown }
   | { readonly type: "knowledge-set"; readonly id: string; readonly config: unknown }
   | ({ readonly type: "provider-add"; readonly displayName: string; readonly model: string; readonly baseUrl: string; readonly windowTokens: number; readonly credential: StoredCredential } & ProviderAdvancedSettings)
   | ({ readonly type: "provider-edit"; readonly id: string; readonly displayName?: string; readonly model?: string; readonly baseUrl?: string; readonly windowTokens?: number; readonly credential?: StoredCredential } & ProviderAdvancedSettings)
@@ -40,7 +48,7 @@ export type SettingsAction =
   | { readonly type: "mcp-upsert"; readonly name: string; readonly scope: "user" | "workspace"; readonly workspaceId?: string; readonly config: McpServerConfig }
   | { readonly type: "mcp-enable"; readonly name: string; readonly scope: "user" | "workspace"; readonly workspaceId?: string; readonly enabled: boolean }
   | { readonly type: "mcp-remove"; readonly name: string; readonly scope: "user" | "workspace"; readonly workspaceId?: string }
-  | { readonly type: "preferences-set"; readonly subAgents?: SubAgentLimits; readonly maxIterations: AgentIterationLimit; readonly maxRuntimeMinutes: number; readonly defaultPermissionMode: "strict" | "default" | "permissive" };
+  | { readonly type: "preferences-set"; readonly toolFailurePolicy?: ToolFailurePolicy; readonly subAgents?: SubAgentLimits; readonly maxIterations: AgentIterationLimit; readonly maxRuntimeMinutes: number; readonly defaultPermissionMode: "strict" | "default" | "permissive" };
 
 export class SettingsService {
   constructor(readonly store = new LocalSettingsStore()) {}
@@ -74,6 +82,20 @@ export class SettingsService {
     if (settings.revision !== expectedRevision) throw new SettingsError("conflict", "设置已更新，请刷新后重试。");
     let next: ManagedSettings;
     switch (action.type) {
+      case "command-security-set": {
+        try {
+          const commandSecurity = parseCommandSecurity(action.config);
+          await resolveSandboxReadRoots(commandSecurity.readOnlyRoots, this.store.directory);
+          await resolveSandboxWritableRoots(commandSecurity.writableRoots, this.store.directory, commandSecurity.readOnlyRoots);
+          for (const workspace of settings.workspaces) {
+            await resolveSandboxReadRoots(commandSecurity.readOnlyRoots, workspace.rootPath);
+            await resolveSandboxWritableRoots(commandSecurity.writableRoots, workspace.rootPath, commandSecurity.readOnlyRoots);
+          }
+          next = { ...settings, commandSecurity };
+        }
+        catch (error) { throw new SettingsError("invalid", error instanceof Error ? error.message : "命令安全配置无效。"); }
+        break;
+      }
       case "knowledge-set": {
         if (!settings.workspaces.some(item=>item.id===action.id && item.enabled)) throw missing();
         const previous=settings.workspaces.find(item=>item.id===action.id)?.knowledge;
@@ -101,6 +123,7 @@ export class SettingsService {
         next = { ...settings, providers: settings.providers.map((item) => item.id === action.id
           ? { ...changed, context: { ...item.context, windowTokens: changed.context.windowTokens },
             ...advancedSettings({ maxOutputTokens: action.maxOutputTokens === undefined ? item.maxOutputTokens : action.maxOutputTokens,
+              reasoningEffort: action.reasoningEffort === undefined ? item.reasoningEffort : action.reasoningEffort,
               thinking: action.thinking === undefined ? item.thinking : action.thinking }, changed.context.windowTokens), ...(item.transport ? { transport: item.transport } : {}), enabled: clearing ? false : item.enabled }
           : item), defaultProviderId: clearing && settings.defaultProviderId === action.id
           ? settings.providers.find((item) => item.id !== action.id && item.enabled)?.id : settings.defaultProviderId };
@@ -163,6 +186,7 @@ export class SettingsService {
         break;
       }
       case "preferences-set": {
+        if (action.toolFailurePolicy !== undefined && !isToolFailurePolicy(action.toolFailurePolicy)) throw new SettingsError("invalid", "工具失败策略无效。");
         if ((action.maxIterations !== "unlimited" && (!Number.isSafeInteger(action.maxIterations) || action.maxIterations < 1 || action.maxIterations > 32)) ||
           !Number.isSafeInteger(action.maxRuntimeMinutes) || action.maxRuntimeMinutes < 1 || action.maxRuntimeMinutes > 1440 ||
           !["strict", "default", "permissive"].includes(action.defaultPermissionMode))
@@ -170,7 +194,7 @@ export class SettingsService {
         let subAgents: SubAgentLimits | undefined;
         try { subAgents=action.subAgents===undefined?undefined:parseSubAgentLimits(action.subAgents); } catch { throw new SettingsError("invalid","子 Agent 预算配置无效。"); }
         next = { ...settings, maxIterations: action.maxIterations, maxRuntimeMinutes: action.maxRuntimeMinutes,
-          defaultPermissionMode: action.defaultPermissionMode, ...(subAgents ? { subAgents } : {}) };
+          defaultPermissionMode: action.defaultPermissionMode, ...(action.toolFailurePolicy === undefined ? {} : { toolFailurePolicy: action.toolFailurePolicy }), ...(subAgents ? { subAgents } : {}) };
         break;
       }
     }
@@ -250,9 +274,12 @@ function nonempty(value: unknown, max: number): value is string { return typeof 
 function missing(): SettingsError { return new SettingsError("unavailable", "所选配置不存在或已停用。"); }
 function safeEndpoint(source: string): string { try { const url = new URL(source); return `${url.protocol}//${url.host}`; } catch { return "地址无效"; } }
 
-function advancedSettings(input: ProviderAdvancedSettings, windowTokens: number): Pick<ManagedProvider, "maxOutputTokens" | "thinking"> {
+function advancedSettings(input: ProviderAdvancedSettings, windowTokens: number): Pick<ManagedProvider, "maxOutputTokens" | "thinking" | "reasoningEffort"> {
   const maxOutputTokens = input.maxOutputTokens ?? undefined;
   const thinking = input.thinking ?? undefined;
+  const reasoningEffort = input.reasoningEffort ?? undefined;
+  if (reasoningEffort !== undefined && !isReasoningEffort(reasoningEffort))
+    throw new SettingsError("invalid", "推理深度只支持 low、high 或 max。");
   if (maxOutputTokens !== undefined && (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > Math.min(MAX_MODEL_OUTPUT_TOKENS, windowTokens)))
     throw new SettingsError("invalid", "最大输出 Tokens 必须为正整数，且不超过上下文窗口和 1048576。");
   if (thinking !== undefined && (typeof thinking.enabled !== "boolean" ||
@@ -260,5 +287,5 @@ function advancedSettings(input: ProviderAdvancedSettings, windowTokens: number)
     (thinking.apiStyle !== undefined && thinking.apiStyle !== "siliconflow" && thinking.apiStyle !== "deepseek") ||
     (thinking.budgetTokens !== undefined && (!thinking.enabled || thinking.apiStyle === "deepseek" || !Number.isSafeInteger(thinking.budgetTokens) || thinking.budgetTokens < 128 || thinking.budgetTokens > 32768))))
     throw new SettingsError("invalid", "思考模式或思考预算无效；DeepSeek 不支持单独的思考预算。");
-  return { maxOutputTokens, thinking };
+  return { maxOutputTokens, thinking, reasoningEffort };
 }

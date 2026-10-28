@@ -33,6 +33,38 @@ export class WorkspaceExecutionCoordinator implements WorkspaceWriteCoordinator 
     return this.acquirePermit(root, "read-only", signal);
   }
 
+  createExecutionScope(): WorkspaceWriteCoordinator & { acquireRead(root: string, signal: AbortSignal): Promise<() => void> } {
+    const held = new Map<string, { references: number; release: () => void }>();
+    const acquire = async (root: string, access: TaskWorkspaceAccess, signal: AbortSignal): Promise<() => void> => {
+      signal.throwIfAborted();
+      // 独立子任务仍按自己的所有权校验，不能借父轮作用域升级只读许可。
+      if (this.ownership.getStore()) return this.acquirePermit(root, access, signal);
+      let permit = held.get(root);
+      if (!permit && access === "read-only") return this.acquireRead(root, signal);
+      if (!permit) {
+        const release = await this.acquire(root, signal);
+        permit = { references: 0, release };
+        held.set(root, permit);
+      }
+      const owned = permit;
+      owned.references++;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        // 服务与后续验证命令共享本轮许可，最后一个使用者退出才允许其他任务进入。
+        if (--owned.references === 0) {
+          held.delete(root);
+          owned.release();
+        }
+      };
+    };
+    return {
+      acquire: (root, signal) => acquire(root, "exclusive", signal),
+      acquireRead: (root, signal) => acquire(root, "read-only", signal),
+    };
+  }
+
   async acquireTask(root: string, access: TaskWorkspaceAccess, signal: AbortSignal): Promise<TaskWorkspaceLease> {
     if (this.ownership.getStore()) throw new Error("独立任务不能嵌套持有工作区许可。");
     const release = await this.acquirePermit(root, access, signal);

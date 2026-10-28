@@ -28,7 +28,7 @@ export async function assessChildOutput(contract: ChildOutputContract, read: (pa
 // 验收不执行模型提供的命令；只经现有工具、动态能力、父权限及工作区协调重读声明文件。
 type ArtifactReadInput = {
   readonly path: string; readonly context: ToolExecutionContext; readonly tools: () => Promise<ReadonlySet<string>>;
-  readonly gateway: PermissionGateway; readonly writes: WorkspaceExecutionCoordinator;
+  readonly gateway: PermissionGateway; readonly writes: Pick<WorkspaceExecutionCoordinator, "acquireRead">;
 };
 
 export async function readOutputArtifact(input: ArtifactReadInput): Promise<ToolExecutionResult> {

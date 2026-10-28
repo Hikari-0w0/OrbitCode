@@ -140,6 +140,23 @@ export type ReadLimits = {
   readonly maxBytes: number;
 };
 
+export type ReadRangeLimits = {
+  readonly startLine: number;
+  readonly endLine: number;
+  readonly maxScanBytes: number;
+  readonly maxOutputBytes: number;
+  readonly signal: AbortSignal;
+};
+
+// 分段内容不具有可替换整文件的快照身份。
+export type TextFileRangeSnapshot = {
+  readonly path: ResolvedWorkspacePath;
+  readonly content: string;
+  readonly byteLength: number;
+  readonly sha256: string;
+  readonly range: FileLineRange;
+};
+
 export interface WorkspaceBoundary {
   readonly root: string;
   resolveExistingFile(path: string): Promise<ResolvedWorkspacePath>;
@@ -147,6 +164,7 @@ export interface WorkspaceBoundary {
   resolveWriteTarget(path: string): Promise<ResolvedWorkspacePath>;
   walk(options: WalkOptions): AsyncIterable<WorkspaceEntry>;
   readTextFile(path: string, limits: ReadLimits): Promise<TextFileSnapshot>;
+  readTextFileRange(path: string, limits: ReadRangeLimits): Promise<TextFileRangeSnapshot>;
   atomicWrite(target: ResolvedWorkspacePath, content: string): Promise<void>;
   replaceSnapshot(snapshot: TextFileSnapshot, content: string): Promise<void>;
 }
@@ -172,6 +190,7 @@ export type ToolExecutionContext = {
 };
 
 export type ToolPathResolution =
+  | "existing-path"
   | "existing-file"
   | "existing-directory"
   | "write-target";

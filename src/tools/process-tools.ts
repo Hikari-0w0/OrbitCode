@@ -5,6 +5,7 @@ import {
 } from "@/tools/managed-process";
 import { defineTool, successfulToolResult } from "@/tools/registry";
 import {
+  enumSchema,
   integerSchema,
   objectSchema,
   optionalSchema,
@@ -12,6 +13,7 @@ import {
 } from "@/tools/schema";
 import { toolFailure, type ToolExecutionResult, type ToolInputSchema } from "@/tools/types";
 import { WORKSPACE_RELATIVE_PATH_DESCRIPTION } from "@/tools/workspace-path";
+import type { CommandSecuritySettings } from "@/tools/command-security";
 
 type StartProcessInput = {
   readonly command: string;
@@ -20,35 +22,38 @@ type StartProcessInput = {
   readonly ready_timeout_ms?: number;
 };
 
-const baseStartProcessSchema = objectSchema({
-  command: stringSchema({ minLength: 1, maxLength: 8 * 1024 }),
-  cwd: optionalSchema(stringSchema({
-    minLength: 1,
-    maxLength: 1_024,
-    description: WORKSPACE_RELATIVE_PATH_DESCRIPTION,
-  })),
-  ready_port: optionalSchema(integerSchema({ minimum: 1, maximum: 65_535 })),
-  ready_timeout_ms: optionalSchema(integerSchema({ minimum: 100, maximum: 30_000 })),
-});
+function createStartProcessSchema(security: CommandSecuritySettings): ToolInputSchema<StartProcessInput> {
+  const baseStartProcessSchema = objectSchema({
+    command: stringSchema({ minLength: 1, maxLength: security.maxCommandChars }),
+    cwd: optionalSchema(stringSchema({
+      minLength: 1,
+      maxLength: 1024,
+      description: WORKSPACE_RELATIVE_PATH_DESCRIPTION,
+    })),
+    ready_port: optionalSchema(integerSchema({ minimum: 1, maximum: 65_535 })),
+    ready_timeout_ms: optionalSchema(integerSchema({ minimum: 100, maximum: security.maxReadyTimeoutMs })),
+  });
 
-const startProcessSchema: ToolInputSchema<StartProcessInput> = {
-  jsonSchema: baseStartProcessSchema.jsonSchema,
-  parse(value) {
-    const parsed = baseStartProcessSchema.parse(value);
-    if (!parsed.ok) return parsed;
-    const issues = preflightCommand(parsed.value);
-    return issues.length === 0
-      ? { ok: true, value: parsed.value }
-      : { ok: false, issues };
-  },
-};
+  return {
+    jsonSchema: baseStartProcessSchema.jsonSchema,
+    parse(value) {
+      const parsed = baseStartProcessSchema.parse(value);
+      if (!parsed.ok) return parsed;
+      const issues = preflightCommand(parsed.value, security.commandPreflight);
+      return issues.length === 0
+        ? { ok: true, value: parsed.value }
+        : { ok: false, issues };
+    },
+  };
+}
 
 export function createProcessTools(controller: ManagedProcessController) {
+  const security = controller.security;
   const startProcessTool = defineTool({
     name: "start_process",
     description:
-      "在严格沙箱中启动本轮临时进程；本轮完成、取消或失败后会自动关闭，不能承诺最终回复后预览仍可访问。ready_port 在启动前已被占用时拒绝启动；启动后的端口探测仅证明 loopback TCP 可连接，不证明进程归属、HTTP 内容或应用功能。应根据实际任务选择后续验证。仅成功返回的 processId 可用于 process_status/stop_process，调用或证据 ID 不是 process_id。",
-    inputSchema: startProcessSchema,
+      `在授权沙箱中启动本轮临时进程，最多${security.maxProcesses}个，每个进程日志保留${security.processLogBytes}字节；默认就绪等待${security.defaultReadyTimeoutMs}ms，最长${security.maxReadyTimeoutMs}ms。本轮命令网络${security.network === "allow" ? "允许" : "禁止"}，格式预检${security.commandPreflight === "off" ? "关闭" : "启用"}。本轮完成、取消或失败后会自动关闭，不能承诺最终回复后预览仍可访问。ready_port 在启动前已被占用时拒绝启动；启动后的端口探测仅证明 loopback TCP 可连接，不证明进程归属、HTTP 内容或应用功能。应根据实际任务选择后续验证。仅成功返回的 processId 可用于 process_status/stop_process，调用或证据 ID 不是 process_id。`,
+    inputSchema: createStartProcessSchema(security),
     mutability: "command",
     permission: {
       targetKind: "command",
@@ -78,19 +83,22 @@ export function createProcessTools(controller: ManagedProcessController) {
   const processStatusTool = defineTool({
     name: "process_status",
     description:
-      "读取本轮受管进程的状态和 cursor 之后的增量 stdout/stderr；不会访问其他运行或系统进程。",
+      "读取本轮受管进程状态和cursor之后的增量日志。wait_ms可等待最多60秒，wait_for=exit等待退出、output等待新日志；安装/构建请等待已有进程，避免用sleep轮询或重复启动同一安装。超时返回当前状态，不代表进程失败；不会访问其他运行或系统进程。",
     inputSchema: objectSchema({
       process_id: stringSchema({ minLength: 1, maxLength: 128 }),
       cursor: optionalSchema(integerSchema({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
+      wait_ms: optionalSchema(integerSchema({ minimum: 0, maximum: 60000 })),
+      wait_for: optionalSchema(enumSchema(["output", "exit"])),
     }),
+    budget: "parent-run",
     mutability: "read-only",
     permission: {
       targetKind: "context",
       resolve: (input) => ({ kind: "context", reference: input.process_id }),
     },
-    async execute(input) {
+    async execute(input, context) {
       try {
-        return successfulToolResult(controller.status(input.process_id, input.cursor));
+        return successfulToolResult(await controller.waitStatus(input.process_id, input.cursor ?? 0, input.wait_ms ?? 0, input.wait_for ?? "output", context.signal));
       } catch (error) {
         return processFailure(error);
       }

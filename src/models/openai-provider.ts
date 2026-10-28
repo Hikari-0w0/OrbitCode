@@ -11,7 +11,9 @@ import {
   type ModelToolCall,
   type PromptCacheUsage,
 } from "@/models/provider";
+import { defaultReasoningEffort, isReasoningEffort, type ModelReasoningEffort } from "@/models/reasoning-effort";
 import { parseServerSentEvents, SseError } from "@/models/sse";
+import { parseRetryAfter, providerRetryDelayMs } from "@/models/provider-retry";
 import {
   MAX_TOOL_ARGUMENTS_JSON_CHARS,
   type ModelToolDefinition,
@@ -29,6 +31,7 @@ type OpenAIProviderOptions = {
   readonly apiKey: string;
   readonly maxOutputTokens?: number;
   readonly thinking?: ModelThinkingConfig;
+  readonly reasoningEffort?: ModelReasoningEffort;
   readonly transport?: ProviderTransportPolicy;
   readonly fetchImplementation?: typeof fetch;
 };
@@ -69,6 +72,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
   private readonly apiKey: string;
   private readonly maxOutputTokens?: number;
   private readonly thinking?: ModelThinkingConfig;
+  private readonly reasoningEffort?: ModelReasoningEffort;
   private readonly transport: ProviderTransportPolicy;
   private readonly fetchImplementation: typeof fetch;
 
@@ -78,6 +82,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     apiKey,
     maxOutputTokens,
     thinking,
+    reasoningEffort,
     transport = DEFAULT_PROVIDER_TRANSPORT_POLICY,
     fetchImplementation = fetch,
   }: OpenAIProviderOptions) {
@@ -89,6 +94,10 @@ export class OpenAICompatibleProvider implements ChatProvider {
     }
     this.maxOutputTokens = maxOutputTokens;
     this.thinking = thinking;
+    if (reasoningEffort !== undefined && !isReasoningEffort(reasoningEffort)) {
+      throw new ProviderError("protocol", "推理深度只支持 low、high 或 max。");
+    }
+    this.reasoningEffort = reasoningEffort ?? defaultReasoningEffort(model);
     this.transport = transport;
     this.fetchImplementation = fetchImplementation;
   }
@@ -127,7 +136,9 @@ export class OpenAICompatibleProvider implements ChatProvider {
         ) {
           throw error;
         }
-        await abortableDelay(Math.min(100 * attempt, 500), options.signal);
+        const delayMs = providerRetryDelayMs(attempt, error.retryAfterMs);
+        if (delayMs === undefined) throw error;
+        await abortableDelay(delayMs, options.signal);
       }
     }
   }
@@ -179,6 +190,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
           stream_options: { include_usage: true },
           tool_choice: options.toolChoice,
           ...thinkingRequestFields(this.thinking),
+          ...(this.reasoningEffort === undefined ? {} : { reasoning_effort: this.reasoningEffort }),
           ...(tools.length > 0
             ? { tools, parallel_tool_calls: true }
             : {}),
@@ -219,9 +231,13 @@ export class OpenAICompatibleProvider implements ChatProvider {
 
     if (!response.ok) {
       options.signal.removeEventListener("abort", abortRequest);
+      // 错误正文不进入日志；先释放响应，避免等待重试时占用连接。
+      requestController.abort();
+      void response.body?.cancel().catch(() => undefined);
       throw new ProviderError("http", `模型服务返回 HTTP ${response.status}。`, {
         status: response.status,
         traceId,
+        retryAfterMs: parseRetryAfter(response.headers.get("retry-after")),
         retryable: response.status === 408 || response.status === 429 || response.status >= 500,
       });
     }

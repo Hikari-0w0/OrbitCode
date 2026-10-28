@@ -8,6 +8,30 @@ import { loadProviderContext, resolveRuntimeProvider, summarizeProviders } from 
 import { SettingsService } from "@/runtime/settings-service";
 import { loadWorkspaceCatalog, resolveWorkspaceBoundary } from "@/runtime/workspace-config";
 
+test("推理深度保存、编辑保留、清除及运行快照隔离", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-reasoning-"));
+  try {
+    const store = new LocalSettingsStore(root), service = new SettingsService(store);
+    const created = await service.apply(0, { type: "provider-add", displayName: "GLM", model: "glm-5.3", baseUrl: "https://example.invalid/v1",
+      windowTokens: 128000, credential: { kind: "local", value: "synthetic-key" }, reasoningEffort: "high" });
+    const id = created.providers[0].id;
+    const snapshot = resolveRuntimeProvider(await loadProviderContext(root, {}, undefined, false, store, false), id);
+    assert.equal(snapshot.reasoningEffort, "high");
+    const edited = await service.apply(1, { type: "provider-edit", id, displayName: "改名" });
+    assert.equal(edited.providers[0].reasoningEffort, "high");
+    const low = await service.apply(2, { type: "provider-edit", id, reasoningEffort: "low" });
+    assert.equal(low.providers[0].reasoningEffort, "low");
+    assert.equal(snapshot.reasoningEffort, "high");
+    const stored = await store.load();
+    assert.ok(stored);
+    for (const value of ["medium", "none", true, 5, {}]) {
+      assert.throws(() => validateSettings({ ...stored, providers: stored.providers.map(provider => ({ ...provider, reasoningEffort: value })) }));
+    }
+    const cleared = await service.apply(3, { type: "provider-edit", id, reasoningEffort: null });
+    assert.equal(cleared.providers[0].reasoningEffort, undefined);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("不限轮数可保存并进入两端运行快照，切回有限值不改变旧快照", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "orbitcode-unlimited-settings-"));
   try {

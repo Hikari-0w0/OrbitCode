@@ -10,6 +10,9 @@ const TOOL_KIND_STOP_THRESHOLD = 5;
 const TOTAL_SWITCH_THRESHOLD = 4;
 const TOTAL_STOP_THRESHOLD = 7;
 
+import { isToolFailurePolicy, type ToolFailurePolicy } from "@/core/tool-failure-policy";
+export type { ToolFailurePolicy } from "@/core/tool-failure-policy";
+
 export type ToolFailureBudgetDecision =
   | { readonly action: "continue" }
   | { readonly action: "switch"; readonly guidance: string }
@@ -19,6 +22,10 @@ export class ToolFailureBudget {
   readonly #exactFailures = new Map<string, number>();
   readonly #toolKindFailures = new Map<string, number>();
   #consecutiveFailures = 0;
+
+  constructor(private readonly policy: ToolFailurePolicy = "strict") {
+    if (!isToolFailurePolicy(policy)) throw new Error("工具失败策略无效。");
+  }
 
   observe(
     call: ModelToolCall,
@@ -49,9 +56,9 @@ export class ToolFailureBudget {
     this.#consecutiveFailures += 1;
 
     if (
-      exactCount >= EXACT_STOP_THRESHOLD ||
-      toolKindCount >= TOOL_KIND_STOP_THRESHOLD ||
-      this.#consecutiveFailures >= TOTAL_STOP_THRESHOLD
+      this.policy !== "warn" && (exactCount >= EXACT_STOP_THRESHOLD ||
+      (this.policy === "strict" && (toolKindCount >= TOOL_KIND_STOP_THRESHOLD ||
+      this.#consecutiveFailures >= TOTAL_STOP_THRESHOLD)))
     ) {
       return {
         action: "stop",
@@ -85,7 +92,10 @@ export class ToolFailureBudget {
 
 function increment(counts: Map<string, number>, key: string): number {
   const next = (counts.get(key) ?? 0) + 1;
+  counts.delete(key);
   counts.set(key, next);
+  const oldest = counts.keys().next().value;
+  if (counts.size > 512 && oldest !== undefined) counts.delete(oldest);
   return next;
 }
 

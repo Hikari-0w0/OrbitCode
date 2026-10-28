@@ -53,7 +53,7 @@ export async function runOnce(options: {
   const loadWorkspaces = (context?: Awaited<ReturnType<typeof loadConfig>>) => loadWorkspaceCatalog({ cwd, settingsStore,
     ...(context ? { managedSettings: context.managedSettings ?? null } : {}) });
   const runtime = new AgentRuntime({ userConfigRoot: userConfigurationRoot(dataDir), store, manager, guard, permissions, log,
-    sandbox: createCommandSandbox(environment), loadConfig, loadWorkspaces,
+    sandbox: createCommandSandbox(environment), createSandbox: context => createCommandSandbox(environment, process.platform, context.managedSettings?.commandSecurity), loadConfig, loadWorkspaces,
     loadMcp: async (workspaceRoot, context) => loadMcpConfig({ workspaceRoot, environment: context.environment,
       managedSettings: context.managedSettings ?? null, settingsStore,
       ...(dataDir ? { userHome: dataDir } : {}) }),

@@ -4,13 +4,15 @@ import type { CommandSandbox, CommandSandboxOptions } from "@/tools/command-sand
 import { LinuxBubblewrapCommandSandbox } from "@/tools/linux-bubblewrap-sandbox";
 import { MacOsSeatbeltCommandSandbox } from "@/tools/macos-seatbelt-sandbox";
 import { SandboxUnavailableError } from "@/tools/sandbox-error";
+import { parseCommandSecurity, type CommandSecuritySettings } from "@/tools/command-security";
 
 export function createCommandSandbox(
   environment: Environment = process.env,
   platform: NodeJS.Platform = process.platform,
+  security?: CommandSecuritySettings,
 ): CommandSandbox {
   try {
-    const options = sandboxOptions(environment);
+    const options = sandboxOptions(environment, security);
     if (platform === "darwin") return new MacOsSeatbeltCommandSandbox(options);
     if (platform === "linux") return new LinuxBubblewrapCommandSandbox(options);
     return unavailableSandbox(`平台 ${platform} 尚无命令沙箱后端。`);
@@ -19,16 +21,17 @@ export function createCommandSandbox(
   }
 }
 
-function sandboxOptions(environment: Environment): CommandSandboxOptions {
-  const network = environment.ORBITCODE_SANDBOX_NETWORK ?? "allow";
+function sandboxOptions(environment: Environment, security?: CommandSecuritySettings): CommandSandboxOptions {
+  const settings = parseCommandSecurity(security);
+  const network = environment.ORBITCODE_SANDBOX_NETWORK ?? settings.network;
   if (network !== "allow" && network !== "deny") throw new Error("ORBITCODE_SANDBOX_NETWORK 必须为 allow 或 deny。");
   let roots: unknown;
-  try { roots = JSON.parse(environment.ORBITCODE_SANDBOX_READ_ROOTS ?? "[]"); }
+  try { roots = environment.ORBITCODE_SANDBOX_READ_ROOTS === undefined ? settings.readOnlyRoots : JSON.parse(environment.ORBITCODE_SANDBOX_READ_ROOTS); }
   catch { throw new Error("ORBITCODE_SANDBOX_READ_ROOTS 必须为合法 JSON 数组。"); }
   if (!Array.isArray(roots) || !roots.every((root: unknown): root is string => typeof root === "string" && path.isAbsolute(root) && !root.includes("\0"))) {
     throw new Error("ORBITCODE_SANDBOX_READ_ROOTS 必须为绝对目录路径的 JSON 数组。");
   }
-  return { network, readOnlyRoots: roots.map(root => path.normalize(root)) };
+  return { ...settings, network, readOnlyRoots: roots.map(root => path.normalize(root)) };
 }
 
 function unavailableSandbox(message: string): CommandSandbox {

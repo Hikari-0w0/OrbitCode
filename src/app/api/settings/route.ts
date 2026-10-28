@@ -1,4 +1,7 @@
+import { isToolFailurePolicy } from "@/core/tool-failure-policy";
 import { parseSubAgentLimits } from "@/core/sub-agents/types";
+import { parseCommandSecurity } from "@/tools/command-security";
+import { isReasoningEffort, type ModelReasoningEffort } from "@/models/reasoning-effort";
 import type { ModelThinkingConfig } from "@/models/provider";
 import { reconcileWebMcpSettings } from "@/web/settings-mcp";
 import { webSettingsStore } from "@/web/storage-paths";
@@ -49,18 +52,25 @@ function parsePayload(value: unknown): { expectedRevision: number; action: Setti
   if (Object.keys(value).some((key) => !["expectedRevision", "action"].includes(key))) throw new SettingsError("invalid", "设置请求含未知字段。");
   const action = value.action;
   const fields: Readonly<Record<string, readonly string[]>> = {
+    "command-security-set": ["config"],
     "knowledge-set": ["id", "config"],
-    "provider-add": ["displayName", "model", "baseUrl", "windowTokens", "credential", "maxOutputTokens", "thinking"],
-    "provider-edit": ["id", "displayName", "model", "baseUrl", "windowTokens", "credential", "maxOutputTokens", "thinking"],
+    "provider-add": ["displayName", "model", "baseUrl", "windowTokens", "credential", "maxOutputTokens", "thinking", "reasoningEffort"],
+    "provider-edit": ["id", "displayName", "model", "baseUrl", "windowTokens", "credential", "maxOutputTokens", "thinking", "reasoningEffort"],
     "provider-enable": ["id", "enabled"], "provider-default": ["id"],
     "workspace-add": ["name", "rootPath"], "workspace-rename": ["id", "name"], "workspace-enable": ["id", "enabled"],
     "workspace-default": ["id"], "workspace-remove": ["id"],
     "mcp-upsert": ["name", "scope", "workspaceId", "config"], "mcp-enable": ["name", "scope", "workspaceId", "enabled"],
-    "mcp-remove": ["name", "scope", "workspaceId"], "preferences-set": ["maxIterations", "maxRuntimeMinutes", "defaultPermissionMode", "subAgents"],
+    "mcp-remove": ["name", "scope", "workspaceId"], "preferences-set": ["maxIterations", "maxRuntimeMinutes", "defaultPermissionMode", "subAgents", "toolFailurePolicy"],
   };
   if (typeof action.type !== "string" || !Object.hasOwn(fields, action.type) || Object.keys(action).some((key) => key !== "type" && !fields[String(action.type)].includes(key)))
     throw new SettingsError("invalid", "设置操作含未知字段。");
   switch (action.type) {
+    case "command-security-set":
+      if (action.config !== undefined) {
+        try { return { expectedRevision: Number(value.expectedRevision), action: { type: "command-security-set", config: parseCommandSecurity(action.config) } }; }
+        catch { throw new SettingsError("invalid", "命令安全配置无效。"); }
+      }
+      break;
     case "knowledge-set":
       if(typeof action.id === "string") return {expectedRevision:Number(value.expectedRevision),action:{type:"knowledge-set",id:action.id,config:action.config}};
       break;
@@ -111,10 +121,11 @@ function parsePayload(value: unknown): { expectedRevision: number; action: Setti
           : { type: "mcp-enable", name: action.name, scope: action.scope, ...(action.workspaceId ? { workspaceId: action.workspaceId } : {}), enabled: action.enabled as boolean } };
       break;
     case "preferences-set":
+      if (action.toolFailurePolicy !== undefined && !isToolFailurePolicy(action.toolFailurePolicy)) throw new SettingsError("invalid", "工具失败策略无效。");
       if ((typeof action.maxIterations === "number" || action.maxIterations === "unlimited") && typeof action.maxRuntimeMinutes === "number" &&
         (action.defaultPermissionMode === "strict" || action.defaultPermissionMode === "default" || action.defaultPermissionMode === "permissive"))
         return { expectedRevision: Number(value.expectedRevision), action: { type: "preferences-set", maxIterations: action.maxIterations,
-          maxRuntimeMinutes: action.maxRuntimeMinutes, defaultPermissionMode: action.defaultPermissionMode, ...(action.subAgents===undefined?{}:{subAgents:parseWebSubAgentLimits(action.subAgents)}) } };
+          maxRuntimeMinutes: action.maxRuntimeMinutes, defaultPermissionMode: action.defaultPermissionMode, ...(isToolFailurePolicy(action.toolFailurePolicy)?{toolFailurePolicy:action.toolFailurePolicy}:{}), ...(action.subAgents===undefined?{}:{subAgents:parseWebSubAgentLimits(action.subAgents)}) } };
       break;
   }
   throw new SettingsError("invalid", "设置操作或字段无效。");
@@ -137,9 +148,12 @@ function failure(error: unknown, headers?: Headers): Response {
     { status, headers: headers ?? { "cache-control": "no-store" } });
 }
 
-function advanced(action: Record<string, unknown>): { maxOutputTokens?: number | null; thinking?: ModelThinkingConfig | null } {
+function advanced(action: Record<string, unknown>): { maxOutputTokens?: number | null; thinking?: ModelThinkingConfig | null; reasoningEffort?: ModelReasoningEffort | null } {
   if (action.maxOutputTokens !== undefined && action.maxOutputTokens !== null && typeof action.maxOutputTokens !== "number")
     throw new SettingsError("invalid", "最大输出 Tokens 类型无效。");
+  const reasoningEffort = action.reasoningEffort;
+  if (reasoningEffort !== undefined && reasoningEffort !== null && !isReasoningEffort(reasoningEffort))
+    throw new SettingsError("invalid", "推理深度只支持 low、high 或 max。");
   const value = action.thinking;
   let thinking: ModelThinkingConfig | null | undefined;
   if (value === null) thinking = null;
@@ -153,6 +167,7 @@ function advanced(action: Record<string, unknown>): { maxOutputTokens?: number |
       ...(typeof value.budgetTokens === "number" ? { budgetTokens: value.budgetTokens } : {}) };
   }
   return { ...(typeof action.maxOutputTokens === "number" || action.maxOutputTokens === null ? { maxOutputTokens: action.maxOutputTokens } : {}),
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     ...(thinking === undefined ? {} : { thinking }) };
 }
 

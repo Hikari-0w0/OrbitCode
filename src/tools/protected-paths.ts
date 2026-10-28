@@ -19,15 +19,15 @@ const PROTECTED_RELATIVE_PATHS = new Set([
   ".orbitcode/permissions.local.yaml",
 ]);
 
-export function isProtectedPath(relativePath: string): boolean {
+export function isProtectedPath(relativePath: string, environmentFileAccess: "blocked" | "allow" = "blocked"): boolean {
   if (PROTECTED_RELATIVE_PATHS.has(relativePath)) return true;
   const segments = relativePath.split("/").filter(Boolean);
-  return segments.some((segment) => isProtectedName(segment));
+  return segments.some((segment) => isProtectedName(segment, environmentFileAccess));
 }
 
-export function isProtectedName(name: string): boolean {
+export function isProtectedName(name: string, environmentFileAccess: "blocked" | "allow" = "blocked"): boolean {
   if (name === ".env.example") return false;
-  if (name === ".env" || name.startsWith(".env.")) return true;
+  if (name === ".env" || name.startsWith(".env.")) return environmentFileAccess !== "allow";
   if (PROTECTED_NAMES.has(name)) return true;
   return PROTECTED_EXTENSIONS.has(path.extname(name).toLowerCase());
 }

@@ -488,6 +488,55 @@ test("首字节超时会在语义输出前重试并保留 SiliconFlow trace", as
   }
 });
 
+test("HTTP429 遵守 Retry-After 后恢复，每次尝试仍通过请求接纳", async () => {
+  const times: number[] = [];
+  const attempts: number[] = [];
+  const server = await startOpenAIMockServer(() => {
+    times.push(Date.now());
+    return times.length === 1 ? { status: 429, headers: { "retry-after": "1" }, chunks: [{ data: "synthetic-busy-body" }] } : { chunks: [{ data: DONE_EVENT }] };
+  });
+  try {
+    const provider = new OpenAICompatibleProvider({ model: "generic-model", baseUrl: server.baseUrl, apiKey: "synthetic-key" });
+    const events = await collect(provider.stream([], { signal: new AbortController().signal, toolChoice: "none", beforeRequest: attempt => { attempts.push(attempt); } }));
+    assert.deepEqual(attempts, [1, 2]);
+    assert.ok(times[1] - times[0] >= 950);
+    assert.deepEqual(events, [{ type: "done", finishReason: "stop" }]);
+  } finally { await server.close(); }
+});
+
+test("退避等待可取消，不再发请求或泄漏 HTTP 错误正文", async () => {
+  const controller = new AbortController();
+  let requests = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const provider = new OpenAICompatibleProvider({ model: "generic-model", baseUrl: "https://example.test/v1", apiKey: "synthetic-key", fetchImplementation: async () => {
+    requests++;
+    timer = setTimeout(() => controller.abort(), 20);
+    return new Response("synthetic-private-body", { status: 429, headers: { "retry-after": "60" } });
+  } });
+  try {
+    await assert.rejects(collect(provider.stream([], { signal: controller.signal, toolChoice: "none" })), (error: unknown) => error instanceof ProviderError && error.kind === "cancelled" && !error.message.includes("synthetic-private-body"));
+    assert.equal(requests, 1);
+  } finally { clearTimeout(timer); }
+});
+
+test("不可恢复 HTTP 与超长 Retry-After 不自动重试，重试上限仍生效", async () => {
+  for (const status of [401, 429, 503]) {
+    let requests = 0;
+    const provider = new OpenAICompatibleProvider({ model: "generic-model", baseUrl: "https://example.test/v1", apiKey: "synthetic-key", fetchImplementation: async () => {
+      requests++;
+      return new Response("synthetic-body", { status, headers: { "retry-after": "120" } });
+    } });
+    await assert.rejects(collect(provider.stream([], { signal: new AbortController().signal, toolChoice: "none" })), (error: unknown) => error instanceof ProviderError && error.status === status);
+    assert.equal(requests, 1);
+  }
+  let requests = 0;
+  const provider = new OpenAICompatibleProvider({ model: "generic-model", baseUrl: "https://example.test/v1", apiKey: "synthetic-key", transport: { firstByteTimeoutMs: 1000, idleTimeoutMs: 1000, totalTimeoutMs: 1000, maxRetries: 1 }, fetchImplementation: async () => {
+    requests++; return new Response("busy", { status: 503 });
+  } });
+  await assert.rejects(collect(provider.stream([], { signal: new AbortController().signal, toolChoice: "none" })), ProviderError);
+  assert.equal(requests, 2);
+});
+
 test("响应流总超时保留结构化超时原因", async () => {
   const server = await startOpenAIMockServer(() => ({
     chunks: [

@@ -17,7 +17,7 @@ export const webAgentRuntime = new AgentRuntime({
   mcpConnections: webMcpHost(),
   store: localConversationStore, manager: conversationRuntimeManager,
   guard: conversationOperationGuard, permissions: permissionSessionManager,
-  sandbox: createCommandSandbox(), log: localAgentRunLog,
+  sandbox: createCommandSandbox(), createSandbox: context => createCommandSandbox(process.env, process.platform, context.managedSettings?.commandSecurity), log: localAgentRunLog,
   loadConfig: loadWebProviderContext,
   loadWorkspaces: (context) => loadWorkspaceCatalog({ managedSettings: context.managedSettings ?? null }),
   loadMcp: async (workspaceRoot, context) => loadMcpConfig({ workspaceRoot, environment: context.environment,

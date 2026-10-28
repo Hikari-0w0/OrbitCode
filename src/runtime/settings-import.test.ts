@@ -46,14 +46,16 @@ test("输出预算在导入、保存、编辑和运行快照间保持一致", as
   const root = await mkdtemp(path.join(tmpdir(), "orbitcode-output-budget-"));
   const store = new LocalSettingsStore(path.join(root, "data"));
   try {
-    await writeFile(path.join(root, "orbitcode.yaml"), legacyModel.replace("    context:", "    max_tokens: 32768\n    context:"));
+    await writeFile(path.join(root, "orbitcode.yaml"), legacyModel.replace("    context:", "    max_tokens: 32768\n    reasoning_effort: high\n    context:"));
     const preview = await previewLegacySettings({ cwd: root, userHome: root, environment: {} });
     const saved = await commitLegacySettings({ previewId: preview.previewId, expectedRevision: 0,
       cwd: root, userHome: root, environment: {}, store });
     assert.equal(saved.providers[0].maxOutputTokens, 32768);
+    assert.equal(saved.providers[0].reasoningEffort, "high");
     await new SettingsService(store).apply(1, { type: "provider-edit", id: "primary", displayName: "新名称" });
     const snapshot = await loadProviderContext(root, {}, undefined, false, store, false);
     assert.equal(snapshot.providers[0].maxOutputTokens, 32768);
+    assert.equal(snapshot.providers[0].reasoningEffort, "high");
     const settings = await store.load();
     assert.ok(settings);
     for (const maxOutputTokens of [0, 1.5, 1_048_577, 128001]) {

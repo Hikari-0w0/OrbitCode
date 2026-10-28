@@ -14,7 +14,7 @@ import {
 } from "@/core/errors";
 import { CompletionTracker } from "@/core/completion-tracker";
 import { scheduleToolCalls, type ToolCallResult } from "@/core/tool-scheduler";
-import { ToolFailureBudget } from "@/core/tool-failure-budget";
+import { ToolFailureBudget, type ToolFailurePolicy } from "@/core/tool-failure-budget";
 import {
   ProviderError,
   type AssistantMessage,
@@ -73,6 +73,8 @@ export class AgentLoop implements AgentSession {
   private readonly writes?: import("@/tools/types").WorkspaceWriteCoordinator;
   private readonly now: () => number;
   private readonly completionTracker: CompletionTracker;
+  private readonly toolFailurePolicy: ToolFailurePolicy;
+  private readonly commandTimeoutMs?: number;
 
   constructor(
     private readonly provider: ChatProvider,
@@ -80,6 +82,8 @@ export class AgentLoop implements AgentSession {
     private readonly workspace: WorkspaceBoundary,
     options: {
       readonly childBudgetReminder?: boolean;
+      readonly toolFailurePolicy?: ToolFailurePolicy;
+      readonly commandTimeoutMs?: number;
       readonly childExecutionFacts?: () => string;
       readonly maxIterations: AgentIterationLimit;
       readonly maxRuntimeMs?: number;
@@ -100,6 +104,8 @@ export class AgentLoop implements AgentSession {
     assertMaxAgentIterations(options.maxIterations);
     assertMaxAgentRuntime(options.maxRuntimeMs ?? DEFAULT_MAX_AGENT_RUNTIME_MS);
     this.childExecutionFacts = options.childExecutionFacts;
+    this.toolFailurePolicy = options.toolFailurePolicy ?? "strict";
+    this.commandTimeoutMs = options.commandTimeoutMs;
     this.consumeChildResults = options.consumeChildResults;
     this.writes = options.writes;
     this.childBudgetReminder = options.childBudgetReminder ?? false;
@@ -167,7 +173,7 @@ export class AgentLoop implements AgentSession {
     const permissionGateway = this.permissionGatewayForMode?.(options.mode);
     let completedIterations = 0;
     let consecutiveUnknownIterations = 0;
-    const toolFailureBudget = new ToolFailureBudget();
+    const toolFailureBudget = new ToolFailureBudget(this.toolFailurePolicy);
     let sideEffect: SideEffectState = "none";
     let cumulativeUsage: TokenUsage | undefined;
     let contextTurnActive = false;
@@ -233,8 +239,9 @@ export class AgentLoop implements AgentSession {
         const reviewMessages = iterationReviewMessages(iteration, this.childBudgetReminder ? "unlimited" : this.maxIterations);
         const finiteReview = this.maxIterations !== "unlimited" && !this.childBudgetReminder;
         const reviewSuffix: readonly ConversationMessage[] = finiteReview ? reviewMessages : [];
-        const periodicReview = finiteReview ? [] : reviewMessages;
-        const promptEnvelope = { systemMessages: [...systemMessages, ...periodicReview], tools: toolDefinitions, suffixMessages: [...budgetMessages, ...reviewSuffix] } as const;
+        const periodicReview = [...this.completionTracker.reviewMessages(), ...(finiteReview ? [] : reviewMessages)];
+        // 动态事实放在历史之后，避免每轮更新使稳定历史前缀失去复用机会。
+        const promptEnvelope = { systemMessages, tools: toolDefinitions, suffixMessages: [...periodicReview, ...budgetMessages, ...reviewSuffix] } as const;
         const modelMessages = this.contextManager
           ? (await this.contextManager.prepareForModel(
               promptEnvelope,
@@ -401,6 +408,7 @@ export class AgentLoop implements AgentSession {
         let completedTools = 0;
         let orderedResults: readonly ToolCallResult[] = [];
         for await (const event of scheduleToolCalls({
+          commandTimeoutMs: this.commandTimeoutMs,
           writes: this.writes,
           calls,
           access,

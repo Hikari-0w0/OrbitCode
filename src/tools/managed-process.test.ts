@@ -16,6 +16,45 @@ import {
   ManagedProcessError,
 } from "@/tools/managed-process";
 import { createWorkspaceBoundary } from "@/tools/workspace";
+import { parseCommandSecurity } from "@/tools/command-security";
+
+test("进程状态等待返回增量输出和退出，取消等待不终止仍运行的进程", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "orbitcode-process-wait-"));
+  const controller = new ManagedProcessController(new TestProcessSandbox(), await createWorkspaceBoundary(root));
+  try {
+    const process = await controller.start({ command: "sleep 0.05; printf first; sleep 0.15; printf last", signal: new AbortController().signal });
+    const first = await controller.waitStatus(process.processId, 0, 1000, "output", new AbortController().signal);
+    assert.equal(first.status, "running");
+    assert.match(first.logs.map(chunk => chunk.text).join(""), /first/);
+    const finished = await controller.waitStatus(process.processId, first.nextCursor, 1000, "exit", new AbortController().signal);
+    assert.equal(finished.status, "exited");
+    assert.equal(finished.exit?.exitCode, 0);
+    assert.equal(finished.logs.map(chunk => chunk.text).join(""), "last");
+    const pending = await controller.start({ command: "sleep 5", signal: new AbortController().signal });
+    const signal = new AbortController();
+    const waiting = controller.waitStatus(pending.processId, 0, 1000, "exit", signal.signal);
+    signal.abort();
+    await assert.rejects(waiting, error => error instanceof ManagedProcessError && error.kind === "cancelled");
+    assert.equal(controller.status(pending.processId).status, "running");
+    const timed = await controller.waitStatus(pending.processId, 0, 5, "exit", new AbortController().signal);
+    assert.equal(timed.status, "running");
+  } finally { await controller.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("受管进程数量与日志容量读取沙箱配置，扩容后仍回收全部进程", async () => {
+  const root=await mkdtemp(path.join(tmpdir(),"orbitcode-managed-config-"));
+  const workspace=await createWorkspaceBoundary(root);
+  class ConfiguredSandbox extends TestProcessSandbox { readonly security=parseCommandSecurity({maxProcesses:2,processLogBytes:1024}); }
+  const controller=new ManagedProcessController(new ConfiguredSandbox(),workspace);
+  try {
+    const first=await controller.start({command:`printf '${"x".repeat(2048)}'; sleep 5`,signal:new AbortController().signal});
+    await controller.start({command:"sleep 5",signal:new AbortController().signal});
+    await assert.rejects(controller.start({command:"sleep 5",signal:new AbortController().signal}),error=>error instanceof ManagedProcessError&&error.kind==="limit");
+    const deadline=Date.now()+2000;
+    while(!controller.status(first.processId).logs.length&&Date.now()<deadline)await delay(10);
+    const status=controller.status(first.processId);assert.equal(status.truncated,true);assert.ok(status.logs.reduce((sum,chunk)=>sum+Buffer.byteLength(chunk.text),0)<=1024);
+  }finally{await controller.close();await rm(root,{recursive:true,force:true});}
+});
 
 test("受管进程等待本机端口、分页读取日志并可停止", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "orbitcode-managed-process-"));

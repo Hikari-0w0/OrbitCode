@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants as fileSystemConstants } from "node:fs";
 import {
   access,
@@ -12,6 +12,7 @@ import {
   rmdir,
   rm,
   stat,
+  type FileHandle,
 } from "node:fs/promises";
 import path from "node:path";
 import { compileGlob } from "@/tools/glob";
@@ -20,8 +21,10 @@ import { isProtectedPath } from "@/tools/protected-paths";
 import type {
   FileIdentity,
   ReadLimits,
+  ReadRangeLimits,
   ResolvedWorkspacePath,
   TextFileSnapshot,
+  TextFileRangeSnapshot,
   WalkOptions,
   WorkspaceBoundary,
   WorkspaceEntry,
@@ -41,6 +44,7 @@ const DEFAULT_IGNORED_DIRECTORIES = new Set([
 export class WorkspaceError extends Error {
   readonly kind:
     | "invalid-path"
+    | "invalid-range"
     | "not-found"
     | "not-file"
     | "not-directory"
@@ -224,6 +228,27 @@ class LocalWorkspaceBoundary implements WorkspaceBoundary {
 
   async atomicWrite(target: ResolvedWorkspacePath, content: string): Promise<void> {
     await this.commit(target, content, target.identity);
+  }
+
+  async readTextFileRange(input: string, limits: ReadRangeLimits): Promise<TextFileRangeSnapshot> {
+    if (![limits.startLine, limits.endLine, limits.maxScanBytes, limits.maxOutputBytes].every(value => Number.isSafeInteger(value) && value > 0) || limits.endLine < limits.startLine) {
+      throw new WorkspaceError("invalid-range", "分段读取范围和容量必须有效。");
+    }
+    assertNotAborted(limits.signal);
+    const resolved = await this.resolveExistingFile(input);
+    const identity = resolved.identity;
+    if (!identity) throw new WorkspaceError("execution-failed", "文件身份缺失。");
+    if (identity.size > limits.maxScanBytes) throw new WorkspaceError("limit-exceeded", "文件超过分段读取的扫描容量。");
+    const handle = await open(resolved.absolutePath, fileSystemConstants.O_RDONLY | fileSystemConstants.O_NOFOLLOW).catch(error => { throw mapFileError(error, "无法打开文件。"); });
+    try {
+      if (!sameIdentity(identity, identityOf(await handle.stat()))) throw new WorkspaceError("conflict", "文件在打开前发生变化。");
+      const result = await scanTextRange(handle, limits);
+      const after = await this.resolveExistingFile(input);
+      if (after.absolutePath !== resolved.absolutePath || !after.identity || !sameIdentity(identity, after.identity) || !sameIdentity(identity, identityOf(await handle.stat()))) {
+        throw new WorkspaceError("conflict", "文件在读取期间发生变化。");
+      }
+      return { ...result, path: resolved, byteLength: identity.size };
+    } finally { await handle.close(); }
   }
 
   async replaceSnapshot(snapshot: TextFileSnapshot, content: string): Promise<void> {
@@ -483,4 +508,47 @@ function assertNotAborted(signal: AbortSignal): void {
 
 function comparePaths(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+async function scanTextRange(handle: FileHandle, limits: ReadRangeLimits): Promise<Omit<TextFileRangeSnapshot, "path" | "byteLength">> {
+  const buffer = Buffer.alloc(64 * 1024);
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const hash = createHash("sha256");
+  const selected: string[] = [];
+  let scanned = 0;
+  let outputBytes = 0;
+  let line = 1;
+  let endsWithNewline = false;
+  const consume = (text: string): void => {
+    hash.update(text);
+    for (const part of text.match(/[^\n]*\n|[^\n]+$/gu) ?? []) {
+      if (line >= limits.startLine && line <= limits.endLine) {
+        outputBytes += Buffer.byteLength(part, "utf8");
+        if (outputBytes > limits.maxOutputBytes) throw new WorkspaceError("limit-exceeded", "所选行超过返回容量，请缩小读取范围。");
+        selected.push(part);
+      }
+      endsWithNewline = part.endsWith("\n");
+      if (endsWithNewline) line++;
+    }
+  };
+  for (;;) {
+    assertNotAborted(limits.signal);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, scanned);
+    if (!bytesRead) break;
+    scanned += bytesRead;
+    if (scanned > limits.maxScanBytes) throw new WorkspaceError("limit-exceeded", "文件超过分段读取的扫描容量。");
+    let text: string;
+    try { text = decoder.decode(buffer.subarray(0, bytesRead), { stream: true }); }
+    catch (error) { throw new WorkspaceError("unsupported-content", "文件不是有效的 UTF-8 文本。", error); }
+    consume(text);
+  }
+  let tail: string;
+  try { tail = decoder.decode(); }
+  catch (error) { throw new WorkspaceError("unsupported-content", "文件不是有效的 UTF-8 文本。", error); }
+  consume(tail);
+  assertNotAborted(limits.signal);
+  const totalLines = Math.max(1, line - (endsWithNewline ? 1 : 0));
+  if (limits.startLine > totalLines) throw new WorkspaceError("invalid-range", `起始行超过文件总行数 ${totalLines}。`);
+  const endLine = Math.min(limits.endLine, totalLines);
+  return { content: selected.join(""), sha256: hash.digest("hex"), range: { startLine: limits.startLine, endLine, totalLines, complete: limits.startLine === 1 && endLine === totalLines } };
 }

@@ -19,6 +19,7 @@ import type {
   ProviderTransportPolicy,
 } from "@/models/provider";
 import { MAX_MODEL_OUTPUT_TOKENS } from "@/models/provider";
+import { isReasoningEffort, type ModelReasoningEffort } from "@/models/reasoning-effort";
 
 const PROVIDER_FIELDS = new Set([
   "name",
@@ -30,6 +31,7 @@ const PROVIDER_FIELDS = new Set([
   "transport",
   "context",
   "max_tokens",
+  "reasoning_effort",
 ]);
 const THINKING_FIELDS = new Set(["enabled", "budget_tokens", "api_style"]);
 const TRANSPORT_FIELDS = new Set([
@@ -65,6 +67,7 @@ export type ProviderConfig = {
   readonly baseUrl: string;
   readonly apiKeyEnvironmentVariable: string;
   readonly thinking?: ModelThinkingConfig;
+  readonly reasoningEffort?: ModelReasoningEffort;
   readonly transport?: ProviderTransportPolicy;
   readonly context: ContextPolicyConfig;
   readonly maxOutputTokens?: number;
@@ -225,6 +228,10 @@ function validateProvider(value: unknown, index: number): ProviderConfig {
       `${location}.api_key 必须是环境变量名称，不能是密钥或模板。`,
     );
   }
+  const reasoningEffort = value.reasoning_effort;
+  if (reasoningEffort !== undefined && !isReasoningEffort(reasoningEffort)) {
+    throw invalidConfig(`${location}.reasoning_effort 只支持 low、high 或 max。`);
+  }
   const thinking = validateThinking(value.thinking, `${location}.thinking`);
   const transport = validateTransport(value.transport, `${location}.transport`);
   const context = validateContext(value.context, `${location}.context`);
@@ -238,6 +245,7 @@ function validateProvider(value: unknown, index: number): ProviderConfig {
     baseUrl,
     apiKeyEnvironmentVariable,
     ...(thinking === undefined ? {} : { thinking }),
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     ...(transport === undefined ? {} : { transport }),
     context,
     ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
