@@ -12,7 +12,8 @@ import {
   type PromptCacheUsage,
 } from "@/models/provider";
 import { defaultReasoningEffort, isReasoningEffort, type ModelReasoningEffort } from "@/models/reasoning-effort";
-import { parseServerSentEvents, SseError } from "@/models/sse";
+import { parseServerSentEventMessages, SseError } from "@/models/sse";
+import { describeProviderFrame, providerStreamErrorStatus } from "@/models/provider-failure";
 import { parseRetryAfter, providerRetryDelayMs } from "@/models/provider-retry";
 import {
   MAX_TOOL_ARGUMENTS_JSON_CHARS,
@@ -113,30 +114,36 @@ export class OpenAICompatibleProvider implements ChatProvider {
     },
   ): AsyncIterable<ModelStreamEvent> {
     for (let attempt = 1; ; attempt += 1) {
-      let semanticOutput = false;
+      let responseCommitted = false;
+      const attemptStartedAt = performance.now();
+      let lastProgress: Extract<ModelStreamEvent, { type: "request-progress" }> | undefined;
       try {
         for await (const event of this.streamAttempt(messages, options, attempt)) {
+          if (event.type === "request-progress") lastProgress = event;
           if (
             event.type === "reasoning-delta" ||
             event.type === "text-delta" ||
-            event.type === "tool-call"
+            event.type === "tool-call" ||
+            event.type === "done"
           ) {
-            semanticOutput = true;
+            // 完成事件即使没有正文，也会让调用方进入终态，之后不能重放请求。
+            responseCommitted = true;
           }
           yield event;
         }
         return;
       } catch (error) {
-        if (
-          !(error instanceof ProviderError) ||
-          !error.retryable ||
-          semanticOutput ||
-          options.signal.aborted ||
-          attempt > this.transport.maxRetries
-        ) {
-          throw error;
-        }
-        const delayMs = providerRetryDelayMs(attempt, error.retryAfterMs);
+        if (!(error instanceof ProviderError) || error.kind === "cancelled" || options.signal.aborted) throw error;
+        const delayMs = error.retryable && !responseCommitted && !options.signal.aborted && attempt <= this.transport.maxRetries
+          ? providerRetryDelayMs(attempt, error.retryAfterMs) : undefined;
+        yield {
+          ...(lastProgress ?? { type: "request-progress", stage: "waiting-first-byte", elapsedMs: 0, attempt }),
+          elapsedMs: Math.max(lastProgress?.elapsedMs ?? 0, Math.round(performance.now() - attemptStartedAt)),
+          failure: { kind: error.kind, retryable: error.retryable, action: delayMs === undefined ? "stop" : "retry",
+            ...(error.status === undefined ? {} : { status: error.status }),
+            ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
+            ...(error.frame === undefined ? {} : { frame: error.frame }) },
+        };
         if (delayMs === undefined) throw error;
         await abortableDelay(delayMs, options.signal);
       }
@@ -256,9 +263,10 @@ export class OpenAICompatibleProvider implements ChatProvider {
     let transportFinished = false;
     let latestUsage: ModelTokenUsage | undefined;
     let reasoningContentLength = 0;
+    let eventIndex = 0;
 
     try {
-      for await (const data of parseServerSentEvents(readResponseBody(
+      for await (const frame of parseServerSentEventMessages(readResponseBody(
         response.body,
         {
           startedAt,
@@ -268,6 +276,8 @@ export class OpenAICompatibleProvider implements ChatProvider {
           traceId,
         },
       ))) {
+        const data = frame.data;
+        eventIndex += 1;
         if (options.signal.aborted) {
           throw new ProviderError("cancelled", "模型请求已取消。");
         }
@@ -285,7 +295,17 @@ export class OpenAICompatibleProvider implements ChatProvider {
           continue;
         }
 
-        const event = parseOpenAIEvent(data);
+        let event: ParsedEvent;
+        try { event = parseOpenAIEvent(data, frame.event === "error"); }
+        catch (error) {
+          if (!(error instanceof ProviderError)) throw error;
+          throw new ProviderError(error.kind, error.message, {
+            status: error.status, retryable: error.retryable,
+            retryAfterMs: error.retryAfterMs ?? parseRetryAfter(response.headers.get("retry-after")),
+            traceId, finishReason: error.finishReason,
+            frame: describeProviderFrame(data, eventIndex, frame.event === "error"),
+          });
+        }
         if (modelFinished && eventHasModelData(event)) {
           throw new ProviderError("protocol", "模型在完成原因之后仍返回了数据。");
         }
@@ -419,17 +439,22 @@ function toOpenAIMessage(message: ConversationMessage): Record<string, unknown> 
   };
 }
 
-function parseOpenAIEvent(data: string): ParsedEvent {
+function parseOpenAIEvent(data: string, serverError = false): ParsedEvent {
   let value: unknown;
   try {
     value = JSON.parse(data);
-  } catch (error) {
+  } catch {
     throw new ProviderError("protocol", "模型服务返回了无效的 JSON 增量。", {
-      cause: error,
+      retryable: true,
     });
   }
+  if (serverError || (isRecord(value) && value.error !== undefined && value.error !== null)) {
+    const details = providerStreamErrorStatus(isRecord(value) && value.error !== undefined ? value.error : value);
+    throw new ProviderError(details.status === undefined ? "stream" : "http",
+      details.status === undefined ? "模型服务在响应流中返回错误。" : `模型服务在响应流中返回 HTTP ${details.status} 错误。`, details);
+  }
   if (!isRecord(value) || !Array.isArray(value.choices)) {
-    throw new ProviderError("protocol", "模型服务返回了无效的增量结构。");
+    throw new ProviderError("protocol", "模型服务返回了无效的增量结构。", { retryable: true });
   }
 
   const usage = value.usage === undefined || value.usage === null
@@ -444,7 +469,7 @@ function parseOpenAIEvent(data: string): ParsedEvent {
 
   const choice = value.choices[0];
   if (!isRecord(choice) || !isRecord(choice.delta)) {
-    throw new ProviderError("protocol", "模型服务返回了无效的增量结构。");
+    throw new ProviderError("protocol", "模型服务返回了无效的增量结构。", { retryable: true });
   }
   const content = choice.delta.content;
   if (content !== undefined && content !== null && typeof content !== "string") {
@@ -760,6 +785,7 @@ async function* readResponseBody(
 ): AsyncIterable<Uint8Array> {
   const reader = body.getReader();
   let receivedFirstByte = false;
+  let completed = false;
   try {
     for (;;) {
       if (options.outerSignal.aborted) {
@@ -786,11 +812,15 @@ async function* readResponseBody(
         controller: options.controller,
         traceId: options.traceId,
       });
-      if (result.done) return;
+      if (result.done) { completed = true; return; }
       receivedFirstByte = true;
       yield result.value;
     }
   } finally {
+    if (!completed) {
+      options.controller.abort();
+      void reader.cancel().catch(() => undefined);
+    }
     reader.releaseLock();
   }
 }

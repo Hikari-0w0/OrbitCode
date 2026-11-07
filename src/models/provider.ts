@@ -1,4 +1,5 @@
 import type { ModelToolDefinition } from "@/tools/types";
+import type { ProviderFailure, ProviderFrameDiagnostic } from "@/models/provider-failure";
 
 export const MAX_MODEL_OUTPUT_TOKENS = 1_048_576;
 
@@ -81,6 +82,7 @@ export type ModelStreamEvent =
       readonly traceId?: string;
       readonly toolName?: string;
       readonly toolArgumentsChars?: number;
+      readonly failure?: ProviderFailure;
     }
   | { readonly type: "reasoning-delta"; readonly text: string }
   | { readonly type: "text-delta"; readonly text: string }
@@ -101,6 +103,7 @@ export type ProviderFailureKind =
   | "cancelled";
 
 export type ProviderErrorOptions = {
+  readonly frame?: ProviderFrameDiagnostic;
   readonly status?: number;
   readonly traceId?: string;
   readonly timeoutPhase?: ProviderTimeoutPhase;
@@ -111,6 +114,7 @@ export type ProviderErrorOptions = {
 };
 
 export class ProviderError extends Error {
+  readonly frame?: ProviderFrameDiagnostic;
   readonly kind: ProviderFailureKind;
   readonly status?: number;
   readonly traceId?: string;
@@ -127,6 +131,7 @@ export class ProviderError extends Error {
     super(message, { cause: options.cause });
     this.name = "ProviderError";
     this.kind = kind;
+    this.frame = options.frame;
     this.status = options.status;
     this.traceId = options.traceId;
     this.timeoutPhase = options.timeoutPhase;

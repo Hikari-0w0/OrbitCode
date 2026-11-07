@@ -9,6 +9,7 @@ import { createInterface } from "node:readline";
 
 import type { AgentMode, AgentStopReason } from "@/core/agent-events";
 import type { ModelRequestStage } from "@/models/provider";
+import { copyProviderFailure, isProviderFailure, type ProviderFailure } from "@/models/provider-failure";
 import type { SideEffectState } from "@/tools/types";
 
 export const DEFAULT_AGENT_RUN_LOG_DIRECTORY = path.join(
@@ -80,6 +81,7 @@ export type AgentRunLogEntry = {
 };
 
 export type AgentModelAttemptLog = {
+  readonly failure?: ProviderFailure;
   readonly iteration: number;
   readonly attempt: number;
   readonly stage: ModelRequestStage;
@@ -94,7 +96,7 @@ export interface AgentRunLogSink {
 }
 
 export type StoredAgentRunLogEntry = AgentRunLogEntry & {
-  readonly schemaVersion: 3 | 4 | 5 | 6;
+  readonly schemaVersion: 3 | 4 | 5 | 6 | 7;
 };
 
 export class AgentRunLogError extends Error {
@@ -179,7 +181,7 @@ export class LocalAgentRunLog implements AgentRunLogSink {
         }
         if (
           !isRecord(value) ||
-          (value.schemaVersion !== 3 && value.schemaVersion !== 4 && value.schemaVersion !== 5 && value.schemaVersion !== 6)
+          (value.schemaVersion !== 3 && value.schemaVersion !== 4 && value.schemaVersion !== 5 && value.schemaVersion !== 6 && value.schemaVersion !== 7)
         ) continue;
         yield parseStoredEntry(value);
       }
@@ -198,7 +200,7 @@ export class LocalAgentRunLog implements AgentRunLogSink {
 function toStoredEntry(entry: AgentRunLogEntry): StoredAgentRunLogEntry {
   if (entry.modelUsage !== undefined && !isModelUsageSummary(entry.modelUsage)) throw invalidRunLog();
   return {
-    schemaVersion: entry.modelUsage ? 6 : entry.initialization?.length ? 5 : 4,
+    schemaVersion: entry.modelAttempts?.some(attempt => attempt.failure !== undefined) ? 7 : entry.modelUsage ? 6 : entry.initialization?.length ? 5 : 4,
     ...(entry.modelUsage ? { modelUsage: { scope: entry.modelUsage.scope, categories: entry.modelUsage.categories.map(category => ({
       purpose: category.purpose, requests: category.requests, reportedRequests: category.reportedRequests,
       failedRequests: category.failedRequests, durationMs: category.durationMs,
@@ -238,6 +240,7 @@ function toStoredEntry(entry: AgentRunLogEntry): StoredAgentRunLogEntry {
         }
       : { availability: "unavailable" },
     modelAttempts: (entry.modelAttempts ?? []).map((attempt) => ({
+      ...(attempt.failure === undefined ? {} : { failure: copyProviderFailure(attempt.failure) }),
       iteration: attempt.iteration,
       attempt: attempt.attempt,
       stage: attempt.stage,
@@ -267,7 +270,7 @@ function toStoredEntry(entry: AgentRunLogEntry): StoredAgentRunLogEntry {
 function parseStoredEntry(value: unknown): StoredAgentRunLogEntry {
   if (
     !isRecord(value) ||
-    (value.schemaVersion !== 3 && value.schemaVersion !== 4 && value.schemaVersion !== 5 && value.schemaVersion !== 6)
+    (value.schemaVersion !== 3 && value.schemaVersion !== 4 && value.schemaVersion !== 5 && value.schemaVersion !== 6 && value.schemaVersion !== 7)
   ) {
     throw invalidRunLog();
   }
@@ -278,9 +281,9 @@ function parseStoredEntry(value: unknown): StoredAgentRunLogEntry {
   ];
   const optionalCommon = [
     "parentRunId", "parentCallId",
-    ...(value.schemaVersion === 6 ? ["modelUsage"] : []),
+    ...((value.schemaVersion === 6 || value.schemaVersion === 7) ? ["modelUsage"] : []),
     "firstModelOutputMs",
-    ...((value.schemaVersion === 5 || value.schemaVersion === 6) ? ["initialization"] : []),
+    ...((value.schemaVersion === 5 || value.schemaVersion === 6 || value.schemaVersion === 7) ? ["initialization"] : []),
     ...(value.schemaVersion === 3 ? ["modelAttempts"] : []),
   ];
   const versionFields = ["conversationId", "revisionBefore", "persistence"];
@@ -398,7 +401,7 @@ function isModelAttemptLog(value: unknown): boolean {
     hasAllowedFields(
       value,
       ["iteration", "attempt", "stage", "elapsedMs"],
-      ["traceId", "toolName", "toolArgumentsChars"],
+      ["traceId", "toolName", "toolArgumentsChars", "failure"],
     ) &&
     isNonNegativeInteger(value.iteration) &&
     isNonNegativeInteger(value.attempt) &&
@@ -415,6 +418,7 @@ function isModelAttemptLog(value: unknown): boolean {
       (typeof value.traceId === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(value.traceId))) &&
     (value.toolName === undefined ||
       (typeof value.toolName === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value.toolName))) &&
+    (value.failure === undefined || isProviderFailure(value.failure)) &&
     (value.toolArgumentsChars === undefined ||
       isNonNegativeInteger(value.toolArgumentsChars));
 }

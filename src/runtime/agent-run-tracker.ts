@@ -71,6 +71,9 @@ export class AgentRunTracker {
         attempt: event.model.attempt,
         stage: event.model.stage,
         elapsedMs: Math.max(previous?.elapsedMs ?? 0, event.model.elapsedMs),
+        ...(event.model.failure === undefined
+          ? previous?.failure === undefined ? {} : { failure: previous.failure }
+          : { failure: event.model.failure }),
         ...(event.model.traceId === undefined
           ? previous?.traceId === undefined ? {} : { traceId: previous.traceId }
           : { traceId: event.model.traceId }),

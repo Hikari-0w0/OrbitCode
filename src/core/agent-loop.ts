@@ -279,6 +279,7 @@ export class AgentLoop implements AgentSession {
                 ...(event.progress.toolArgumentsChars === undefined
                   ? {}
                   : { toolArgumentsChars: event.progress.toolArgumentsChars }),
+                ...(event.progress.failure === undefined ? {} : { failure: event.progress.failure }),
               },
             };
           } else if (event.type === "agent-text") {
@@ -651,7 +652,7 @@ export class AgentLoop implements AgentSession {
       if (signal.aborted) {
         throw new ProviderError("cancelled", "模型请求已取消。");
       }
-      if (completed && event.type !== "usage") {
+      if (completed && event.type !== "usage" && !(event.type === "request-progress" && event.failure !== undefined)) {
         throw new ProviderError("protocol", "模型在完成事件后仍返回了数据。");
       }
       if (event.type === "request-progress") {

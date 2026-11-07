@@ -8,6 +8,7 @@ import type {
   PromptCacheUsage,
 } from "@/models/provider";
 import type { SideEffectState, ToolExecutionResult } from "@/tools/types";
+import type { ProviderFailure } from "@/models/provider-failure";
 
 export type AgentMode = "plan" | "do";
 export type AgentIterationLimit = number | "unlimited";
@@ -50,6 +51,7 @@ export type BaseAgentEvent =
         readonly traceId?: string;
         readonly toolName?: string;
         readonly toolArgumentsChars?: number;
+        readonly failure?: ProviderFailure;
       };
       readonly completedTools?: number;
       readonly totalTools?: number;

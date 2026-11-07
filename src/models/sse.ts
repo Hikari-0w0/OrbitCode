@@ -8,6 +8,12 @@ export class SseError extends Error {
 export async function* parseServerSentEvents(
   chunks: AsyncIterable<Uint8Array>,
 ): AsyncIterable<string> {
+  for await (const event of parseServerSentEventMessages(chunks)) yield event.data;
+}
+
+export async function* parseServerSentEventMessages(
+  chunks: AsyncIterable<Uint8Array>,
+): AsyncIterable<{ readonly data: string; readonly event?: string }> {
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let buffer = "";
 
@@ -51,8 +57,9 @@ function findEventBoundary(
   return { index: match.index, length: match[0].length };
 }
 
-function parseEventBlock(eventBlock: string): string | undefined {
+function parseEventBlock(eventBlock: string): { readonly data: string; readonly event?: string } | undefined {
   const dataLines: string[] = [];
+  let event: string | undefined;
   const normalized = eventBlock.replace(/\r\n|\r/g, "\n");
 
   for (const line of normalized.split("\n")) {
@@ -62,16 +69,13 @@ function parseEventBlock(eventBlock: string): string | undefined {
 
     const separator = line.indexOf(":");
     const field = separator === -1 ? line : line.slice(0, separator);
-    if (field !== "data") {
-      continue;
-    }
-
     let value = separator === -1 ? "" : line.slice(separator + 1);
     if (value.startsWith(" ")) {
       value = value.slice(1);
     }
-    dataLines.push(value);
+    if (field === "data") dataLines.push(value);
+    else if (field === "event") event = value;
   }
 
-  return dataLines.length === 0 ? undefined : dataLines.join("\n");
+  return dataLines.length === 0 ? undefined : { data: dataLines.join("\n"), ...(event === undefined ? {} : { event }) };
 }

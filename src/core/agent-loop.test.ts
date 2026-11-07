@@ -11,6 +11,7 @@ import type {
   StoredContextReference,
 } from "@/core/context/types";
 import { AgentConfigurationError, ConversationStateError } from "@/core/errors";
+import { OpenAICompatibleProvider } from "@/models/openai-provider";
 import {
   ProviderError,
   type ChatProvider,
@@ -24,6 +25,7 @@ import { writeFilesTool } from "@/tools/write-files";
 import { objectSchema, stringSchema } from "@/tools/schema";
 import type { WorkspaceBoundary } from "@/tools/types";
 import { createWorkspaceBoundary } from "@/tools/workspace";
+import { startOpenAIMockServer } from "../../tests/helpers/openai-mock";
 
 class ScriptedProvider implements ChatProvider {
   readonly requests: Array<{
@@ -102,6 +104,31 @@ test("直接最终回复产生 Usage 和唯一停止事件并提交历史", asyn
     { role: "user", content: "问题" },
     { role: "assistant", content: "完成" },
   ]);
+});
+
+test("空内容完成后的异常帧保留原始模型错误，不重试或提交成功历史", async () => {
+  const server = await startOpenAIMockServer(() => ({ chunks: [{
+    data: 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: {"choices":[{"delta":null}]}\n\n',
+  }] }));
+  try {
+    const provider = new OpenAICompatibleProvider({
+      model: "fixture", baseUrl: server.baseUrl, apiKey: "fixture-key",
+      transport: { firstByteTimeoutMs: 2000, idleTimeoutMs: 2000, totalTimeoutMs: 5000, maxRetries: 1 },
+    });
+    const agent = createAgent(provider, registry(), 4);
+    const result = await collect(agent.streamTurn({
+      input: "问题", mode: "do", modeTurn: 1, signal: new AbortController().signal,
+    }));
+    assert.equal(server.requests.length, 1);
+    const stopped = result.filter(event => event.type === "stopped");
+    assert.equal(stopped.length, 1);
+    assert.equal(stopped[0].reason, "model-error");
+    assert.equal(stopped[0].detail, "模型服务返回了无效的增量结构。");
+    const failures = result.flatMap(event => event.type === "progress" && event.model?.failure ? [event.model.failure] : []);
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0].action, "stop");
+    assert.deepEqual(agent.getHistory(), []);
+  } finally { await server.close(); }
 });
 
 test("停止事件报告完整 Agent 运行耗时", async () => {
