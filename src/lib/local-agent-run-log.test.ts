@@ -3,6 +3,7 @@ import { appendFile, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { describeProviderFrame } from "@/models/provider-failure";
 
 import {
   LocalAgentRunLog,
@@ -98,6 +99,16 @@ test("本地运行日志以脱敏 JSONL 串行追加并收紧文件权限", asyn
     );
     assert.equal(JSON.stringify(entries).includes("不得落盘"), false);
     assert.equal((await stat(filePath)).mode & 0o777, 0o600);
+    const attempt = base.modelAttempts?.[0];
+    assert.ok(attempt);
+    const failure = { kind: "protocol", retryable: true, action: "retry", frame: describeProviderFrame('{"choices":[{"delta":null}],"private":"secret-frame"}', 2) } as const;
+    await logger.append({ ...base, runId: "run-diagnostic", modelAttempts: [{ ...attempt, failure }] });
+    const diagnostic = await logger.find("run-diagnostic");
+    assert.equal(diagnostic.schemaVersion, 7);
+    assert.deepEqual(diagnostic.modelAttempts?.[0].failure, failure);
+    assert.equal((await readFile(filePath, "utf8")).includes("secret-frame"), false);
+    const invalidFailure = { ...failure, message: "secret-frame" };
+    assert.throws(() => logger.append({ ...base, runId: "bad", modelAttempts: [{ ...attempt, failure: invalidFailure }] }), /诊断结构无效/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
