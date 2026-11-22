@@ -65,6 +65,7 @@ export type VisibleMessage = {
     readonly persistence?: StoppedEvent["persistence"];
 };
 type MessageListProps = {
+    readonly suggestionBudget?: number;
     readonly messages: readonly VisibleMessage[];
     readonly currentRunStartedAtMs?: number;
     readonly onSuggestion: (value: string) => void;
@@ -73,11 +74,11 @@ type MessageListProps = {
     readonly onExecutePlan: (messageId: string) => void;
 };
 const suggestions = [
-    "读取 README.md 并总结当前能力",
-    "查找 src 目录下的 TypeScript 文件",
-    "搜索代码中所有 ProviderError 的位置",
+    { title: "了解项目", prompt: "读取 README.md 并总结当前能力", path: "M4 4h5c2 0 3 1 3 3v13c0-2-1-3-3-3H4zM12 7c0-2 1-3 3-3h5v13h-5c-2 0-3 1-3 3" },
+    { title: "浏览源码", prompt: "查找 src 目录下的 TypeScript 文件", path: "M3 19V5h6l2 3h10v11zM3 11h18" },
+    { title: "定位符号", prompt: "搜索代码中所有 ProviderError 的位置", path: "M16 10a6 6 0 1 1-12 0 6 6 0 0 1 12 0zm-1.5 4.5L20 20" },
 ];
-export function MessageList({ messages, currentRunStartedAtMs, onSuggestion, executablePlanMessageId, planActionDisabled, onExecutePlan, }: MessageListProps) {
+export function MessageList({ suggestionBudget, messages, currentRunStartedAtMs, onSuggestion, executablePlanMessageId, planActionDisabled, onExecutePlan, }: MessageListProps) {
     const actions = useRef({ onExecutePlan });
     useEffect(() => { actions.current = { onExecutePlan }; }, [onExecutePlan]);
     const executePlan = useCallback((id: string) => actions.current.onExecutePlan(id), []);
@@ -105,11 +106,11 @@ export function MessageList({ messages, currentRunStartedAtMs, onSuggestion, exe
             return;
         followsLatestRef.current = true;
         setFollowsLatest(true);
-        viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" });
+        viewport.scrollTo({ top: viewport.scrollHeight, behavior: "instant" });
     }
     return (<div className="messageRegion">
       <div ref={viewportRef} className="messageViewport" onScroll={handleScroll} role="log" aria-live="polite" aria-label="对话消息">
-        {messages.length === 0 ? (<EmptyConversation onSuggestion={onSuggestion}/>) : (<div className="messageStack">
+        {messages.length === 0 ? (<EmptyConversation suggestionBudget={suggestionBudget} onSuggestion={onSuggestion}/>) : (<div className="messageStack">
             {messages.map((message) => (<MessageItem key={message.id} message={message} currentRunStartedAtMs={message.state === "streaming" ? currentRunStartedAtMs : undefined} executablePlan={message.id === executablePlanMessageId} planActionDisabled={message.id === executablePlanMessageId && planActionDisabled} onExecutePlan={executePlan}/>))}
           </div>)}
       </div>
@@ -129,7 +130,7 @@ const MessageItem = memo(function MessageItem({ message, currentRunStartedAtMs, 
 }) {
     return (<article className={`message message--${message.role}`}>
                 <div className="messageIdentity" aria-hidden="true">
-                  {message.role === "assistant" ? "OC" : "你"}
+                  {message.role === "assistant" ? <span className="orbitMark" /> : "你"}
                 </div>
                 <div className="messageContent">
                   <div className="messageMeta">
@@ -326,23 +327,28 @@ function cacheUsageLabel(usage: Extract<TokenUsageEvent["cumulative"], {
     });
     return ` · 缓存：${usage.promptCache.cachedTokens.toLocaleString()} Token（${formatted}%）`;
 }
-function EmptyConversation({ onSuggestion }: {
+function EmptyConversation({ onSuggestion, suggestionBudget = Infinity }: {
+    readonly suggestionBudget?: number;
     readonly onSuggestion: (value: string) => void;
 }) {
-    return (<div className="emptyConversation">
-      <div className="emptyMark" aria-hidden="true"><span /><span /><span /></div>
-      <p className="emptyEyebrow">思考、规划，然后动手。</p>
-      <h1>从一个任务开始。</h1>
-      <p className="emptyDescription">
-        把想法变成代码。选择一个项目，描述你的任务，剩下的交给 OrbitCode。
-      </p>
-      <div className="suggestionGrid" role="group" aria-label="示例问题">
-        {suggestions.map((suggestion) => (<button key={suggestion} type="button" onClick={() => onSuggestion(suggestion)}>
-            <span>{suggestion}</span>
-            <ArrowIcon />
-          </button>))}
-      </div>
-    </div>);
+    return (
+        <div className="emptyConversation">
+            <div className="emptyIntro">
+                <div className="emptyMark" aria-hidden="true"><span className="orbitMark" /></div>
+                <h2>从一个任务开始</h2>
+                <p className="emptyDescription">选定工作区后，告诉 OrbitCode 你想了解或修改什么。</p>
+            </div>
+            <div className="suggestionGrid" role="group" aria-label="示例问题">
+                {suggestions.map(({ title, prompt, path }) => (
+                    <button key={title} type="button" disabled={prompt.length > suggestionBudget} onClick={() => onSuggestion(prompt)}>
+                        <span className="suggestionIcon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d={path} /></svg></span>
+                        <span className="suggestionText"><strong>{title}</strong><span>{prompt}</span></span>
+                        <ArrowIcon />
+                    </button>
+                ))}
+            </div>
+        </div>
+    );
 }
 function stopReasonLabel(reason: StoppedEvent["reason"]): string {
     if (reason === "final-response")

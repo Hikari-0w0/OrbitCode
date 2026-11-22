@@ -1,5 +1,6 @@
 "use client";
-import { useState } from "react";
+import { useCallback, useState } from "react";
+import { MAX_WEB_CHAT_INPUT_LENGTH } from "@/web/chat-contract";
 import { useChatWorkspace } from "./use-chat-workspace";
 import { WorkspaceShell } from "./workspace-shell";
 import { ManagementPanel } from "./management-panel";
@@ -18,10 +19,22 @@ import { ConversationBackgroundPanel } from "./conversation-background-panel";
 import { ConversationCleanupPanel } from "./conversation-cleanup-panel";
 import { ThemeControl } from "./theme-control";
 import { Popover } from "./ui/popover";
+const managementViews = [
+    { id: "agents", path: "M12 5v5m0 0H5v4m7-4h7v4M9 3h6v3H9zM2 14h6v5H2z m14 0h6v5h-6z" },
+    { id: "skills", path: "m13 2-9 12h7l-1 8 10-12h-7l1-8z" },
+    { id: "background", path: "M5 3h14v18H5zM9 8h6m-6 4h6m-6 4h4" },
+    { id: "cleanup", path: "M3 12a9 9 0 1 1 2 5.7M3 7v5h5m4-5v5l3 2" },
+] as const;
+const settingsLinks = [
+    ["models", "模型"], ["workspaces", "工作区"], ["knowledge", "知识检索"],
+    ["mcp", "MCP"], ["runtime", "运行偏好"], ["recovery", "配置恢复"], ["appearance", "外观"],
+] as const;
 const managementNames: Record<ManagementView, string> = { agents: "子 Agent 与任务", skills: "Skills", background: "背景与记忆", cleanup: "历史清理", environment: "工作环境与权限" };
 export function ChatWorkspace() {
     const chat = useChatWorkspace();
     const { session } = chat;
+    const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
+    const closeNavigation = useCallback(() => setMobileNavigationOpen(false), []);
     const [panel, setPanel] = useState<ManagementView>();
     const agentTasks = useAgentTasks(session.conversationId, panel === "agents", chat.isStreaming);
     const [panelDirty, setPanelDirty] = useState(false);
@@ -32,29 +45,75 @@ export function ChatWorkspace() {
         setDiscardPanel(true);
     else
         setPanel(undefined); }
-    const navigation = <><div className="brandBlock"><span className="brandSymbol" aria-hidden="true">◎</span><strong>OrbitCode</strong><span className="localBadge">LOCAL</span></div>
-    <ConversationList conversations={chat.conversations} selectedId={session.conversationId} disabled={chat.isStreaming || chat.conversationState !== "ready"} actionsDisabled={chat.catalogState !== "ready"} onSelect={id => void chat.loadConversation(id)} onCreate={() => void chat.createConversation(session.selectedWorkspaceId, session.selectedProvider)} onRename={() => void chat.renameConversation()} onDelete={() => void chat.deleteConversation()}/>
-    <nav className="sidebarTools" aria-label="工作台管理"><span className="sectionLabel">工作台</span>{(["agents", "skills", "background", "cleanup"] as const).map(view => <button key={view} type="button" onClick={() => setPanel(view)}><span aria-hidden="true">{view === "skills" ? "◇" : view === "background" ? "▤" : "◷"}</span>{managementNames[view]}</button>)}<details className="settingsMenu"><summary>设置</summary>{([['models', '模型'], ['workspaces', '工作区'], ['mcp', 'MCP'], ['runtime', '运行偏好'], ['recovery', '配置恢复'], ['appearance', '外观']] as const).map(([id, name]) => <button key={id} type="button" onClick={() => void chat.openSettings(id)}>{name}</button>)}</details></nav>
-    <div className="sidebarBottom"><ThemeControl /><p><span className="statusDot"/> 本地工作区 · 安全边界由服务端执行</p></div></>;
-    return <WorkspaceShell navigation={navigation}><section className="chatPanel" aria-label="OrbitCode 对话工作区">
+    function openPanel(view: ManagementView) {
+        closeNavigation();
+        setPanel(view);
+    }
+
+    const status = chat.isStreaming
+        ? session.requestState === "stopping" ? "正在停止" : "Agent 运行中"
+        : chat.catalogState === "loading" ? "正在加载"
+            : availability.kind === "blocked" ? "暂不可发送" : "准备就绪";
+
+    const navigation = <>
+        <div className="brandBlock"><span className="orbitMark brandSymbol" aria-hidden="true" /><strong>OrbitCode</strong></div>
+        <ConversationList
+            conversations={chat.conversations}
+            selectedId={session.conversationId}
+            disabled={chat.isStreaming || chat.conversationState !== "ready"}
+            actionsDisabled={chat.catalogState !== "ready"}
+            onSelect={id => { closeNavigation(); void chat.loadConversation(id); }}
+            onCreate={() => { closeNavigation(); void chat.createConversation(session.selectedWorkspaceId, session.selectedProvider); }}
+            onRename={() => void chat.renameConversation()}
+            onDelete={() => void chat.deleteConversation()}
+        />
+        <nav className="sidebarTools" aria-label="工作台管理">
+            <span className="sectionLabel">工作台</span>
+            {managementViews.map(view => (
+                <button key={view.id} type="button" onClick={() => openPanel(view.id)}>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d={view.path} /></svg>
+                    {managementNames[view.id]}
+                </button>
+            ))}
+            <details className="settingsMenu">
+                <summary>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16M8 5v4m8 1v4m-6 1v4" /></svg>
+                    设置
+                    <svg className="settingsChevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m7 8 3 3 3-3" /></svg>
+                </summary>
+                <div>{settingsLinks.map(([id, name]) => (
+                    <button key={id} type="button" onClick={() => { closeNavigation(); void chat.openSettings(id); }}>{name}</button>
+                ))}</div>
+            </details>
+        </nav>
+        <div className="sidebarBottom"><ThemeControl /></div>
+    </>;
+    return <WorkspaceShell navigation={navigation} mobileNavigationOpen={mobileNavigationOpen} onCloseNavigation={closeNavigation}>
+    <section className="chatPanel" aria-label="OrbitCode 对话工作区">
     <header className="chatHeader">
+      <button className="mobileNavigationButton" type="button" aria-label="打开会话与工作台" aria-haspopup="dialog" onClick={() => setMobileNavigationOpen(true)}>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M9 5v14" /></svg>
+      </button>
       <div className="headerTitle">
-        <h1>{title}</h1>
+        <h1 title={title}>{title}</h1>
         <div className="environmentBar">
-          <button type="button" onClick={() => setPanel("environment")}>
+          <button type="button" onClick={() => openPanel("environment")} aria-haspopup="dialog">
             <span>{chat.workspaces.find(item => item.id === session.selectedWorkspaceId)?.name ?? "选择工作区"} / {chat.currentProvider?.displayName ?? chat.currentProvider?.name ?? "选择模型"}</span>
-            <span aria-hidden="true">⌄</span>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg>
           </button>
           <span className="permissionBadge" aria-label="执行策略">自主执行</span>
         </div>
       </div>
       <div className="headerActions"><AgentTaskIndicator count={agentTasks.count} onOpen={()=>setPanel("agents")}/>
-        <span className="connectionState" role="status"><i />{chat.isStreaming ? session.requestState === "stopping" ? "正在停止" : "Agent 运行中" : chat.catalogState === "ready" ? "准备就绪" : "等待配置"}</span>
+        <span className="connectionState" data-state={chat.isStreaming ? "running" : availability.kind} role="status"><i />{status}</span>
         <Popover className="conversationMenu" label="•••" accessibleLabel="会话操作"><div><button type="button" onClick={() => void chat.renameConversation()} disabled={chat.controlsDisabled}>重命名</button><button className="exportButton" type="button" aria-label="导出完整对话" disabled={chat.conversationExporting || chat.isStreaming || !session.conversationId} onClick={() => void chat.exportConversation()}>{chat.conversationExporting ? "导出中…" : "导出对话"}</button><button type="button" onClick={() => void chat.clearConversation()} disabled={chat.isStreaming || !session.messages.length}>清空</button><button type="button" className="dangerText" onClick={() => void chat.deleteConversation()} disabled={chat.controlsDisabled}>删除会话</button></div></Popover>
       </div>
     </header>
     <div className="noticeSlot"><EnvironmentStatus availability={availability} detail={chat.notice} onSettings={() => void chat.openSettings()} onReload={chat.reload} onRetry={() => void chat.retryUnsavedTurn()}/>{chat.skillRunStatus && <p className="skillRunStatus" role="status">{chat.skillRunStatus}</p>}</div>
-    <MessageList messages={session.messages} currentRunStartedAtMs={chat.isStreaming ? chat.runStartedAt : undefined} onSuggestion={chat.changeDraft} executablePlanMessageId={session.executablePlanMessageId} planActionDisabled={chat.controlsDisabled} onExecutePlan={chat.executePlan}/>
+    <MessageList key={session.conversationId} suggestionBudget={availability.kind === "ready" ? MAX_WEB_CHAT_INPUT_LENGTH - session.draft.length - (session.draft ? 1 : 0) : 0} messages={session.messages} currentRunStartedAtMs={chat.isStreaming ? chat.runStartedAt : undefined} onSuggestion={suggestion => {
+        chat.changeDraft(session.draft ? `${session.draft}\n${suggestion}` : suggestion);
+        document.getElementById("chat-input")?.focus();
+    }} executablePlanMessageId={session.executablePlanMessageId} planActionDisabled={chat.controlsDisabled} onExecutePlan={chat.executePlan}/>
     <div className="inputDock">
       <ChatComposer
         value={session.draft}

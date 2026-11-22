@@ -73,7 +73,7 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# 考核题目与本地提交物
+# 本地资料与构建产物
 /推免考核题目学生版.pdf
 /submission/
 /*.mp4

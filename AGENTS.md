@@ -1,6 +1,6 @@
 # OrbitCode
 
-OrbitCode 是一个使用 TypeScript 自主实现的本地编程智能体。Web 与 CLI 共用 Agent Loop、本地工具、权限、上下文管理与会话持久化；CLI 独立运行并提供终端交互、会话管理和记录导出。Agent 核心保持为与页面组件解耦的 TypeScript 模块，Next.js App Router 负责 Web 入口。
+OrbitCode 是一个个人维护的本地编程智能体，使用 TypeScript 自主实现。Web 与 CLI 共用 Agent Loop、本地工具、权限、上下文管理与会话持久化；CLI 独立运行并提供终端交互、会话管理和记录导出。Agent 核心保持为与页面组件解耦的 TypeScript 模块，Next.js App Router 负责 Web 入口。
 
 ## 沟通与代码风格
 
@@ -10,7 +10,7 @@ OrbitCode 是一个使用 TypeScript 自主实现的本地编程智能体。Web 
 - 优先小而清晰的模块；页面组件只负责展示与交互，不承载 Agent 循环、工具执行等核心逻辑。
 - 命名应体现领域含义，例如 `conversation`、`toolCall`、`agentLoop`、`executionResult`，避免含糊缩写。
 
-## 题目硬性约束
+## 架构与安全原则
 
 - 不得使用 LangChain、LlamaIndex、OpenAI Agents SDK、Claude Agent SDK、AutoGen、CrewAI 等 Agent 框架或 SDK。
 - 可以使用模型厂商 API 客户端、OpenAI 兼容接口及模型原生 Tool Calling。
@@ -94,6 +94,5 @@ Agent 主流程可运行后，使用 tmux 做真实端到端测试：
 
 - 本文件必须保持为仓库根目录的 `AGENTS.md`，以便 Codex 在新任务中自动加载；不要改名为 `Claude.md` 或 `CLAUDE.md`。
 - 保留清晰、可解释的提交历史，不重写已经推送的历史。
-- 不提交 `.env.local`、日志、测试截图、视频、压缩包和题目 PDF。
+- 不提交 `.env.local`、日志、测试截图、视频、压缩包和本地资料。
 - 不修改或删除用户已有的无关变更。
-- 截止时间后不得继续向提交仓库推送。
