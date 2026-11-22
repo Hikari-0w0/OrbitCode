@@ -28,7 +28,7 @@ export function SettingsPanel({ initialSection = "models" }: {
         return; setSection(id); window.history.replaceState(null, "", `/settings?section=${id}`); }
     const { state } = controller;
     return <main className="settingsPage"><header className="settingsHeader"><div><button type="button" className="backButton" disabled={controller.busy} onClick={async () => { if (await controller.confirmLeave())
-        router.push("/"); }}>← 返回对话</button><h1>设置</h1><p>把工作环境调整到顺手的状态。配置变更从下一轮生效。</p></div></header><div className="settingsLayout"><nav className="settingsNavigation" aria-label="设置分类">{sections.map(item => <button key={item.id} type="button" aria-current={section === item.id ? "page" : undefined} disabled={controller.busy} onClick={() => void navigate(item.id)}>{item.label}</button>)}</nav><div className="settingsContent" onChangeCapture={event => { if (event.target instanceof Element && event.target.closest("form"))
+        router.push("/"); }}>← 返回对话</button><h1>设置</h1><p>配置变更从下一轮生效。</p></div></header><div className="settingsLayout"><nav className="settingsNavigation" aria-label="设置分类">{sections.map(item => <button key={item.id} type="button" aria-current={section === item.id ? "page" : undefined} disabled={controller.busy} onClick={() => void navigate(item.id)}>{item.label}</button>)}</nav><div className="settingsContent" onChangeCapture={event => { if (event.target instanceof Element && event.target.closest("form"))
         controller.setDirty(true); }}>
     {controller.notice && <p className="settingsNotice" role="status">{controller.notice}</p>}
     {state.kind === "loading" && <p role="status">正在加载设置…</p>}

@@ -13,7 +13,7 @@
 | 功能设计及各阶段验收 | [规格目录](specs/README.md) |
 | 子 Agent 范围与限制 | [子 Agent 交付状态](specs/sub-agents/delivery-status.md) |
 | 本次清理及检查结果 | [收尾整理记录](evals/repository-closeout-2026-10-22.md) |
-| 早期项目基线及考核交付 | [历史基线](project-baseline-2026-09-16.md)、[归档目录](archive/README.md) |
+| 项目历史 | [历史基线](project-baseline-2026-09-16.md)、[归档目录](archive/README.md) |
 
 规格、阶段评测和归档保留原始设计、失败分布与版本背景，其中旧审批流程、完成报告工具和测试数字可能已经被后续实现替代。阅读历史材料时先检查日期及后续条款；历史未勾选项不能直接视为当前功能缺失，历史通过项也不能代替当前版本的验证。
 
