@@ -22,6 +22,7 @@ import type {
   ModelToolCall,
   PromptCacheUsage,
 } from "@/models/provider";
+import { isProviderFailure } from "@/models/provider-failure";
 import type {
   ConversationCheckpoint,
   ConversationSummary,
@@ -812,6 +813,7 @@ function parseModelProgress(
     ...(value.traceId === undefined ? [] : ["traceId"]),
     ...(value.toolName === undefined ? [] : ["toolName"]),
     ...(value.toolArgumentsChars === undefined ? [] : ["toolArgumentsChars"]),
+    ...(value.failure === undefined ? [] : ["failure"]),
   ];
   if (
     !hasExactFields(value, fields) ||
@@ -827,7 +829,8 @@ function parseModelProgress(
       (typeof value.traceId !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(value.traceId))) ||
     (value.toolName !== undefined && !isSafeToolName(value.toolName)) ||
     (value.toolArgumentsChars !== undefined &&
-      !isNonNegativeInteger(value.toolArgumentsChars, MAX_TOOL_ARGUMENTS_JSON_CHARS))
+      !isNonNegativeInteger(value.toolArgumentsChars, MAX_TOOL_ARGUMENTS_JSON_CHARS)) ||
+    (value.failure !== undefined && !isProviderFailure(value.failure))
   ) throw invalidEvent();
   return value as NonNullable<Extract<WebChatEvent, { type: "progress" }>["model"]>;
 }
