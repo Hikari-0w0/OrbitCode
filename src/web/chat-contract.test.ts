@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { describeProviderFrame } from "@/models/provider-failure";
 test("父级契约只接受明确版本和分工，不接受模型自定义范围",()=>{const base={conversationId:"conversation",revision:0,permissionSessionId:"permission",mode:"do",modeTurn:1,input:"委派"};assert.deepEqual(parseWebChatRequest({...base,parentExecution:{version:1,mode:"delegate-only"}}).parentExecution,{version:1,mode:"delegate-only"});for(const parentExecution of [{version:2,mode:"delegate-only"},{version:1,mode:"auto"},{version:1,mode:"delegate-only",allow:["write_file"]}])assert.throws(()=>parseWebChatRequest({...base,parentExecution}));});
 
 import {
@@ -373,6 +374,37 @@ test("Web SSE 接受 unlimited、长迭代序号和运行时间停止", async ()
   const actual = [];
   for await (const event of parseWebChatEvents(stream)) actual.push(event);
   assert.deepEqual(actual, expected);
+});
+
+test("Web SSE 保留脱敏模型失败诊断并拒绝无效字段", async () => {
+  const failure = {
+    kind: "stream",
+    retryable: true,
+    action: "retry",
+    retryAfterMs: 500,
+    frame: describeProviderFrame("{", 1),
+  } as const;
+  const event = {
+    type: "progress",
+    iteration: 1,
+    maxIterations: 4,
+    phase: "model",
+    model: { stage: "waiting-done", elapsedMs: 250, attempt: 1, failure },
+  } satisfies WebChatEvent;
+  const stream = asAsync([encodeWebChatEvent(event)]);
+  assert.deepEqual(await collect(parseWebChatEvents(stream)), [event]);
+
+  for (const invalidFailure of [
+    null,
+    { ...failure, kind: ["stream"] },
+    { ...failure, message: "上游错误原文" },
+    { ...failure, frame: { ...failure.frame, reason: ["invalid-json"] } },
+    { ...failure, frame: { ...failure.frame, raw: "原始帧" } },
+  ]) {
+    const malformed = { ...event, model: { ...event.model, failure: invalidFailure } };
+    const bytes = Buffer.from(`data: ${JSON.stringify(malformed)}\n\n`);
+    await assert.rejects(collect(parseWebChatEvents(asAsync([bytes]))), WebChatContractError);
+  }
 });
 
 test("只接受安全的 Provider 摘要", () => {

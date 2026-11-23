@@ -1,10 +1,69 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { AgentSession } from "@/core/agent-loop";
+import { AgentLoop, type AgentSession } from "@/core/agent-loop";
 import type { AgentRunLogEntry } from "@/lib/local-agent-run-log";
+import { OpenAICompatibleProvider } from "@/models/openai-provider";
+import { createModeToolPolicy } from "@/tools/mode-policy";
+import { ToolRegistry } from "@/tools/registry";
+import { createWorkspaceBoundary } from "@/tools/workspace";
 import { parseWebChatEvents, readWebStream } from "@/web/chat-contract";
 import { streamAgentResponse } from "@/web/chat-handler";
+import { DONE_EVENT, startOpenAIMockServer, textDelta } from "../../tests/helpers/openai-mock";
+
+test("Web SSE 接收 HTTP 502 的重试进度和重试后的完整回复", async () => {
+  let requestCount = 0;
+  const reply = "重试成功";
+  const server = await startOpenAIMockServer(() => ++requestCount === 1
+    ? { status: 502 }
+    : { chunks: [{ data: textDelta(reply) + DONE_EVENT }] });
+  try {
+    const provider = new OpenAICompatibleProvider({
+      model: "fixture",
+      baseUrl: server.baseUrl,
+      apiKey: "fixture-key",
+      transport: { firstByteTimeoutMs: 2_000, idleTimeoutMs: 2_000, totalTimeoutMs: 5_000, maxRetries: 1 },
+    });
+    const registry = new ToolRegistry([]);
+    const workspace = await createWorkspaceBoundary(process.cwd());
+    const agent = new AgentLoop(provider, mode => createModeToolPolicy(registry, mode), workspace, {
+      maxIterations: 4,
+      promptEnvironment: {
+        workspace: { id: "test", name: "测试工作区" },
+        platform: process.platform,
+        currentDate: "2026-11-22",
+        timeZone: "Asia/Shanghai",
+        pathSemantics: "workspace-relative-posix",
+      },
+    });
+    const response = streamAgentResponse({
+      request: new Request("http://localhost/api/chat", { method: "POST" }),
+      agent,
+      input: "请回复",
+      mode: "do",
+      modeTurn: 1,
+    });
+    assert.ok(response.body);
+    const events = [];
+    for await (const event of parseWebChatEvents(readWebStream(response.body))) events.push(event);
+
+    assert.equal(server.requests.length, 2);
+    const failureIndex = events.findIndex(event => event.type === "progress" && event.model?.failure !== undefined);
+    const failedAttempt = events[failureIndex];
+    assert.ok(failedAttempt?.type === "progress" && failedAttempt.model);
+    assert.equal(failedAttempt.model.attempt, 1);
+    assert.deepEqual(failedAttempt.model.failure, { kind: "http", retryable: true, action: "retry", status: 502 });
+    const retryIndex = events.findIndex(event => event.type === "progress" && event.model?.attempt === 2);
+    const replyIndex = events.findIndex(event => event.type === "text-delta" && event.text === reply);
+    assert.ok(failureIndex < retryIndex && retryIndex < replyIndex);
+    const stopped = events.at(-1);
+    assert.ok(stopped?.type === "stopped");
+    assert.equal(stopped.reason, "final-response");
+    assert.equal(stopped.finalMessage?.content, reply);
+  } finally {
+    await server.close();
+  }
+});
 
 test("Web 流消费者取消会中止 Agent 并释放响应流", async () => {
   let observedAbort = false;

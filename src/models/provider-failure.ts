@@ -53,7 +53,8 @@ export function describeProviderFrame(data: string, eventIndex: number, serverEr
 
 export function isProviderFailure(value: unknown): value is ProviderFailure {
   if (!record(value) || Object.keys(value).some(key => !["kind", "retryable", "action", "status", "retryAfterMs", "frame"].includes(key))) return false;
-  if (!["network", "http", "protocol", "stream", "timeout", "budget", "cancelled"].includes(String(value.kind)) ||
+  if (typeof value.kind !== "string" ||
+    !["network", "http", "protocol", "stream", "timeout", "budget", "cancelled"].includes(value.kind) ||
     typeof value.retryable !== "boolean" || (value.action !== "retry" && value.action !== "stop")) return false;
   if (value.status !== undefined && (typeof value.status !== "number" || !Number.isInteger(value.status) || value.status < 100 || value.status > 599)) return false;
   if (value.retryAfterMs !== undefined && (typeof value.retryAfterMs !== "number" || !Number.isSafeInteger(value.retryAfterMs) || value.retryAfterMs < 0)) return false;
@@ -61,7 +62,7 @@ export function isProviderFailure(value: unknown): value is ProviderFailure {
   const frame = value.frame;
   return record(frame) && Object.keys(frame).length === FRAME_FIELDS.length + 3 &&
     Object.keys(frame).every(key => ["reason", "eventIndex", "chars", ...FRAME_FIELDS].includes(key)) &&
-    ["invalid-json", "invalid-chunk", "server-error"].includes(String(frame.reason)) &&
+    typeof frame.reason === "string" && ["invalid-json", "invalid-chunk", "server-error"].includes(frame.reason) &&
     typeof frame.eventIndex === "number" && Number.isSafeInteger(frame.eventIndex) && frame.eventIndex > 0 &&
     typeof frame.chars === "number" && Number.isSafeInteger(frame.chars) && frame.chars >= 0 &&
     FRAME_FIELDS.every(key => SHAPES.some(type => type === frame[key]));
